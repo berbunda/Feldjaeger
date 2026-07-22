@@ -1,0 +1,17 @@
+[package]
+name = "feldjaeger-ssh"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+description = "Backend-agnostic SSH transport library for Feldjaeger"
+readme = "README.md"
+
+[dependencies]
+russh = { version = "0.62.4", default-features = false, features = ["ring", "flate2", "rsa"] }
+tracing = "0.1.44"
+russh-sftp = "2.3.0"
+serde = { version = "1.0.229", features = ["derive"] }
+tokio = { version = "1.53.1", features = ["io-util", "net", "rt", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }

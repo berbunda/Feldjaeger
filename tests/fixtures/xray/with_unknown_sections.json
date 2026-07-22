@@ -1,0 +1,29 @@
+{
+  "log": {
+    "loglevel": "info"
+  },
+  "inbounds": [
+    {
+      "port": 8443,
+      "protocol": "vmess",
+      "settings": {}
+    }
+  ],
+  "outbounds": [
+    {
+      "protocol": "blackhole",
+      "tag": "block"
+    },
+    {
+      "protocol": "freedom",
+      "tag": "direct"
+    }
+  ],
+  "customExperimentalModule": {
+    "enabled": true,
+    "options": {
+      "mode": "beta"
+    }
+  },
+  "legacyFeatureFlag": false
+}
