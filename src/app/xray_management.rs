@@ -8,8 +8,8 @@ use crate::app::connection_test::build_connect_request;
 use crate::logging::redact::{sanitize_detail, user_message_see_log};
 use crate::storage::StoredConnectionProfile;
 use crate::xray::{
-    DiscoveryState, InitSystemKind, InstallerError, InstallerErrorKind, XrayInstallation,
-    XrayInstaller,
+    AvailableVersions, DiscoveryState, InitSystemKind, InstallChannel, InstallerError,
+    InstallerErrorKind, XrayInstallation, XrayInstaller, version_gt,
 };
 
 /// Binary lifecycle operation requested from the Xray Management page.
@@ -42,17 +42,37 @@ impl XrayLifecycleOperation {
         }
     }
 
-    /// Confirmation dialog body.
+    /// Confirmation dialog body for the selected channel and target tag.
     pub fn confirmation_prompt(
         self,
+        channel: InstallChannel,
         current_version: Option<&str>,
-        available_version: Option<&str>,
+        target_version: Option<&str>,
     ) -> String {
+        let channel_label = match channel {
+            InstallChannel::Stable => "stable",
+            InstallChannel::Beta => "beta",
+        };
         match self {
-            Self::Install => "Install Xray?".to_owned(),
-            Self::Update => match (current_version, available_version) {
-                (Some(from), Some(to)) => format!("Update Xray from version {from} to {to}?"),
-                _ => "Update Xray?".to_owned(),
+            Self::Install => match target_version {
+                Some(to) if channel == InstallChannel::Beta => {
+                    format!(
+                        "Install Xray (beta) version {to}? Warning: pre-release may be unstable."
+                    )
+                }
+                Some(to) => format!("Install Xray ({channel_label}) version {to}?"),
+                None => format!("Install Xray ({channel_label})?"),
+            },
+            Self::Update => match (current_version, target_version) {
+                (Some(from), Some(to)) if channel == InstallChannel::Beta => {
+                    format!(
+                        "Update Xray from {from} to {to} (beta)? Warning: pre-release may be unstable."
+                    )
+                }
+                (Some(from), Some(to)) => {
+                    format!("Update Xray from {from} to {to} ({channel_label})?")
+                }
+                _ => format!("Update Xray ({channel_label})?"),
             },
             Self::Remove => {
                 "Remove Xray?\nConfiguration files will be preserved.".to_owned()
@@ -114,8 +134,18 @@ pub struct XrayManagementPageModel {
     pub status: InstallationStatus,
     /// Current installed version when known.
     pub current_version: Option<String>,
-    /// Latest available version from GitHub (when checked).
+    /// Selected release channel (session-only).
+    pub channel: InstallChannel,
+    /// Latest stable tag from Check versions.
+    pub available_stable: Option<String>,
+    /// Beta/`--beta` candidate tag from Check versions.
+    pub available_beta: Option<String>,
+    /// Tag for the selected channel (convenience for confirms).
     pub available_version: Option<String>,
+    /// Stable probe error detail when present.
+    pub stable_error: Option<String>,
+    /// Beta probe error detail when present.
+    pub beta_error: Option<String>,
     /// Binary path when known.
     pub binary_path: Option<String>,
     /// systemd unit name when known.
@@ -132,8 +162,10 @@ pub struct XrayManagementPageModel {
     pub can_remove: bool,
     /// Whether a version check may be started.
     pub can_check_version: bool,
-    /// Explanation when actions are blocked.
+    /// Explanation when actions are blocked (discovery / unsupported).
     pub blocked_reason: Option<&'static str>,
+    /// Channel-specific hint (empty candidate / already latest).
+    pub channel_hint: Option<&'static str>,
     /// Current lifecycle operation state.
     pub lifecycle: XrayLifecycleState,
     /// Whether a version check is in flight.
@@ -163,8 +195,8 @@ pub struct XrayLifecycleOutcome {
 /// Outcome delivered from the version-check worker thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionCheckOutcome {
-    /// Parsed available version, or classified error.
-    pub result: Result<String, InstallerError>,
+    /// Dual-channel probe result, or SSH/setup failure before probing.
+    pub result: Result<AvailableVersions, InstallerError>,
 }
 
 /// Runs connect → install/update/remove → disconnect.
@@ -175,6 +207,7 @@ pub async fn run_xray_lifecycle<B>(
     installer: &XrayInstaller,
     snapshot: &LifecycleDiscoverySnapshot,
     operation: XrayLifecycleOperation,
+    channel: InstallChannel,
 ) -> XrayLifecycleOutcome
 where
     B: SshBackend,
@@ -184,10 +217,10 @@ where
 
     match operation {
         XrayLifecycleOperation::Install => {
-            info!(target: "app", "Starting Xray installation");
+            info!(target: "app", channel = ?channel, "Starting Xray installation");
         }
         XrayLifecycleOperation::Update => {
-            info!(target: "app", "Starting Xray update");
+            info!(target: "app", channel = ?channel, "Starting Xray update");
         }
         XrayLifecycleOperation::Remove => {
             info!(target: "app", "Starting Xray removal");
@@ -216,11 +249,16 @@ where
     let result = match operation {
         XrayLifecycleOperation::Install => {
             installer
-                .install(&session, snapshot.init_system, snapshot.installed)
+                .install(
+                    &session,
+                    snapshot.init_system,
+                    snapshot.installed,
+                    channel,
+                )
                 .await
         }
         XrayLifecycleOperation::Update => match &snapshot.installation {
-            Some(installation) => installer.update(&session, installation).await,
+            Some(installation) => installer.update(&session, installation, channel).await,
             None => Err(InstallerError::new(
                 InstallerErrorKind::CommandFailed,
                 "Xray is not installed.",
@@ -273,7 +311,7 @@ where
     XrayLifecycleOutcome { operation, result }
 }
 
-/// Runs connect → available_version → disconnect.
+/// Runs connect → available_versions → disconnect.
 pub async fn run_version_check<B>(
     backend: &B,
     profile: &StoredConnectionProfile,
@@ -298,7 +336,7 @@ where
         }
     };
 
-    let result = installer.available_version(&session).await;
+    let versions = installer.available_versions(&session).await;
 
     if let Err(error) = session.disconnect().await {
         warn!(
@@ -308,7 +346,9 @@ where
         );
     }
 
-    VersionCheckOutcome { result }
+    VersionCheckOutcome {
+        result: Ok(versions),
+    }
 }
 
 /// Maps an installer error to a short user-facing Status Bar message.
@@ -335,10 +375,21 @@ pub fn user_facing_installer_error(error: &InstallerError) -> String {
 pub fn build_xray_management_page_model(
     discovery: &DiscoveryState,
     lifecycle: &XrayLifecycleState,
-    available_version: Option<&str>,
+    channel: InstallChannel,
+    available: &AvailableVersions,
     version_check_busy: bool,
 ) -> XrayManagementPageModel {
     let busy = lifecycle.is_busy() || version_check_busy;
+    let selected_tag = available.tag_for(channel).map(str::to_owned);
+    let (can_use_tag, channel_hint) = channel_action_gate(
+        channel,
+        available,
+        match discovery {
+            DiscoveryState::Succeeded(installation) => installation.version.as_deref(),
+            _ => None,
+        },
+        matches!(discovery, DiscoveryState::Succeeded(_)),
+    );
 
     match discovery {
         DiscoveryState::Succeeded(installation) => {
@@ -346,7 +397,12 @@ pub fn build_xray_management_page_model(
             XrayManagementPageModel {
                 status: InstallationStatus::Installed,
                 current_version: installation.version.clone(),
-                available_version: available_version.map(str::to_owned),
+                channel,
+                available_stable: available.stable.clone(),
+                available_beta: available.beta.clone(),
+                available_version: selected_tag,
+                stable_error: available.stable_error.clone(),
+                beta_error: available.beta_error.clone(),
                 binary_path: installation
                     .binary_path
                     .as_ref()
@@ -355,7 +411,7 @@ pub fn build_xray_management_page_model(
                 config_path: Some(installation.config_source.label()),
                 init_system: Some(installation.init_system),
                 can_install: false,
-                can_update: supported && !busy,
+                can_update: supported && !busy && can_use_tag,
                 can_remove: supported && !busy,
                 can_check_version: !busy,
                 blocked_reason: if supported {
@@ -363,6 +419,7 @@ pub fn build_xray_management_page_model(
                 } else {
                     Some("Unsupported init system for Xray lifecycle management.")
                 },
+                channel_hint,
                 lifecycle: lifecycle.clone(),
                 version_check_busy,
             }
@@ -372,12 +429,17 @@ pub fn build_xray_management_page_model(
             XrayManagementPageModel {
                 status: InstallationStatus::NotInstalled,
                 current_version: None,
-                available_version: available_version.map(str::to_owned),
+                channel,
+                available_stable: available.stable.clone(),
+                available_beta: available.beta.clone(),
+                available_version: selected_tag,
+                stable_error: available.stable_error.clone(),
+                beta_error: available.beta_error.clone(),
                 binary_path: None,
                 service_name: None,
                 config_path: None,
                 init_system: Some(*init_system),
-                can_install: supported && !busy,
+                can_install: supported && !busy && can_use_tag,
                 can_update: false,
                 can_remove: false,
                 can_check_version: !busy,
@@ -386,6 +448,7 @@ pub fn build_xray_management_page_model(
                 } else {
                     Some("Unsupported init system for Xray lifecycle management.")
                 },
+                channel_hint,
                 lifecycle: lifecycle.clone(),
                 version_check_busy,
             }
@@ -395,7 +458,12 @@ pub fn build_xray_management_page_model(
         | DiscoveryState::Failed { .. } => XrayManagementPageModel {
             status: InstallationStatus::Unknown,
             current_version: None,
-            available_version: available_version.map(str::to_owned),
+            channel,
+            available_stable: available.stable.clone(),
+            available_beta: available.beta.clone(),
+            available_version: selected_tag,
+            stable_error: available.stable_error.clone(),
+            beta_error: available.beta_error.clone(),
             binary_path: None,
             service_name: None,
             config_path: None,
@@ -405,9 +473,45 @@ pub fn build_xray_management_page_model(
             can_remove: false,
             can_check_version: false,
             blocked_reason: Some("Run discovery on the Connection page first."),
+            channel_hint: None,
             lifecycle: lifecycle.clone(),
             version_check_busy,
         },
+    }
+}
+
+/// Whether Install/Update may use the selected channel tag, plus optional hint.
+fn channel_action_gate(
+    channel: InstallChannel,
+    available: &AvailableVersions,
+    current: Option<&str>,
+    installed: bool,
+) -> (bool, Option<&'static str>) {
+    let Some(tag) = available.tag_for(channel) else {
+        let hint = match channel {
+            InstallChannel::Beta => Some("No install candidate from GitHub releases list."),
+            InstallChannel::Stable => {
+                if available.stable_error.is_some() {
+                    Some("Stable version check failed — retry Check versions.")
+                } else {
+                    Some("Check versions first to enable Install/Update.")
+                }
+            }
+        };
+        return (false, hint);
+    };
+
+    if !installed {
+        return (true, None);
+    }
+
+    match current {
+        Some(cur) if version_gt(tag, cur) => (true, None),
+        Some(_) => (
+            false,
+            Some("Already on latest/newer for this channel."),
+        ),
+        None => (true, None),
     }
 }
 
@@ -453,14 +557,25 @@ mod tests {
         }
     }
 
+    fn versions(stable: Option<&str>, beta: Option<&str>) -> AvailableVersions {
+        AvailableVersions {
+            stable: stable.map(str::to_owned),
+            beta: beta.map(str::to_owned),
+            stable_error: None,
+            beta_error: None,
+        }
+    }
+
     #[test]
     fn page_model_blocks_install_when_installed() {
         let discovery =
             DiscoveryState::Succeeded(sample_installation(InitSystemKind::Systemd));
+        let available = versions(Some("26.3.31"), None);
         let model = build_xray_management_page_model(
             &discovery,
             &XrayLifecycleState::Idle,
-            Some("26.3.31"),
+            InstallChannel::Stable,
+            &available,
             false,
         );
         assert!(!model.can_install);
@@ -473,17 +588,38 @@ mod tests {
     }
 
     #[test]
-    fn page_model_allows_install_when_not_installed() {
+    fn page_model_update_requires_newer_tag() {
+        let discovery =
+            DiscoveryState::Succeeded(sample_installation(InitSystemKind::Systemd));
+        let available = versions(Some("26.3.27"), None);
+        let model = build_xray_management_page_model(
+            &discovery,
+            &XrayLifecycleState::Idle,
+            InstallChannel::Stable,
+            &available,
+            false,
+        );
+        assert!(!model.can_update);
+        assert_eq!(
+            model.channel_hint,
+            Some("Already on latest/newer for this channel.")
+        );
+    }
+
+    #[test]
+    fn page_model_allows_install_when_not_installed_with_tag() {
         let discovery = DiscoveryState::NotFound {
             operating_system: "Linux".to_owned(),
             architecture: "x86_64".to_owned(),
             init_system: InitSystemKind::Systemd,
             warnings: Vec::new(),
         };
+        let available = versions(Some("26.3.31"), None);
         let model = build_xray_management_page_model(
             &discovery,
             &XrayLifecycleState::Idle,
-            None,
+            InstallChannel::Stable,
+            &available,
             false,
         );
         assert!(model.can_install);
@@ -492,11 +628,35 @@ mod tests {
     }
 
     #[test]
+    fn page_model_beta_empty_disables_actions() {
+        let discovery = DiscoveryState::NotFound {
+            operating_system: "Linux".to_owned(),
+            architecture: "x86_64".to_owned(),
+            init_system: InitSystemKind::Systemd,
+            warnings: Vec::new(),
+        };
+        let available = versions(Some("26.3.31"), None);
+        let model = build_xray_management_page_model(
+            &discovery,
+            &XrayLifecycleState::Idle,
+            InstallChannel::Beta,
+            &available,
+            false,
+        );
+        assert!(!model.can_install);
+        assert_eq!(
+            model.channel_hint,
+            Some("No install candidate from GitHub releases list.")
+        );
+    }
+
+    #[test]
     fn page_model_requires_discovery() {
         let model = build_xray_management_page_model(
             &DiscoveryState::Idle,
             &XrayLifecycleState::Idle,
-            None,
+            InstallChannel::Stable,
+            &AvailableVersions::default(),
             false,
         );
         assert_eq!(model.status, InstallationStatus::Unknown);
@@ -509,17 +669,29 @@ mod tests {
     #[test]
     fn confirmation_prompts() {
         assert_eq!(
-            XrayLifecycleOperation::Install.confirmation_prompt(None, None),
-            "Install Xray?"
+            XrayLifecycleOperation::Install.confirmation_prompt(
+                InstallChannel::Stable,
+                None,
+                Some("26.3.31")
+            ),
+            "Install Xray (stable) version 26.3.31?"
+        );
+        assert!(
+            XrayLifecycleOperation::Install
+                .confirmation_prompt(InstallChannel::Beta, None, Some("26.4.0-pre"))
+                .contains("beta")
         );
         assert_eq!(
-            XrayLifecycleOperation::Update
-                .confirmation_prompt(Some("1.0"), Some("2.0")),
-            "Update Xray from version 1.0 to 2.0?"
+            XrayLifecycleOperation::Update.confirmation_prompt(
+                InstallChannel::Stable,
+                Some("1.0"),
+                Some("2.0")
+            ),
+            "Update Xray from 1.0 to 2.0 (stable)?"
         );
         assert!(
             XrayLifecycleOperation::Remove
-                .confirmation_prompt(None, None)
+                .confirmation_prompt(InstallChannel::Stable, None, None)
                 .contains("Configuration files will be preserved")
         );
     }

@@ -5,7 +5,7 @@
 //! external error string must be recorded, pass it through [`sanitize_detail`].
 
 /// Maximum number of Unicode scalar values retained in a sanitized detail.
-pub const MAX_DETAIL_CHARS: usize = 240;
+pub const MAX_DETAIL_CHARS: usize = 480;
 
 /// Redaction marker written in place of sensitive fragments.
 pub const REDACTED: &str = "[REDACTED]";
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn truncates_on_unicode_boundary() {
-        let input = "ё".repeat(300);
+        let input = "ё".repeat(MAX_DETAIL_CHARS + 50);
         let detail = sanitize_detail(&input);
         assert!(detail.ends_with('…'));
         assert_eq!(detail.chars().count(), MAX_DETAIL_CHARS + 1);

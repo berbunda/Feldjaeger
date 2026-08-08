@@ -158,14 +158,55 @@ pub async fn remove_remote_file(
         .map_err(map_sftp_error)
 }
 
-pub async fn run_remote_command(
+/// Returns `true` when `path` exists and is a regular file.
+///
+/// Missing paths → `Ok(false)`. Non-file entries (dirs, etc.) → `Ok(false)`.
+pub async fn remote_path_is_file(
+    handle: &russh::client::Handle<super::handler::ClientHandler>,
+    path: &RemotePath,
+) -> SshResult<bool> {
+    let channel = handle
+        .channel_open_session()
+        .await
+        .map_err(map_russh_error)?;
+
+    channel
+        .request_subsystem(true, "sftp")
+        .await
+        .map_err(map_russh_error)?;
+
+    let sftp = SftpSession::new(channel.into_stream())
+        .await
+        .map_err(map_sftp_error)?;
+
+    match sftp.metadata(path.as_str()).await {
+        Ok(metadata) => Ok(metadata.file_type().is_file()),
+        Err(russh_sftp::client::error::Error::Status(status))
+            if status.status_code == russh_sftp::protocol::StatusCode::NoSuchFile =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(map_sftp_error(error)),
+    }
+}
+
+pub async fn run_remote_command_with_stdin(
     channel: &mut Channel<Msg>,
     payload: &str,
+    stdin: &[u8],
 ) -> SshResult<crate::exec::ExecResult> {
     channel
         .exec(true, payload.as_bytes())
         .await
         .map_err(map_russh_error)?;
+
+    if !stdin.is_empty() {
+        channel
+            .data(stdin)
+            .await
+            .map_err(map_russh_error)?;
+        channel.eof().await.map_err(map_russh_error)?;
+    }
 
     super::exec::collect_exec_output(channel).await
 }

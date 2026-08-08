@@ -9,6 +9,7 @@ use crate::app::{
     ApplicationService, InstallationStatus, XrayLifecycleOperation, XrayLifecycleState,
     XrayManagementPageModel,
 };
+use crate::xray::InstallChannel;
 
 /// Temporary dialog state stored in egui memory.
 #[derive(Clone, Default)]
@@ -40,6 +41,9 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     show_summary(ui, &model);
     ui.add_space(12.0);
 
+    show_channel(ui, service, &model);
+    ui.add_space(8.0);
+
     if let Some(reason) = model.blocked_reason {
         let color = if reason.contains("already installed") || reason.contains("Unsupported") {
             Color32::from_rgb(210, 170, 40)
@@ -47,6 +51,15 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
             Color32::from_rgb(140, 140, 140)
         };
         ui.label(RichText::new(reason).size(14.0).color(color));
+        ui.add_space(8.0);
+    }
+
+    if let Some(hint) = model.channel_hint {
+        ui.label(
+            RichText::new(hint)
+                .size(14.0)
+                .color(Color32::from_rgb(210, 170, 40)),
+        );
         ui.add_space(8.0);
     }
 
@@ -83,8 +96,13 @@ fn show_summary(ui: &mut Ui, model: &XrayManagementPageModel) {
             );
             row(
                 ui,
-                "Available version",
-                model.available_version.as_deref().unwrap_or("—"),
+                "Available (stable)",
+                model.available_stable.as_deref().unwrap_or("—"),
+            );
+            row(
+                ui,
+                "Available (beta)",
+                model.available_beta.as_deref().unwrap_or("—"),
             );
             row(
                 ui,
@@ -113,13 +131,38 @@ fn row(ui: &mut Ui, key: &str, value: &str) {
     ui.end_row();
 }
 
+fn show_channel(ui: &mut Ui, service: &mut ApplicationService, model: &XrayManagementPageModel) {
+    ui.strong("Release channel");
+    ui.add_space(4.0);
+    let busy = model.version_check_busy || model.lifecycle.is_busy();
+    let mut channel = service.install_channel();
+    ui.add_enabled_ui(!busy, |ui| {
+        ui.horizontal(|ui| {
+            ui.radio_value(&mut channel, InstallChannel::Stable, "Stable");
+            ui.radio_value(&mut channel, InstallChannel::Beta, "Beta");
+        });
+    });
+    if channel != service.install_channel() {
+        service.set_install_channel(channel);
+    }
+    if channel == InstallChannel::Beta {
+        ui.label(
+            RichText::new(
+                "Uses official install --beta (newest listed release with a matching download for this host; may be pre-release).",
+            )
+            .size(13.0)
+            .color(Color32::from_rgb(140, 140, 140)),
+        );
+    }
+}
+
 fn show_version_check(ui: &mut Ui, service: &mut ApplicationService, model: &XrayManagementPageModel) {
     ui.horizontal(|ui| {
         ui.strong("Version");
         let label = if model.version_check_busy {
             "Checking..."
         } else {
-            "Check available"
+            "Check versions"
         };
         let button = ui.add_enabled(model.can_check_version, egui::Button::new(label));
         if button.clicked()
@@ -131,14 +174,35 @@ fn show_version_check(ui: &mut Ui, service: &mut ApplicationService, model: &Xra
         }
     });
 
+    if model.stable_error.is_some() || model.beta_error.is_some() {
+        ui.add_space(4.0);
+        if let Some(err) = &model.stable_error {
+            ui.label(
+                RichText::new(format!("Stable check: {err}"))
+                    .size(13.0)
+                    .color(Color32::from_rgb(200, 60, 60)),
+            );
+        }
+        if let Some(err) = &model.beta_error {
+            ui.label(
+                RichText::new(format!("Beta check: {err}"))
+                    .size(13.0)
+                    .color(Color32::from_rgb(200, 60, 60)),
+            );
+        }
+    }
+
     if model.status == InstallationStatus::Installed
-        && let (Some(current), Some(available)) =
-            (&model.current_version, &model.available_version)
+        && let Some(current) = &model.current_version
     {
         ui.label(
-            RichText::new(format!("Installed:\n{current}\nAvailable:\n{available}"))
-                .size(13.0)
-                .color(Color32::from_rgb(140, 140, 140)),
+            RichText::new(format!(
+                "Installed:\n{current}\nStable:\n{}\nBeta:\n{}",
+                model.available_stable.as_deref().unwrap_or("—"),
+                model.available_beta.as_deref().unwrap_or("—"),
+            ))
+            .size(13.0)
+            .color(Color32::from_rgb(140, 140, 140)),
         );
     }
 }
@@ -160,6 +224,7 @@ fn show_actions(ui: &mut Ui, _service: &mut ApplicationService, model: &XrayMana
             let button = ui.add_enabled(enabled, egui::Button::new(operation.button_label()));
             if button.clicked() {
                 let prompt = operation.confirmation_prompt(
+                    model.channel,
                     model.current_version.as_deref(),
                     model.available_version.as_deref(),
                 );
@@ -224,7 +289,7 @@ fn show_confirm_dialog(
     egui::Window::new("Confirm")
         .collapsible(false)
         .resizable(false)
-        .default_size(Vec2::new(400.0, 140.0))
+        .default_size(Vec2::new(420.0, 160.0))
         .open(&mut open)
         .show(ui.ctx(), |ui| {
             ui.label(RichText::new(prompt).size(14.0));
@@ -239,7 +304,10 @@ fn show_confirm_dialog(
             }
             ui.add_space(12.0);
             ui.horizontal(|ui| {
-                if ui.button(operation.button_label()).clicked() {
+                if ui.button("Cancel").clicked() {
+                    close_dialog(ui);
+                }
+                if ui.button("Confirm").clicked() {
                     match service.start_xray_lifecycle(operation) {
                         Ok(()) => close_dialog(ui),
                         Err(message) => {
@@ -249,12 +317,8 @@ fn show_confirm_dialog(
                         }
                     }
                 }
-                if ui.button("Cancel").clicked() {
-                    close_dialog(ui);
-                }
             });
         });
-
     if !open {
         close_dialog(ui);
     }

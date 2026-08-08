@@ -965,6 +965,10 @@ mod tests {
             Err(SshError::new("not supported"))
         }
 
+        async fn path_is_file(&self, _path: &RemotePath) -> SshResult<bool> {
+            Ok(true)
+        }
+
         async fn exec(&self, command: &RemoteCommand) -> SshResult<ExecResult> {
             let key = Self::key(command.program(), command.args());
             self.exec_calls.lock().expect("lock").push(key.clone());
@@ -973,6 +977,15 @@ mod tests {
                 ExecResult::new(Vec::new(), format!("no mock for {key}").into_bytes(), 1)
             }))
         }
+
+    fn exec_with_stdin(
+        &self,
+        command: &feldjaeger_ssh::RemoteCommand,
+        stdin: &[u8],
+    ) -> impl Future<Output = feldjaeger_ssh::SshResult<feldjaeger_ssh::ExecResult>> + Send {
+        let _ = stdin;
+        self.exec(command)
+    }
 
         async fn disconnect(self) -> SshResult<()> {
             Ok(())

@@ -88,6 +88,102 @@ impl From<ServiceControlError> for AppError {
 /// Convenience alias for init-system service control results.
 pub type ServiceControlResult<T> = Result<T, ServiceControlError>;
 
+/// Classifies a failed unit-file Create/Edit operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnitFileErrorKind {
+    /// SSH connection could not be established or was lost.
+    SshConnectionFailed,
+    /// Remote user lacks permission (and no usable sudo).
+    PermissionDenied,
+    /// Config path mode bits fail DynamicUser/nobody readability preflight.
+    PreflightFailed,
+    /// Backup of the existing unit failed.
+    BackupFailed,
+    /// Writing the unit file failed.
+    WriteFailed,
+    /// `systemctl daemon-reload` failed.
+    DaemonReloadFailed,
+    /// `sudo -S` authentication or execution failed.
+    SudoFailed,
+    /// Init system is not systemd.
+    UnsupportedInitSystem,
+    /// Spec validation failed.
+    InvalidSpec,
+    /// A remote probe/command failed outside the kinds above.
+    CommandFailed,
+}
+
+impl UnitFileErrorKind {
+    /// Stable user-facing label (no secrets).
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::SshConnectionFailed => "SSH connection failed",
+            Self::PermissionDenied => "Permission denied",
+            Self::PreflightFailed => "Config path not readable for unit user",
+            Self::BackupFailed => "Unit backup failed",
+            Self::WriteFailed => "Unit file write failed",
+            Self::DaemonReloadFailed => "daemon-reload failed",
+            Self::SudoFailed => "sudo failed",
+            Self::UnsupportedInitSystem => "Unsupported init system",
+            Self::InvalidSpec => "Invalid unit specification",
+            Self::CommandFailed => "Remote command failed",
+        }
+    }
+}
+
+/// Error returned by unit-file authoring operations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitFileError {
+    kind: UnitFileErrorKind,
+    detail: String,
+}
+
+impl UnitFileError {
+    /// Creates an error with a classified kind and safe detail text.
+    pub fn new(kind: UnitFileErrorKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+
+    /// Error classification.
+    pub fn kind(&self) -> UnitFileErrorKind {
+        self.kind
+    }
+
+    /// Additional detail safe for UI (no passwords, keys, or secrets).
+    pub fn detail(&self) -> &str {
+        &self.detail
+    }
+
+    /// Combined message: kind label plus optional detail.
+    pub fn message(&self) -> String {
+        if self.detail.is_empty() {
+            self.kind.label().to_owned()
+        } else {
+            format!("{}: {}", self.kind.label(), self.detail)
+        }
+    }
+}
+
+impl fmt::Display for UnitFileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message())
+    }
+}
+
+impl std::error::Error for UnitFileError {}
+
+impl From<UnitFileError> for AppError {
+    fn from(error: UnitFileError) -> Self {
+        AppError::new(error.message())
+    }
+}
+
+/// Convenience alias for unit-file authoring results.
+pub type UnitFileResult<T> = Result<T, UnitFileError>;
+
 /// Classifies a `systemctl` failure from exit code and stderr text.
 pub fn classify_systemctl_failure(
     action: &str,

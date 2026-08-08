@@ -154,16 +154,59 @@ impl SshSession for RusshSession {
         }
     }
 
+    fn path_is_file(
+        &self,
+        path: &RemotePath,
+    ) -> impl std::future::Future<Output = SshResult<bool>> + Send {
+        let handle = Arc::clone(&self.handle);
+        let path = path.clone();
+        let remote_path = path.as_str().to_owned();
+
+        async move {
+            debug!(target: "ssh", path = %remote_path, "SSH path_is_file");
+            let handle = handle.lock().await;
+            match sftp::remote_path_is_file(&handle, &path).await {
+                Ok(is_file) => {
+                    debug!(
+                        target: "ssh",
+                        path = %remote_path,
+                        is_file,
+                        "SSH path_is_file completed"
+                    );
+                    Ok(is_file)
+                }
+                Err(error) => {
+                    warn!(
+                        target: "ssh",
+                        path = %remote_path,
+                        error = %error.message(),
+                        "SSH path_is_file failed"
+                    );
+                    Err(error)
+                }
+            }
+        }
+    }
+
     fn exec(
         &self,
         command: &RemoteCommand,
     ) -> impl std::future::Future<Output = SshResult<ExecResult>> + Send {
+        self.exec_with_stdin(command, &[])
+    }
+
+    fn exec_with_stdin(
+        &self,
+        command: &RemoteCommand,
+        stdin: &[u8],
+    ) -> impl std::future::Future<Output = SshResult<ExecResult>> + Send {
         let handle = Arc::clone(&self.handle);
         let command = command.clone();
         let program = command.program().to_owned();
+        let stdin = stdin.to_vec();
 
         async move {
-            debug!(target: "ssh", program = %program, "SSH exec");
+            debug!(target: "ssh", program = %program, stdin_bytes = stdin.len(), "SSH exec");
 
             let payload = exec::build_exec_payload(&command)?;
             let handle = handle.lock().await;
@@ -172,7 +215,8 @@ impl SshSession for RusshSession {
                 .await
                 .map_err(map_russh_error)?;
 
-            let result = sftp::run_remote_command(&mut channel, &payload).await?;
+            let result =
+                sftp::run_remote_command_with_stdin(&mut channel, &payload, &stdin).await?;
             debug!(
                 target: "ssh",
                 program = %program,

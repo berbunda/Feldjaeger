@@ -883,6 +883,14 @@ mod tests {
             future::ready(Ok(()))
         }
 
+        fn path_is_file(
+            &self,
+            path: &RemotePath,
+        ) -> impl Future<Output = SshResult<bool>> + Send {
+            let is_file = self.files.lock().unwrap().contains_key(path.as_str());
+            future::ready(Ok(is_file))
+        }
+
         fn exec(
             &self,
             command: &RemoteCommand,
@@ -910,6 +918,15 @@ mod tests {
             let result = simulate(self, command);
             future::ready(Ok(result))
         }
+
+    fn exec_with_stdin(
+        &self,
+        command: &feldjaeger_ssh::RemoteCommand,
+        stdin: &[u8],
+    ) -> impl Future<Output = feldjaeger_ssh::SshResult<feldjaeger_ssh::ExecResult>> + Send {
+        let _ = stdin;
+        self.exec(command)
+    }
 
         fn disconnect(self) -> impl Future<Output = SshResult<()>> + Send {
             future::ready(Ok(()))
@@ -1277,12 +1294,29 @@ mod tests {
             self.inner.remove_file(path)
         }
 
+        fn path_is_file(
+            &self,
+            path: &RemotePath,
+        ) -> impl Future<Output = SshResult<bool>> + Send {
+            self.inner.path_is_file(path)
+        }
+
         fn exec(
             &self,
             command: &RemoteCommand,
         ) -> impl Future<Output = SshResult<ExecResult>> + Send {
             self.inner.exec(command)
         }
+
+
+    fn exec_with_stdin(
+        &self,
+        command: &feldjaeger_ssh::RemoteCommand,
+        stdin: &[u8],
+    ) -> impl std::future::Future<Output = feldjaeger_ssh::SshResult<feldjaeger_ssh::ExecResult>> + Send {
+        let _ = stdin;
+        self.exec(command)
+    }
 
         fn disconnect(self) -> impl Future<Output = SshResult<()>> + Send {
             future::ready(Ok(()))

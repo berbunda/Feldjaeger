@@ -89,7 +89,13 @@ impl eframe::App for FeldjaegerApp {
         }
 
         egui::CentralPanel::default().show(ui, |ui| {
-            self.page.show(ui, &mut self.service);
+            // When the window is smaller than the page content, show scrollbars
+            // so fields/labels are not clipped outside the viewport.
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    self.page.show(ui, &mut self.service);
+                });
         });
 
         self.persist_ui_preferences(ui.ctx(), sidebar_response.response.rect.width());

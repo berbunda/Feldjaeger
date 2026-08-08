@@ -332,6 +332,14 @@ mod tests {
             future::ready(Ok(()))
         }
 
+        fn path_is_file(
+            &self,
+            path: &RemotePath,
+        ) -> impl Future<Output = feldjaeger_ssh::SshResult<bool>> + Send {
+            let is_file = self.files.lock().unwrap().contains_key(path.as_str());
+            future::ready(Ok(is_file))
+        }
+
         fn exec(
             &self,
             _command: &feldjaeger_ssh::RemoteCommand,
@@ -341,6 +349,15 @@ mod tests {
                 "exec not supported in mock session",
             )))
         }
+
+    fn exec_with_stdin(
+        &self,
+        command: &feldjaeger_ssh::RemoteCommand,
+        stdin: &[u8],
+    ) -> impl Future<Output = feldjaeger_ssh::SshResult<feldjaeger_ssh::ExecResult>> + Send {
+        let _ = stdin;
+        self.exec(command)
+    }
 
         fn disconnect(self) -> impl Future<Output = feldjaeger_ssh::SshResult<()>> + Send {
             future::ready(Ok(()))

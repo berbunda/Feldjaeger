@@ -329,9 +329,22 @@ mod tests {
             Err(SshError::new("not used"))
         }
 
+        async fn path_is_file(&self, _path: &RemotePath) -> SshResult<bool> {
+            Ok(true)
+        }
+
         async fn exec(&self, _command: &RemoteCommand) -> SshResult<ExecResult> {
             Err(SshError::new("not used"))
         }
+
+    fn exec_with_stdin(
+        &self,
+        command: &feldjaeger_ssh::RemoteCommand,
+        stdin: &[u8],
+    ) -> impl Future<Output = feldjaeger_ssh::SshResult<feldjaeger_ssh::ExecResult>> + Send {
+        let _ = stdin;
+        self.exec(command)
+    }
 
         async fn disconnect(self) -> SshResult<()> {
             self.disconnect_count.fetch_add(1, Ordering::SeqCst);

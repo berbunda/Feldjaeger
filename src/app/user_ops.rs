@@ -3,13 +3,16 @@
 use feldjaeger_ssh::{RemotePath, SshBackend, SshSession};
 use tracing::{info, warn};
 
+use crate::app::config_write::{RemoteConfigValidateHint, write_config_validated};
 use crate::app::connection_secrets::ConnectionSecrets;
 use crate::app::connection_test::build_connect_request;
 use crate::remote::RemoteAdmin;
 use crate::storage::StoredConnectionProfile;
 use crate::xray::{
-    AddUserRequest, ConfigModifyError, ConfigModifyErrorKind, DeleteUserRequest,
-    EditableXrayConfig, ModifyUserOutcome, UpdateUserRequest, add_user, delete_user, update_user,
+    AddInboundClientRequest, AddUserRequest, ConfigModifyError, ConfigModifyErrorKind,
+    DeleteUserRequest, EditableXrayConfig, ModifyUserOutcome, UpdateInboundClientRequest,
+    UpdateUserRequest, add_inbound_client, add_user, delete_user, update_inbound_client,
+    update_user,
 };
 
 /// Which user mutation is in flight.
@@ -58,6 +61,7 @@ pub async fn run_add_user<B>(
     remote: &RemoteAdmin,
     editable: EditableXrayConfig,
     request: AddUserRequest,
+    validate_hint: RemoteConfigValidateHint,
 ) -> UserMutationOutcome
 where
     B: SshBackend,
@@ -70,6 +74,7 @@ where
         remote,
         editable,
         UserMutationKind::Add,
+        validate_hint,
         |config| add_user(config, request),
     )
     .await
@@ -83,6 +88,7 @@ pub async fn run_update_user<B>(
     remote: &RemoteAdmin,
     editable: EditableXrayConfig,
     request: UpdateUserRequest,
+    validate_hint: RemoteConfigValidateHint,
 ) -> UserMutationOutcome
 where
     B: SshBackend,
@@ -95,6 +101,7 @@ where
         remote,
         editable,
         UserMutationKind::Update,
+        validate_hint,
         |config| update_user(config, request),
     )
     .await
@@ -108,6 +115,7 @@ pub async fn run_delete_user<B>(
     remote: &RemoteAdmin,
     editable: EditableXrayConfig,
     request: DeleteUserRequest,
+    validate_hint: RemoteConfigValidateHint,
 ) -> UserMutationOutcome
 where
     B: SshBackend,
@@ -120,7 +128,62 @@ where
         remote,
         editable,
         UserMutationKind::Delete,
+        validate_hint,
         |config| delete_user(config, request),
+    )
+    .await
+}
+
+/// Adds a VLESS, Trojan, or Hysteria inbound client.
+pub async fn run_add_inbound_client<B>(
+    backend: &B,
+    profile: &StoredConnectionProfile,
+    secrets: &ConnectionSecrets,
+    remote: &RemoteAdmin,
+    editable: EditableXrayConfig,
+    request: AddInboundClientRequest,
+    validate_hint: RemoteConfigValidateHint,
+) -> UserMutationOutcome
+where
+    B: SshBackend,
+    B::Session: Sync,
+{
+    run_mutation(
+        backend,
+        profile,
+        secrets,
+        remote,
+        editable,
+        UserMutationKind::Add,
+        validate_hint,
+        |config| add_inbound_client(config, request),
+    )
+    .await
+}
+
+/// Updates a VLESS, Trojan, or Hysteria inbound client.
+pub async fn run_update_inbound_client<B>(
+    backend: &B,
+    profile: &StoredConnectionProfile,
+    secrets: &ConnectionSecrets,
+    remote: &RemoteAdmin,
+    editable: EditableXrayConfig,
+    request: UpdateInboundClientRequest,
+    validate_hint: RemoteConfigValidateHint,
+) -> UserMutationOutcome
+where
+    B: SshBackend,
+    B::Session: Sync,
+{
+    run_mutation(
+        backend,
+        profile,
+        secrets,
+        remote,
+        editable,
+        UserMutationKind::Update,
+        validate_hint,
+        |config| update_inbound_client(config, request),
     )
     .await
 }
@@ -132,6 +195,7 @@ async fn run_mutation<B, F>(
     remote: &RemoteAdmin,
     mut editable: EditableXrayConfig,
     kind: UserMutationKind,
+    validate_hint: RemoteConfigValidateHint,
     mutate: F,
 ) -> UserMutationOutcome
 where
@@ -171,7 +235,8 @@ where
         }
     };
 
-    let write_result = write_modified_file(remote, &session, &outcome).await;
+    let write_result =
+        write_modified_file(remote, &session, &outcome, &validate_hint).await;
 
     if let Err(error) = session.disconnect().await {
         warn!(
@@ -193,10 +258,11 @@ where
     }
 }
 
-async fn write_modified_file<S: SshSession>(
+async fn write_modified_file<S: SshSession + Sync>(
     remote: &RemoteAdmin,
     session: &S,
     outcome: &ModifyUserOutcome,
+    validate_hint: &RemoteConfigValidateHint,
 ) -> Result<(), ConfigModifyError> {
     let path = RemotePath::new(&outcome.source_file).map_err(|error| {
         ConfigModifyError::new(
@@ -205,27 +271,14 @@ async fn write_modified_file<S: SshSession>(
         )
     })?;
 
-    remote
-        .write_config_safe(session, &path, &outcome.serialized)
-        .await
-        .map_err(map_app_error_to_modify)
-}
-
-fn map_app_error_to_modify(error: crate::error::AppError) -> ConfigModifyError {
-    let message = error.message();
-    if let Some(detail) = message.strip_prefix("Backup failed: ") {
-        ConfigModifyError::new(ConfigModifyErrorKind::BackupFailed, detail.to_owned())
-    } else if let Some(detail) = message.strip_prefix("Permission denied: ") {
-        ConfigModifyError::new(ConfigModifyErrorKind::PermissionDenied, detail.to_owned())
-    } else if let Some(detail) = message.strip_prefix("Connection lost: ") {
-        ConfigModifyError::new(ConfigModifyErrorKind::ConnectionLost, detail.to_owned())
-    } else if let Some(detail) = message.strip_prefix("Upload failed: ") {
-        ConfigModifyError::new(ConfigModifyErrorKind::UploadFailed, detail.to_owned())
-    } else if message.starts_with("Backup failed") {
-        ConfigModifyError::new(ConfigModifyErrorKind::BackupFailed, message.to_owned())
-    } else {
-        ConfigModifyError::new(ConfigModifyErrorKind::UploadFailed, message.to_owned())
-    }
+    write_config_validated(
+        remote,
+        session,
+        &path,
+        &outcome.serialized,
+        validate_hint,
+    )
+    .await
 }
 
 fn sanitize_detail(message: &str) -> String {

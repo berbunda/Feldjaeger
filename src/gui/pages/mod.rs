@@ -9,6 +9,7 @@ pub mod dns;
 pub mod fakedns;
 pub mod geodata;
 pub mod inbounds;
+pub mod log_settings;
 pub mod logs;
 pub mod observatory;
 pub mod outbounds;

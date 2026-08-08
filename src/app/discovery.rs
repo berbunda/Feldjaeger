@@ -6,11 +6,12 @@ use tracing::{info, warn};
 use crate::app::connection_secrets::ConnectionSecrets;
 use crate::app::connection_test::{build_connect_request, classify_ssh_error};
 use crate::app::inbounds::LoadedConfigSnapshot;
+use crate::app::share_material::{ShareMaterialStore, share_sidecar_path};
 use crate::init::SystemdManager;
 use crate::storage::StoredConnectionProfile;
 use crate::xray::{
-    DiscoveryErrorKind, DiscoveryResult, DiscoveryState, DiscoveryWarning, InitSystemKind,
-    XrayDiscoveryService, XrayInstallation,
+    ConfigSource, DiscoveryErrorKind, DiscoveryResult, DiscoveryState, DiscoveryWarning,
+    InitSystemKind, XrayDiscoveryService, XrayInstallation,
 };
 
 /// Outcome delivered from the discovery worker thread.
@@ -20,6 +21,8 @@ pub struct DiscoveryOutcome {
     pub state: DiscoveryState,
     /// Parsed configuration snapshot for read-only pages.
     pub config: LoadedConfigSnapshot,
+    /// Client share material loaded from remote sidecar (empty if absent).
+    pub share_materials: super::share_material::ShareMaterialStore,
 }
 
 /// Runs connect → read-only discovery → disconnect on a background runtime.
@@ -61,12 +64,20 @@ where
                     ),
                 },
                 config: LoadedConfigSnapshot::None,
+                share_materials: ShareMaterialStore::new(),
             };
         }
     };
 
     let discovery = XrayDiscoveryService::new();
     let result = discovery.discover(&session, init).await;
+
+    let share_materials = match &result {
+        DiscoveryResult::Found { installation, .. } => {
+            load_share_materials(&session, &installation.config_source).await
+        }
+        _ => ShareMaterialStore::new(),
+    };
 
     if let Err(error) = session.disconnect().await {
         warn!(
@@ -76,7 +87,7 @@ where
         );
     }
 
-    let outcome = map_discovery_result(result);
+    let outcome = map_discovery_result(result, share_materials);
     match &outcome.state {
         DiscoveryState::Succeeded(_) => {
             info!(target: "discovery", "Xray discovery completed");
@@ -89,7 +100,63 @@ where
     outcome
 }
 
-fn map_discovery_result(result: DiscoveryResult) -> DiscoveryOutcome {
+async fn load_share_materials<S: SshSession>(
+    session: &S,
+    source: &ConfigSource,
+) -> ShareMaterialStore {
+    let Some(path) = share_sidecar_path(source) else {
+        return ShareMaterialStore::new();
+    };
+    match session.read_file(&path).await {
+        Ok(bytes) => match ShareMaterialStore::from_json_bytes(&bytes) {
+            Ok(store) => {
+                info!(
+                    target: "discovery",
+                    path = %path.as_str(),
+                    entries = store.len(),
+                    "loaded share material sidecar"
+                );
+                store
+            }
+            Err(error) => {
+                warn!(
+                    target: "discovery",
+                    path = %path.as_str(),
+                    detail = %crate::logging::redact::sanitize_detail(&error),
+                    "share material sidecar parse failed; starting empty"
+                );
+                ShareMaterialStore::new()
+            }
+        },
+        Err(error) => {
+            let detail = error.message();
+            let lower = detail.to_ascii_lowercase();
+            if lower.contains("no such file")
+                || lower.contains("not found")
+                || lower.contains("enoent")
+            {
+                info!(
+                    target: "discovery",
+                    path = %path.as_str(),
+                    "share material sidecar absent"
+                );
+            } else {
+                warn!(
+                    target: "discovery",
+                    path = %path.as_str(),
+                    detail = %crate::logging::redact::sanitize_detail(detail),
+                    "share material sidecar read failed; starting empty"
+                );
+            }
+            ShareMaterialStore::new()
+        }
+    }
+}
+
+fn map_discovery_result(
+    result: DiscoveryResult,
+    share_materials: ShareMaterialStore,
+) -> DiscoveryOutcome {
     match result {
         DiscoveryResult::Found {
             installation,
@@ -126,6 +193,7 @@ fn map_discovery_result(result: DiscoveryResult) -> DiscoveryOutcome {
             DiscoveryOutcome {
                 state: DiscoveryState::Succeeded(installation),
                 config,
+                share_materials,
             }
         }
         DiscoveryResult::NotFound {
@@ -141,6 +209,7 @@ fn map_discovery_result(result: DiscoveryResult) -> DiscoveryOutcome {
                 warnings,
             },
             config: LoadedConfigSnapshot::None,
+            share_materials: ShareMaterialStore::new(),
         },
         DiscoveryResult::Failed { kind, detail } => {
             let safe_detail = crate::logging::redact::sanitize_detail(&detail);
@@ -169,6 +238,7 @@ fn map_discovery_result(result: DiscoveryResult) -> DiscoveryOutcome {
                     detail: user_detail,
                 },
                 config: LoadedConfigSnapshot::None,
+                share_materials: ShareMaterialStore::new(),
             }
         }
     }

@@ -12,10 +12,8 @@ pub enum Page {
     Dashboard,
     /// SSH connection settings and status.
     Connection,
-    /// Inbound proxy configuration.
+    /// Inbound proxy configuration (Summary | Users under selection).
     Inbounds,
-    /// User account management.
-    Users,
     /// Outbound proxy configuration.
     Outbounds,
     /// DNS configuration.
@@ -30,6 +28,8 @@ pub enum Page {
     Observatory,
     /// Burst Observatory configuration.
     BurstObservatory,
+    /// Xray top-level `log` object settings.
+    LogSettings,
     /// Service and application logs.
     Logs,
     /// Init-system service control.
@@ -50,7 +50,6 @@ impl Page {
         Page::Dashboard,
         Page::Connection,
         Page::Inbounds,
-        Page::Users,
         Page::Outbounds,
         Page::Dns,
         Page::FakeDns,
@@ -58,6 +57,7 @@ impl Page {
         Page::Policy,
         Page::Observatory,
         Page::BurstObservatory,
+        Page::LogSettings,
         Page::Logs,
         Page::Service,
         Page::XrayManagement,
@@ -72,7 +72,6 @@ impl Page {
             Page::Dashboard => "Dashboard",
             Page::Connection => "Connection",
             Page::Inbounds => "Inbounds",
-            Page::Users => "Users",
             Page::Outbounds => "Outbounds",
             Page::Dns => "DNS",
             Page::FakeDns => "FakeDNS",
@@ -80,17 +79,25 @@ impl Page {
             Page::Policy => "Policy",
             Page::Observatory => "Observatory",
             Page::BurstObservatory => "BurstObservatory",
+            Page::LogSettings => "Log Settings",
             Page::Logs => "Xray Logs",
             Page::Service => "Service",
             Page::XrayManagement => "Xray Management",
             Page::GeoData => "GeoData",
-            Page::Warp => "WARP",
+            Page::Warp => "Cloudflare WARP",
             Page::Settings => "Settings",
         }
     }
 
     /// Parses a page from its persisted label, falling back to Dashboard.
     pub fn from_label(label: &str) -> Self {
+        if label.eq_ignore_ascii_case("WARP") {
+            return Page::Warp;
+        }
+        // Legacy sidebar entry removed; Users lives under Inbounds.
+        if label.eq_ignore_ascii_case("Users") {
+            return Page::Inbounds;
+        }
         Page::ALL
             .iter()
             .copied()
@@ -104,7 +111,6 @@ impl Page {
             Page::Dashboard => pages::dashboard::show(ui),
             Page::Connection => pages::connection::show(ui, service),
             Page::Inbounds => pages::inbounds::show(ui, service),
-            Page::Users => pages::users::show(ui, service),
             Page::Outbounds => pages::outbounds::show(ui, service),
             Page::Dns => pages::dns::show(ui, service),
             Page::FakeDns => pages::fakedns::show(ui, service),
@@ -112,11 +118,12 @@ impl Page {
             Page::Policy => pages::policy::show(ui, service),
             Page::Observatory => pages::observatory::show(ui, service),
             Page::BurstObservatory => pages::burst_observatory::show(ui, service),
+            Page::LogSettings => pages::log_settings::show(ui, service),
             Page::Logs => pages::logs::show(ui, service),
             Page::Service => pages::service::show(ui, service),
             Page::XrayManagement => pages::xray_management::show(ui, service),
             Page::GeoData => pages::geodata::show(ui, service),
-            Page::Warp => pages::warp::show(ui),
+            Page::Warp => pages::warp::show(ui, service),
             Page::Settings => pages::settings::show(ui),
         }
     }

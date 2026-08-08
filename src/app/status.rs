@@ -62,6 +62,26 @@ pub enum CurrentOperation {
     UpdatingUser,
     /// Deleting a VLESS user from the remote configuration.
     DeletingUser,
+    /// Updating inbound General fields (tag / listen / port).
+    UpdatingInboundGeneral,
+    /// Updating inbound sniffing settings.
+    UpdatingInboundSniffing,
+    /// Unified Shell Save (General + Protocol + Sniffing + Security).
+    UpdatingInboundShell,
+    /// Adding a new inbound.
+    AddingInbound,
+    /// Deleting an inbound.
+    DeletingInbound,
+    /// Duplicating an inbound.
+    DuplicatingInbound,
+    /// Deleting an outbound.
+    DeletingOutbound,
+    /// Generating x25519 key pair for Reality.
+    GeneratingX25519,
+    /// Generating mldsa65 seed/verify for Reality.
+    GeneratingMldsa65,
+    /// Generating VLESS decryption/encryption via `xray vlessenc`.
+    GeneratingVlessEnc,
     /// Managing the remote Xray systemd service (start/stop/…).
     ManagingXrayService {
         /// Status Bar text for the in-flight operation.
@@ -77,11 +97,20 @@ pub enum CurrentOperation {
         /// Status Bar text for the in-flight operation.
         text: String,
     },
+    /// Discovering or mutating Cloudflare WARP integration.
+    ManagingWarp {
+        /// Status Bar text for the in-flight operation.
+        text: String,
+    },
     /// Reading or following remote Xray runtime logs.
     ManagingXrayLogs {
         /// Status Bar text for the in-flight operation.
         text: String,
     },
+    /// Validating / saving Xray top-level log settings.
+    SavingLogSettings,
+    /// Validating Xray log settings before save.
+    ValidatingLogSettings,
 }
 
 impl CurrentOperation {
@@ -98,10 +127,23 @@ impl CurrentOperation {
             Self::AddingUser => "Adding user...".to_owned(),
             Self::UpdatingUser => "Updating user...".to_owned(),
             Self::DeletingUser => "Deleting user...".to_owned(),
+            Self::UpdatingInboundGeneral => "Updating inbound...".to_owned(),
+            Self::UpdatingInboundSniffing => "Updating sniffing...".to_owned(),
+            Self::UpdatingInboundShell => "Saving inbound...".to_owned(),
+            Self::AddingInbound => "Adding inbound...".to_owned(),
+            Self::DeletingInbound => "Deleting inbound...".to_owned(),
+            Self::DuplicatingInbound => "Duplicating inbound...".to_owned(),
+            Self::DeletingOutbound => "Deleting outbound...".to_owned(),
+            Self::GeneratingX25519 => "Generating x25519 key pair...".to_owned(),
+            Self::GeneratingMldsa65 => "Generating mldsa65 key pair...".to_owned(),
+            Self::GeneratingVlessEnc => "Generating VLESS encryption...".to_owned(),
             Self::ManagingXrayService { text } => text.clone(),
             Self::ManagingXrayLifecycle { text } => text.clone(),
             Self::ManagingGeoData { text } => text.clone(),
+            Self::ManagingWarp { text } => text.clone(),
             Self::ManagingXrayLogs { text } => text.clone(),
+            Self::SavingLogSettings => "Saving log settings...".to_owned(),
+            Self::ValidatingLogSettings => "Validating log settings...".to_owned(),
         }
     }
 
@@ -113,10 +155,23 @@ impl CurrentOperation {
             | Self::AddingUser
             | Self::UpdatingUser
             | Self::DeletingUser
+            | Self::UpdatingInboundGeneral
+            | Self::UpdatingInboundSniffing
+            | Self::UpdatingInboundShell
+            | Self::AddingInbound
+            | Self::DeletingInbound
+            | Self::DuplicatingInbound
+            | Self::DeletingOutbound
+            | Self::GeneratingX25519
+            | Self::GeneratingMldsa65
+            | Self::GeneratingVlessEnc
             | Self::ManagingXrayService { .. }
             | Self::ManagingXrayLifecycle { .. }
             | Self::ManagingGeoData { .. }
-            | Self::ManagingXrayLogs { .. } => OperationProgress::Indeterminate,
+            | Self::ManagingWarp { .. }
+            | Self::ManagingXrayLogs { .. }
+            | Self::SavingLogSettings
+            | Self::ValidatingLogSettings => OperationProgress::Indeterminate,
             Self::UploadingConfig { progress }
             | Self::RestartingXray { progress }
             | Self::CreatingBackup { progress } => *progress,

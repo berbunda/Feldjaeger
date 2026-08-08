@@ -366,6 +366,13 @@ mod tests {
             )))
         }
 
+        fn path_is_file(
+            &self,
+            _path: &feldjaeger_ssh::RemotePath,
+        ) -> impl Future<Output = feldjaeger_ssh::SshResult<bool>> + Send {
+            async { Ok(true) }
+        }
+
         fn exec(
             &self,
             command: &RemoteCommand,
@@ -389,6 +396,15 @@ mod tests {
 
             future::ready(Ok(result))
         }
+
+    fn exec_with_stdin(
+        &self,
+        command: &feldjaeger_ssh::RemoteCommand,
+        stdin: &[u8],
+    ) -> impl Future<Output = feldjaeger_ssh::SshResult<feldjaeger_ssh::ExecResult>> + Send {
+        let _ = stdin;
+        self.exec(command)
+    }
 
         fn disconnect(self) -> impl Future<Output = feldjaeger_ssh::SshResult<()>> + Send {
             future::ready(Ok(()))

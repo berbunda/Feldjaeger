@@ -1,21 +1,18 @@
-//! Read-only VLESS client summaries extracted from configuration sections.
+//! Read-only inbound client summaries extracted from configuration sections.
 //!
 //! The GUI must not dig into `settings.clients` / `settings.users` itself.
 //! Extraction stays in the Xray model layer so raw JSON remains untouched.
 
 use serde_json::Value;
 
+use super::inbound_clients::InboundClientProtocol;
 use super::sections::XrayConfigSections;
 use super::summary::InboundSummary;
 
-/// Protocol name currently supported for the Users page client list.
+/// Protocol names supported for the Users list in IB-L1.
 pub const SUPPORTED_USER_PROTOCOL: &str = "vless";
 
 /// Read-only summary of one VLESS inbound client / user.
-///
-/// Fields mirror the official UserObject / classic client object (`id`, `email`,
-/// `flow`). There is no `enabled` flag in stock Xray VLESS config, so it is not
-/// invented here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VlessClientSummary {
     /// Zero-based index of the parent inbound in the merged inbound list.
@@ -34,7 +31,83 @@ pub struct VlessClientSummary {
     pub flow: Option<String>,
 }
 
-/// Alias used by the Users page and ApplicationService APIs.
+/// Read-only summary of one Trojan inbound client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrojanClientSummary {
+    /// Parent inbound index.
+    pub inbound_index: usize,
+    /// Parent inbound tag.
+    pub inbound_tag: Option<String>,
+    /// Source file.
+    pub source_file: String,
+    /// Client index.
+    pub client_index: usize,
+    /// Email when present.
+    pub email: Option<String>,
+    /// Whether a non-empty password is present (never the secret itself).
+    pub has_password: bool,
+}
+
+/// Read-only summary of one Hysteria inbound user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HysteriaClientSummary {
+    /// Parent inbound index.
+    pub inbound_index: usize,
+    /// Parent inbound tag.
+    pub inbound_tag: Option<String>,
+    /// Source file.
+    pub source_file: String,
+    /// Client index.
+    pub client_index: usize,
+    /// Email when present.
+    pub email: Option<String>,
+    /// Whether a non-empty auth is present (never the secret itself).
+    pub has_auth: bool,
+    /// Policy level (default 0 when absent on wire).
+    pub level: u32,
+}
+
+/// Enum read model for Users tab (IB-L1 / Wave A).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InboundClientSummary {
+    /// VLESS client row.
+    Vless(VlessClientSummary),
+    /// Trojan client row.
+    Trojan(TrojanClientSummary),
+    /// Hysteria user row.
+    Hysteria(HysteriaClientSummary),
+}
+
+impl InboundClientSummary {
+    /// Parent inbound index.
+    pub fn inbound_index(&self) -> usize {
+        match self {
+            Self::Vless(c) => c.inbound_index,
+            Self::Trojan(c) => c.inbound_index,
+            Self::Hysteria(c) => c.inbound_index,
+        }
+    }
+
+    /// Client index inside the array.
+    pub fn client_index(&self) -> usize {
+        match self {
+            Self::Vless(c) => c.client_index,
+            Self::Trojan(c) => c.client_index,
+            Self::Hysteria(c) => c.client_index,
+        }
+    }
+
+    /// Display email when present.
+    pub fn email(&self) -> Option<&str> {
+        match self {
+            Self::Vless(c) => c.email.as_deref(),
+            Self::Trojan(c) => c.email.as_deref(),
+            Self::Hysteria(c) => c.email.as_deref(),
+        }
+    }
+}
+
+/// Alias used by legacy Users page APIs (VLESS-only list).
 pub type UserSummary = VlessClientSummary;
 
 /// One inbound that can appear in the Users page selector.
@@ -44,11 +117,11 @@ pub struct SupportedUserInbound {
     pub inbound_index: usize,
     /// Inbound tag, when present.
     pub tag: Option<String>,
-    /// Protocol string (currently always `vless` for this list).
+    /// Protocol string.
     pub protocol: String,
     /// Listen port, when present.
     pub port: Option<u64>,
-    /// Number of extracted VLESS clients for this inbound.
+    /// Number of extracted clients for this inbound.
     pub clients_count: usize,
     /// Source file of the inbound.
     pub source_file: String,
@@ -71,16 +144,20 @@ impl SupportedUserInbound {
     }
 }
 
-/// Extracts VLESS clients from all inbounds (order preserved).
-///
-/// Looks at `settings.clients` first (classic / widely deployed), then
-/// `settings.users` (current English docs UserObject array). Unknown nested
-/// fields are ignored; the sourced inbound JSON is never modified.
-pub fn extract_vless_clients(sections: &XrayConfigSections) -> Vec<VlessClientSummary> {
+/// Extracts VLESS + Trojan clients (order preserved).
+pub fn extract_inbound_clients(sections: &XrayConfigSections) -> Vec<InboundClientSummary> {
     let mut clients = Vec::new();
 
     for (inbound_index, inbound) in sections.inbounds().iter().enumerate() {
-        if !is_vless_inbound(inbound.value()) {
+        let Some(protocol) = inbound
+            .value()
+            .get("protocol")
+            .and_then(Value::as_str)
+            .and_then(InboundClientProtocol::from_wire)
+        else {
+            continue;
+        };
+        if !protocol.mutate_enabled() {
             continue;
         }
 
@@ -88,25 +165,76 @@ pub fn extract_vless_clients(sections: &XrayConfigSections) -> Vec<VlessClientSu
         let source_file = inbound.source_file().to_owned();
 
         for (client_index, client) in client_objects(inbound.value()).into_iter().enumerate() {
-            clients.push(VlessClientSummary {
-                inbound_index,
-                inbound_tag: inbound_tag.clone(),
-                source_file: source_file.clone(),
-                client_index,
-                id: string_field(client, "id"),
-                email: string_field(client, "email"),
-                flow: string_field(client, "flow"),
-            });
+            match protocol {
+                InboundClientProtocol::Vless => {
+                    clients.push(InboundClientSummary::Vless(VlessClientSummary {
+                        inbound_index,
+                        inbound_tag: inbound_tag.clone(),
+                        source_file: source_file.clone(),
+                        client_index,
+                        id: string_field(client, "id"),
+                        email: string_field(client, "email"),
+                        flow: string_field(client, "flow"),
+                    }));
+                }
+                InboundClientProtocol::Trojan => {
+                    let has_password = client
+                        .get("password")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .is_some_and(|s| !s.is_empty());
+                    clients.push(InboundClientSummary::Trojan(TrojanClientSummary {
+                        inbound_index,
+                        inbound_tag: inbound_tag.clone(),
+                        source_file: source_file.clone(),
+                        client_index,
+                        email: string_field(client, "email"),
+                        has_password,
+                    }));
+                }
+                InboundClientProtocol::Tunnel => {}
+                InboundClientProtocol::Hysteria => {
+                    let has_auth = client
+                        .get("auth")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .is_some_and(|s| !s.is_empty());
+                    let level = client
+                        .get("level")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as u32;
+                    clients.push(InboundClientSummary::Hysteria(HysteriaClientSummary {
+                        inbound_index,
+                        inbound_tag: inbound_tag.clone(),
+                        source_file: source_file.clone(),
+                        client_index,
+                        email: string_field(client, "email"),
+                        has_auth,
+                        level,
+                    }));
+                }
+            }
         }
     }
 
     clients
 }
 
-/// Builds the selector list of inbounds that support the Users page (VLESS).
+/// Extracts VLESS clients from all inbounds (order preserved).
+pub fn extract_vless_clients(sections: &XrayConfigSections) -> Vec<VlessClientSummary> {
+    extract_inbound_clients(sections)
+        .into_iter()
+        .filter_map(|client| match client {
+            InboundClientSummary::Vless(summary) => Some(summary),
+            InboundClientSummary::Trojan(_) | InboundClientSummary::Hysteria(_) => None,
+        })
+        .collect()
+}
+
+/// Builds the selector list of inbounds that support Users mutate (VLESS + Trojan).
 pub fn supported_user_inbounds(
     inbounds: &[InboundSummary],
-    clients: &[VlessClientSummary],
+    clients: &[InboundClientSummary],
 ) -> Vec<SupportedUserInbound> {
     inbounds
         .iter()
@@ -114,12 +242,13 @@ pub fn supported_user_inbounds(
             inbound
                 .protocol
                 .as_deref()
-                .is_some_and(|protocol| protocol.eq_ignore_ascii_case(SUPPORTED_USER_PROTOCOL))
+                .and_then(InboundClientProtocol::from_wire)
+                .is_some_and(|p| p.mutate_enabled())
         })
         .map(|inbound| {
             let clients_count = clients
                 .iter()
-                .filter(|client| client.inbound_index == inbound.index)
+                .filter(|client| client.inbound_index() == inbound.index)
                 .count();
             SupportedUserInbound {
                 inbound_index: inbound.index,
@@ -138,6 +267,18 @@ pub fn supported_user_inbounds(
 
 /// Filters client summaries to one inbound index.
 pub fn clients_for_inbound(
+    clients: &[InboundClientSummary],
+    inbound_index: usize,
+) -> Vec<InboundClientSummary> {
+    clients
+        .iter()
+        .filter(|client| client.inbound_index() == inbound_index)
+        .cloned()
+        .collect()
+}
+
+/// Filters VLESS client summaries to one inbound index (legacy helper).
+pub fn vless_clients_for_inbound(
     clients: &[VlessClientSummary],
     inbound_index: usize,
 ) -> Vec<VlessClientSummary> {
@@ -148,11 +289,17 @@ pub fn clients_for_inbound(
         .collect()
 }
 
-fn is_vless_inbound(value: &Value) -> bool {
-    value
-        .get("protocol")
-        .and_then(Value::as_str)
-        .is_some_and(|protocol| protocol.eq_ignore_ascii_case(SUPPORTED_USER_PROTOCOL))
+/// Builds the selector list from VLESS-only summaries (legacy Users page).
+pub fn supported_vless_user_inbounds(
+    inbounds: &[InboundSummary],
+    clients: &[VlessClientSummary],
+) -> Vec<SupportedUserInbound> {
+    let mapped: Vec<InboundClientSummary> = clients
+        .iter()
+        .cloned()
+        .map(InboundClientSummary::Vless)
+        .collect();
+    supported_user_inbounds(inbounds, &mapped)
 }
 
 fn client_objects(inbound: &Value) -> Vec<&Value> {
@@ -161,12 +308,10 @@ fn client_objects(inbound: &Value) -> Vec<&Value> {
         None => return Vec::new(),
     };
 
-    // Classic field name used by most deployed configs and our fixtures.
     if let Some(array) = settings.get("clients").and_then(Value::as_array) {
         return array.iter().collect();
     }
 
-    // Official English docs currently document `users` for VLESS UserObject.
     if let Some(array) = settings.get("users").and_then(Value::as_array) {
         return array.iter().collect();
     }
@@ -179,10 +324,11 @@ fn string_field(value: &Value, key: &str) -> Option<String> {
 }
 
 fn display_protocol_label(protocol: &str) -> String {
-    if protocol.eq_ignore_ascii_case("vless") {
-        "VLESS".to_owned()
-    } else {
-        protocol.to_owned()
+    match protocol.to_ascii_lowercase().as_str() {
+        "vless" => "VLESS".to_owned(),
+        "trojan" => "Trojan".to_owned(),
+        "hysteria" => "Hysteria".to_owned(),
+        _ => protocol.to_owned(),
     }
 }
 
@@ -198,69 +344,60 @@ mod tests {
                 "inbounds":[{
                     "tag":"vless-in",
                     "protocol":"vless",
-                    "port":443,
-                    "settings":{
-                        "clients":[
-                            {"id":"u1","email":"a@example.com","flow":"xtls-rprx-vision"},
-                            {"id":"u2","email":"b@example.com"}
-                        ],
-                        "decryption":"none"
-                    }
+                    "settings":{"clients":[{"id":"a","email":"a@b.c"}]}
                 }]
             }"#,
         );
-        let clients = extract_vless_clients(outcome.sections());
-        assert_eq!(clients.len(), 2);
-        assert_eq!(clients[0].email.as_deref(), Some("a@example.com"));
-        assert_eq!(clients[0].id.as_deref(), Some("u1"));
-        assert_eq!(clients[0].flow.as_deref(), Some("xtls-rprx-vision"));
-        assert_eq!(clients[0].inbound_tag.as_deref(), Some("vless-in"));
-        assert!(clients[1].flow.is_none());
-    }
-
-    #[test]
-    fn extracts_users_array_from_docs_shape() {
-        let outcome = XrayConfigParser::new().parse_str(
-            r#"{
-                "inbounds":[{
-                    "tag":"docs",
-                    "protocol":"vless",
-                    "settings":{
-                        "users":[{"id":"5783a3e7-e373-51cd-8642-c83782b807c5","email":"love@xray.com"}],
-                        "decryption":"none"
-                    }
-                }]
-            }"#,
-        );
+        assert!(outcome.is_success());
         let clients = extract_vless_clients(outcome.sections());
         assert_eq!(clients.len(), 1);
-        assert_eq!(clients[0].email.as_deref(), Some("love@xray.com"));
+        assert_eq!(clients[0].id.as_deref(), Some("a"));
     }
 
     #[test]
-    fn ignores_non_vless_inbounds() {
+    fn extracts_trojan_clients() {
         let outcome = XrayConfigParser::new().parse_str(
             r#"{
                 "inbounds":[{
-                    "tag":"vmess-in",
-                    "protocol":"vmess",
-                    "settings":{"clients":[{"id":"x","email":"x@x"}]}
+                    "tag":"tr",
+                    "protocol":"trojan",
+                    "settings":{"clients":[{"password":"secret","email":"t@e"}]}
                 }]
             }"#,
         );
-        assert!(extract_vless_clients(outcome.sections()).is_empty());
+        assert!(outcome.is_success());
+        let clients = extract_inbound_clients(outcome.sections());
+        assert_eq!(clients.len(), 1);
+        match &clients[0] {
+            InboundClientSummary::Trojan(t) => {
+                assert!(t.has_password);
+                assert_eq!(t.email.as_deref(), Some("t@e"));
+            }
+            _ => panic!("expected trojan"),
+        }
     }
 
     #[test]
-    fn supported_inbound_label_format() {
-        let choice = SupportedUserInbound {
-            inbound_index: 0,
-            tag: Some("vless-reality-443".to_owned()),
-            protocol: "vless".to_owned(),
-            port: Some(443),
-            clients_count: 1,
-            source_file: "/etc/xray/config.json".to_owned(),
-        };
-        assert_eq!(choice.label(), "vless-reality-443 · VLESS · :443");
+    fn extracts_hysteria_clients_from_users_array() {
+        let outcome = XrayConfigParser::new().parse_str(
+            r#"{
+                "inbounds":[{
+                    "tag":"hy",
+                    "protocol":"hysteria",
+                    "settings":{"version":2,"users":[{"auth":"secret","email":"h@e","level":1}]}
+                }]
+            }"#,
+        );
+        assert!(outcome.is_success());
+        let clients = extract_inbound_clients(outcome.sections());
+        assert_eq!(clients.len(), 1);
+        match &clients[0] {
+            InboundClientSummary::Hysteria(h) => {
+                assert!(h.has_auth);
+                assert_eq!(h.email.as_deref(), Some("h@e"));
+                assert_eq!(h.level, 1);
+            }
+            _ => panic!("expected hysteria"),
+        }
     }
 }

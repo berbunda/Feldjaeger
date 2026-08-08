@@ -88,6 +88,11 @@ impl XrayConfigSections {
         self.log.as_ref()
     }
 
+    /// Mutable `log` section, if present.
+    pub fn log_mut(&mut self) -> Option<&mut SourcedSection<Value>> {
+        self.log.as_mut()
+    }
+
     /// `api` section, if present.
     pub fn api(&self) -> Option<&SourcedSection<Value>> {
         self.api.as_ref()
@@ -268,8 +273,18 @@ impl XrayConfigSections {
         self.inbounds.push(inbound);
     }
 
+    /// Mutable access to merged inbounds as a Vec (config-modify layer only).
+    pub(crate) fn inbounds_list_mut(&mut self) -> &mut Vec<SourcedSection<Value>> {
+        &mut self.inbounds
+    }
+
     pub(crate) fn push_outbound(&mut self, outbound: SourcedSection<Value>) {
         self.outbounds.push(outbound);
+    }
+
+    /// Mutable access to merged outbounds (config-modify layer only).
+    pub(crate) fn outbounds_mut(&mut self) -> &mut Vec<SourcedSection<Value>> {
+        &mut self.outbounds
     }
 
     pub(crate) fn push_extra(&mut self, name: String, section: SourcedSection<Value>) {

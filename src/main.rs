@@ -1,5 +1,8 @@
 //! Feldjaeger desktop entry point.
 
+// Hide the console window on Windows; application logs go to a file.
+#![windows_subsystem = "windows"]
+
 use feldjaeger::gui::run;
 use feldjaeger::logging;
 

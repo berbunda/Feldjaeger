@@ -6,8 +6,39 @@
 use crate::app::inbounds::{LoadedConfigSnapshot, MISSING_FIELD, display_source_file};
 use crate::app::status::SshStatus;
 use crate::xray::{
-    DiscoveryState, SupportedUserInbound, UserSummary, clients_for_inbound, supported_user_inbounds,
+    DiscoveryState, HysteriaClientSummary, InboundClientSummary,
+    SupportedUserInbound, TrojanClientSummary, UserSummary, clients_for_inbound,
+    supported_user_inbounds, supported_vless_user_inbounds, vless_clients_for_inbound,
 };
+
+/// Protocol-specific Users tab presentation (VLESS / Trojan / Hysteria).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UsersProtocolUi {
+    /// VLESS inbound selected.
+    Vless,
+    /// Trojan inbound selected.
+    Trojan,
+    /// Hysteria inbound selected.
+    Hysteria,
+}
+
+/// Resolves the selected inbound protocol for Users tab dispatch.
+pub fn selected_users_protocol(
+    choices: &[SupportedUserInbound],
+    selected_inbound_index: Option<usize>,
+) -> Option<UsersProtocolUi> {
+    let idx = selected_inbound_index?;
+    let choice = choices.iter().find(|c| c.inbound_index == idx)?;
+    if choice.protocol.eq_ignore_ascii_case("trojan") {
+        Some(UsersProtocolUi::Trojan)
+    } else if choice.protocol.eq_ignore_ascii_case("hysteria") {
+        Some(UsersProtocolUi::Hysteria)
+    } else if choice.protocol.eq_ignore_ascii_case("vless") {
+        Some(UsersProtocolUi::Vless)
+    } else {
+        None
+    }
+}
 
 /// Columns that support sorting on the Users table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -49,7 +80,9 @@ pub enum UsersPageState {
     XrayNotDiscovered,
     /// Xray exists but configuration was not loaded.
     ConfigurationNotLoaded,
-    /// Configuration loaded but no supported (VLESS) inbound is available/selected.
+    /// Configuration loaded but no inbound is selected on the Inbounds page.
+    NoInboundSelected,
+    /// Configuration loaded but the selected inbound is not Tier‑2 (VLESS) editable.
     NoSupportedInboundSelected,
     /// A supported inbound is selected but it has no users.
     SelectedInboundHasNoUsers,
@@ -72,8 +105,11 @@ impl UsersPageState {
             Self::ConfigurationNotLoaded => {
                 "Configuration not loaded. Discover Xray again after the config becomes readable."
             }
+            Self::NoInboundSelected => {
+                "Select an inbound in the table above to manage its clients."
+            }
             Self::NoSupportedInboundSelected => {
-                "No supported inbound selected. The Users page currently lists VLESS clients only."
+                "Client editing is available for VLESS, Trojan, and Hysteria inbounds."
             }
             Self::SelectedInboundHasNoUsers => "Selected inbound has no users.",
             Self::UsersLoaded => "Users loaded.",
@@ -97,34 +133,33 @@ impl UsersPageState {
 pub struct UsersPageModel {
     /// Coarse page state.
     pub state: UsersPageState,
-    /// Inbounds offered in the selector (VLESS only).
+    /// Inbounds offered in the selector (VLESS + Trojan).
     pub inbound_choices: Vec<SupportedUserInbound>,
     /// Currently selected inbound index into the merged inbound list.
     pub selected_inbound_index: Option<usize>,
-    /// Users for the selected inbound (already sorted).
+    /// VLESS users for the selected inbound (already sorted).
     pub rows: Vec<UserSummary>,
+    /// All inbound clients (VLESS + Trojan) for the selected inbound.
+    /// Populated when editable config is available; empty otherwise.
+    pub inbound_clients: Vec<InboundClientSummary>,
     /// Non-fatal warnings to show above the table.
     pub warnings: Vec<String>,
     /// Active sort settings.
     pub sort: UsersSort,
 }
 
-/// Resolves which inbound index should be selected.
+/// Resolves which inbound index should be selected for the Users tab.
+///
+/// Returns `None` when nothing is selected or the preferred inbound is not Tier‑2.
 pub fn resolve_selected_inbound_index(
     choices: &[SupportedUserInbound],
     preferred: Option<usize>,
 ) -> Option<usize> {
-    if choices.is_empty() {
-        return None;
-    }
-    if let Some(preferred) = preferred
-        && choices
-            .iter()
-            .any(|choice| choice.inbound_index == preferred)
-    {
-        return Some(preferred);
-    }
-    Some(choices[0].inbound_index)
+    let preferred = preferred?;
+    choices
+        .iter()
+        .any(|choice| choice.inbound_index == preferred)
+        .then_some(preferred)
 }
 
 /// Derives [`UsersPageState`] from SSH / discovery / config / selection.
@@ -132,8 +167,10 @@ pub fn derive_users_page_state(
     ssh: SshStatus,
     discovery: &DiscoveryState,
     config: &LoadedConfigSnapshot,
+    preferred_inbound_index: Option<usize>,
     choices: &[SupportedUserInbound],
     selected_users: &[UserSummary],
+    inbound_clients: &[InboundClientSummary],
 ) -> UsersPageState {
     if ssh != SshStatus::Connected {
         return UsersPageState::NoSshConnection;
@@ -149,10 +186,17 @@ pub fn derive_users_page_state(
                 UsersPageState::ConfigurationNotLoaded
             }
             LoadedConfigSnapshot::Loaded { warnings, .. } => {
-                if choices.is_empty() {
+                let Some(preferred) = preferred_inbound_index else {
+                    return UsersPageState::NoInboundSelected;
+                };
+                if !choices
+                    .iter()
+                    .any(|choice| choice.inbound_index == preferred)
+                {
                     return UsersPageState::NoSupportedInboundSelected;
                 }
-                if selected_users.is_empty() {
+                let has_users = !selected_users.is_empty() || !inbound_clients.is_empty();
+                if !has_users {
                     return UsersPageState::SelectedInboundHasNoUsers;
                 }
                 if warnings.is_empty() {
@@ -173,20 +217,53 @@ pub fn build_users_page_model(
     preferred_inbound_index: Option<usize>,
     sort: UsersSort,
 ) -> UsersPageModel {
-    let choices = supported_user_inbounds(config.inbounds(), config.vless_clients());
+    // All clients (VLESS + Trojan) from editable when available; empty otherwise.
+    let all_inbound_clients: Vec<InboundClientSummary> = config
+        .editable()
+        .map(|e| e.inbound_clients())
+        .unwrap_or_default();
+
+    // Choices include both VLESS and Trojan inbounds.
+    let choices = supported_user_inbounds(config.inbounds(), &all_inbound_clients);
+
+    // For tests and legacy call sites that only have vless_clients in the snapshot,
+    // also include choices from the legacy VLESS-only path so inbound choices are non-empty.
+    let choices = if choices.is_empty() && !config.vless_clients().is_empty() {
+        supported_vless_user_inbounds(config.inbounds(), config.vless_clients())
+    } else {
+        choices
+    };
+
     let selected_inbound_index = resolve_selected_inbound_index(&choices, preferred_inbound_index);
+
+    // VLESS rows (legacy path — also populated when editable is absent).
     let mut rows = selected_inbound_index
-        .map(|index| clients_for_inbound(config.vless_clients(), index))
+        .map(|index| vless_clients_for_inbound(config.vless_clients(), index))
         .unwrap_or_default();
     sort_user_summaries(&mut rows, sort);
+
+    // All clients for the selected inbound (from editable).
+    let inbound_clients: Vec<InboundClientSummary> = selected_inbound_index
+        .map(|index| clients_for_inbound(&all_inbound_clients, index))
+        .unwrap_or_default();
+
     let warnings = config.warnings().to_vec();
-    let state = derive_users_page_state(ssh, discovery, config, &choices, &rows);
+    let state = derive_users_page_state(
+        ssh,
+        discovery,
+        config,
+        preferred_inbound_index,
+        &choices,
+        &rows,
+        &inbound_clients,
+    );
 
     UsersPageModel {
         state,
         inbound_choices: choices,
         selected_inbound_index,
         rows,
+        inbound_clients,
         warnings,
         sort,
     }
@@ -247,6 +324,56 @@ pub fn user_row_display(client: &UserSummary) -> UserRowDisplay<'_> {
         source_file: display_source_file(&client.source_file),
     }
 }
+
+/// Formatted cells for one Trojan client row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrojanRowDisplay<'a> {
+    /// Email or `—`.
+    pub email: String,
+    /// `"••••••"` when password is present; `—` when absent.
+    pub password_masked: &'static str,
+    /// Inbound tag or `—`.
+    pub inbound_tag: String,
+    /// Basename of the source file.
+    pub source_file: &'a str,
+}
+
+/// Builds display cells for a Trojan client summary.
+pub fn trojan_row_display(client: &TrojanClientSummary) -> TrojanRowDisplay<'_> {
+    TrojanRowDisplay {
+        email: display_optional_client_field(client.email.as_deref()),
+        password_masked: if client.has_password { "••••••" } else { MISSING_FIELD },
+        inbound_tag: display_optional_client_field(client.inbound_tag.as_deref()),
+        source_file: display_source_file(&client.source_file),
+    }
+}
+
+/// Formatted cells for one Hysteria user row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HysteriaRowDisplay<'a> {
+    /// Email or `—`.
+    pub email: String,
+    /// `"••••••"` when auth is present; `—` when absent.
+    pub auth_masked: &'static str,
+    /// Policy level.
+    pub level: String,
+    /// Inbound tag or `—`.
+    pub inbound_tag: String,
+    /// Basename of the source file.
+    pub source_file: &'a str,
+}
+
+/// Builds display cells for a Hysteria client summary.
+pub fn hysteria_row_display(client: &HysteriaClientSummary) -> HysteriaRowDisplay<'_> {
+    HysteriaRowDisplay {
+        email: display_optional_client_field(client.email.as_deref()),
+        auth_masked: if client.has_auth { "••••••" } else { MISSING_FIELD },
+        level: client.level.to_string(),
+        inbound_tag: display_optional_client_field(client.inbound_tag.as_deref()),
+        source_file: display_source_file(&client.source_file),
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -385,7 +512,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        let page = model(&config, None, UsersSort::by_index());
+        let page = model(&config, Some(0), UsersSort::by_index());
         assert_eq!(page.state, UsersPageState::SelectedInboundHasNoUsers);
         assert!(page.rows.is_empty());
     }
@@ -405,7 +532,7 @@ mod tests {
             )],
             Vec::new(),
         );
-        let page = model(&config, None, UsersSort::by_index());
+        let page = model(&config, Some(0), UsersSort::by_index());
         assert_eq!(page.state, UsersPageState::UsersLoaded);
         assert_eq!(page.rows.len(), 1);
         assert_eq!(page.rows[0].email.as_deref(), Some("one@x"));
@@ -422,7 +549,7 @@ mod tests {
             ],
             Vec::new(),
         );
-        let page = model(&config, None, UsersSort::by_index());
+        let page = model(&config, Some(0), UsersSort::by_index());
         assert_eq!(page.rows.len(), 3);
     }
 
@@ -503,8 +630,29 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        let page = model(&config, None, UsersSort::by_index());
+        let page = model(&config, Some(0), UsersSort::by_index());
         assert_eq!(page.state, UsersPageState::NoSupportedInboundSelected);
+    }
+
+    #[test]
+    fn no_inbound_selected_when_preferred_missing() {
+        let config = loaded(
+            vec![inbound(0, "vless-in", "vless", Some(443), "/c/config.json")],
+            vec![client(
+                0,
+                "vless-in",
+                "/c/config.json",
+                0,
+                "uuid-1",
+                "one@x",
+                None,
+            )],
+            Vec::new(),
+        );
+        let page = model(&config, None, UsersSort::by_index());
+        assert_eq!(page.state, UsersPageState::NoInboundSelected);
+        assert!(page.selected_inbound_index.is_none());
+        assert!(page.rows.is_empty());
     }
 
     #[test]
@@ -528,7 +676,7 @@ mod tests {
             )],
             Vec::new(),
         );
-        let page = model(&config, None, UsersSort::by_index());
+        let page = model(&config, Some(0), UsersSort::by_index());
         assert_eq!(
             page.inbound_choices[0].label(),
             "vless-reality-443 · VLESS · :443"
@@ -537,5 +685,37 @@ mod tests {
             user_row_display(&page.rows[0]).source_file,
             "03-inbounds.json"
         );
+    }
+
+    #[test]
+    fn selected_users_protocol_dispatches_hysteria() {
+        let choices = vec![SupportedUserInbound {
+            inbound_index: 2,
+            tag: Some("hy".to_owned()),
+            protocol: "hysteria".to_owned(),
+            port: Some(443),
+            clients_count: 0,
+            source_file: "/c.json".to_owned(),
+        }];
+        assert_eq!(
+            selected_users_protocol(&choices, Some(2)),
+            Some(UsersProtocolUi::Hysteria)
+        );
+    }
+
+    #[test]
+    fn hysteria_row_display_masks_auth() {
+        let client = HysteriaClientSummary {
+            inbound_index: 0,
+            inbound_tag: Some("hy".to_owned()),
+            source_file: "/etc/xray/config.json".to_owned(),
+            client_index: 0,
+            email: Some("u@x".to_owned()),
+            has_auth: true,
+            level: 2,
+        };
+        let row = hysteria_row_display(&client);
+        assert_eq!(row.auth_masked, "••••••");
+        assert_eq!(row.level, "2");
     }
 }

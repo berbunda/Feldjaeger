@@ -67,8 +67,26 @@ pub trait SshSession: Send {
     /// Removes a remote file.
     fn remove_file(&self, path: &RemotePath) -> impl Future<Output = SshResult<()>> + Send;
 
+    /// Returns `true` when `path` exists and is a regular file (SFTP metadata).
+    ///
+    /// Missing paths yield `Ok(false)`. Other SFTP errors are propagated.
+    fn path_is_file(
+        &self,
+        path: &RemotePath,
+    ) -> impl Future<Output = SshResult<bool>> + Send;
+
     /// Executes a remote command with explicit arguments.
     fn exec(&self, command: &RemoteCommand) -> impl Future<Output = SshResult<ExecResult>> + Send;
+
+    /// Executes a remote command and writes `stdin` to the channel before collecting output.
+    ///
+    /// Used for `sudo -S` (password on stdin only — never place secrets in argv).
+    /// Callers must not log `stdin`.
+    fn exec_with_stdin(
+        &self,
+        command: &RemoteCommand,
+        stdin: &[u8],
+    ) -> impl Future<Output = SshResult<ExecResult>> + Send;
 
     /// Closes the SSH session.
     fn disconnect(self) -> impl Future<Output = SshResult<()>> + Send;

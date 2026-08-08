@@ -25,22 +25,23 @@ Layout:
 - Dashboard
 - Connection
 - Inbounds
-- Users
 - Outbounds
 - DNS
 - Routing
 - Logs
 - Service
-- WARP
+- Cloudflare WARP
 - Settings
 Sidebar is always visible.
 Sidebar width must be user-resizable.
 Sidebar width must persist between application sessions.
+Users are not a sidebar entry: open Inbounds, select an inbound, then use the Users tab.
 
 # Content Area
 Each page is implemented independently.
 Pages must not know about each other.
 Pages communicate only through ApplicationService.
+When content does not fit the window (non-fullscreen / resized), the content area shows horizontal and vertical scrollbars.
 
 # Navigation
 No nested sidebars.
@@ -112,9 +113,22 @@ Layout:
 - source selector (Access Log / Error Log / System Journal) with availability status
 - source information (type, path or service, status)
 - toolbar: line limit, Refresh, Follow / Stop Follow, local search
-- monospaced read-only text view (select / copy; no edit)
+- monospaced text view
 - privacy notice: Xray logs may contain sensitive connection information.
-Deferred: log config editing, log level changes, clear/truncate, export, analysis.
+Deferred on this page: truncation, deletion, rotation, export, analysis.
+Log destination / level / DNS / mask editing lives on the separate Log Settings page.
+
+# Log Settings
+Page title: Log Settings
+Edits the remote Xray top-level `log` object only (not Feldjäger application logs).
+Modes: View / Edit with Edit, Save, Cancel.
+Sections: Access log, Error log, Additional log entries, Privacy.
+Supported fields: `access`, `error`, `loglevel`, `dnsLog`, `maskAddress`.
+Unknown nested fields and unsupported values are preserved.
+Save uses the shared configuration modification pipeline (summary → backup → write → validate).
+After save: show restart/reload notice; invalidate Xray Logs source cache.
+Deferred: log rotation, journald/syslog, chmod/mkdir, truncate/delete, auto-restart,
+Feldjäger application log settings.
 
 # Keyboard
 - Ctrl+C = Copy
@@ -153,16 +167,85 @@ Block B: Screen Specifications
 │ [Restart] [Reload] [Logs]           │
 └─────────────────────────────────────┘
 
-# Users
+# Inbounds
 ┌──────────────────────────────────────────────┐
-│ Search                                       │
+│ Tag │ Protocol │ Listen │ Port │ Clients …  │
 ├──────────────────────────────────────────────┤
-│ UUID │ Email │ Enabled │ Expire │ Traffic    │
-├──────────────────────────────────────────────┤
-│ ...                                          │
+│ › vless-in · …                               │
 └──────────────────────────────────────────────┘
 
-[Add]
-[Edit]
-[Delete]
-[Copy VLESS]
+[ General | Protocol | Stream (disabled) | Security | Sniffing | Users ]
+
+General tab (VLESS / Trojan / Hysteria):
+- View / Edit for tag, listen, port (protocol)
+- Single "Shell Save" button (saves General + Protocol + Stream + Security + Sniffing together)
+- Duplicate tags are hard-blocked on Save
+- Port editable only when absent or scalar number/decimal-string
+
+Protocol tab:
+- VLESS: decryption field (display)
+- Trojan: informational note (no editable fields in IB-L1)
+- Hysteria: `settings.version` = 2 (fixed)
+
+Stream tab (Wave A + C1 + C3):
+- Editable for tcp/raw | xhttp | grpc | websocket | mkcp | hysteria; exotic methods preserved read-only
+- Hysteria protocol locks Stream to hysteria; congestion via `finalmask.quicParams` (congestion / brutalUp / brutalDown)
+- Stream/Security method combos are **matrix-filtered** (protocol × security × Vision); illegal editable methods coerce combo display without dirty-on-open
+- network vs method key: write preserves the key found on disk
+- xhttp: full `xhttpSettings` editor (Wave C3) — path/host/mode + headers rows + padding/SSE/gRPC + sc* ranges (From/To) + placement/obfs + XMUX + one-level `downloadSettings`; documented defaults on method select; Save always writes typed surface; unknown → extras
+- xhttp `mode`: combo `auto` | `packet-up` | `stream-one` | `stream-up` (unknown on-disk values preserved)
+- Share XHTTP: `path` / optional `host` / `mode` + URL-encoded `extra=` JSON (all advanced fields except host/path/mode)
+- FinalMask (VLESS/Trojan; not Hysteria, which owns `finalmask.quicParams`): editor for `streamSettings.finalmask.tcp[]` / `.udp[]` masking-layer chains — per-layer `type` combo (presets + free text for unlisted types) and a `settings` JSON object text area; Add/Remove + Move up/down (layer order is meaningful — first entry is innermost); Reality + non-empty `finalmask.tcp` shows an inline warning and is hard-blocked on Save (G4)
+
+Security tab (VLESS + Trojan + Hysteria):
+- VLESS: `none` | `tls` | `reality` (matrix-filtered)
+- Trojan: `tls` | `reality` (Add still defaults Reality)
+- Hysteria: `tls` required (G10)
+- TLS: full `tlsSettings` editor (ALPN / serverName / versions / cipherSuites / fingerprint / curves / ECH / …) + full `certificates[0]` (paths, inline PEM, usage, OCSP, oneTimeLoading, buildChain when usage=issue); `[1+]` preserved; G12 requires non-empty paths
+- ALPN: multi-select tags from IANA presets (+ Xray `FromMitM`); unknown on-disk values kept as tags
+- Fallbacks present → notify that Security ALPN is required; Save hard-blocked until non-empty (no auto-patch)
+- ECH fields collapsed until "Enable ECH" is true; `echSockopt` is raw JSON
+- Mode switch strips inactive `tlsSettings` ↔ `realitySettings`
+- Unknown `security` wire: open read-only + banner; Save blocked until known mode chosen
+- When Reality: "Generate x25519" + "Generate mldsa65" via remote SSH (30s timeout); Reality also has ALPN tags
+- Server private key / optional mldsa65Seed; ephemeral public key and verify shown after keygen
+- Reality advanced: `show` checkbox, `xver` (0/1/2), `minClientVer` / `maxClientVer` (x.y.z), `maxTimeDiff` (ms), and a collapsible rate-limiting section for `limitFallbackUpload` / `limitFallbackDownload` (`afterBytes` / `bytesPerSec` / `burstBytesPerSec` each)
+- Share TLS URI uses typed `serverName`
+
+Sniffing tab:
+- enabled, destOverride (http/tls/quic/fakedns), metadataOnly, routeOnly
+- Unknown destOverride tokens and sniffing extras preserved
+- Saved together with General/Protocol/Security via Shell Save
+
+Share:
+- VLESS/Trojan: Reality + **TLS** share URIs
+- XHTTP: `type=xhttp` path + optional host/mode + URL-encoded `extra=` (advanced allowlist)
+- Hysteria: minimal `hy2://auth@host:port` (+ optional `sni` / `insecure`)
+
+Shell Save / Add safety:
+- "Preview changes" shows a redacted structural JSON diff (IB-L5) before write
+- After remote write: `xray run -test` (IB-L6); on failure restore backup and surface Status Bar error
+- Compatibility gates hard-block illegal combos (incl. Vision + non-tcp on Users mutate)
+
+Users tab (selected VLESS or Trojan inbound):
+┌──────────────────────────────────────────────┐
+│ Email │ UUID │ Flow │ Inbound tag │ Source   │  ← VLESS
+├──────────────────────────────────────────────┤
+│ Email │ Password (masked) │ Tag │ Source     │  ← Trojan
+└──────────────────────────────────────────────┘
+
+[Add] [Edit] [Delete]
+- Trojan clients: password shown masked; edit dialog allows blank = preserve
+- Dirty shell drafts block the Users tab with an inline status reason
+- Vision flow on clients narrows Stream method filter (tcp/raw only) after Users mutate succeeds
+- Context menu: **Copy share URI** (`vless://` / `trojan://`)
+  - Host = Connection page host; port = inbound port
+  - Reality requires prior **Generate x25519** (PublicKey kept in session / retained store; never written to inbound JSON)
+  - VLESS with non-`none` decryption requires prior **Generate vlessenc** (client encryption half)
+  - Disabled button hover explains what is missing
+  - QR code deferred
+
+Add Inbound:
+- "Add Inbound" button opens Add mode with protocol picker (VLESS | Trojan)
+- Empty clients list is allowed on save
+- Same Preview changes + post-write `-test` path as Shell Save

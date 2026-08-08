@@ -20,8 +20,54 @@ const INSTALL_SCRIPT_URL: &str =
 const LATEST_RELEASE_API_URL: &str =
     "https://api.github.com/repos/XTLS/Xray-core/releases/latest";
 
+/// GitHub API endpoint for the Xray-core releases list (first page).
+const RELEASES_API_URL: &str = "https://api.github.com/repos/XTLS/Xray-core/releases";
+
 /// Default unit name used after a fresh install when discovery has no unit yet.
 const DEFAULT_UNIT_NAME: &str = "xray.service";
+
+/// Release channel for official `install-release.sh` (Stable vs `--beta`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum InstallChannel {
+    /// Latest GitHub release (`releases/latest` / script without `--beta`).
+    #[default]
+    Stable,
+    /// Script `--beta` / `PRE_RELEASE_LATEST` candidate.
+    Beta,
+}
+
+impl InstallChannel {
+    /// Short UI label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Stable => "Stable",
+            Self::Beta => "Beta",
+        }
+    }
+}
+
+/// Dual-channel available tags from a Check versions probe (partial success).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AvailableVersions {
+    /// Latest stable tag (no leading `v`), when the stable probe succeeded.
+    pub stable: Option<String>,
+    /// Beta/`--beta` candidate tag (no leading `v`), when found.
+    pub beta: Option<String>,
+    /// Safe error detail when the stable probe failed.
+    pub stable_error: Option<String>,
+    /// Safe error detail when the beta probe failed (or arch unsupported).
+    pub beta_error: Option<String>,
+}
+
+impl AvailableVersions {
+    /// Tag for the selected channel, if known.
+    pub fn tag_for(&self, channel: InstallChannel) -> Option<&str> {
+        match channel {
+            InstallChannel::Stable => self.stable.as_deref(),
+            InstallChannel::Beta => self.beta.as_deref(),
+        }
+    }
+}
 
 /// Classifies a failed Xray install/update/remove operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -137,12 +183,13 @@ impl XrayInstaller {
     /// Installs Xray using the official install-release.sh script.
     ///
     /// Refuses when an existing installation is reported (`AlreadyInstalled`).
-    /// Requires systemd.
+    /// Requires systemd. `InstallChannel::Beta` passes `--beta` to the script.
     pub async fn install<S: SshSession + Sync>(
         &self,
         session: &S,
         init_system: InitSystemKind,
         already_installed: bool,
+        channel: InstallChannel,
     ) -> InstallerResult<()> {
         ensure_supported(init_system)?;
         if already_installed {
@@ -152,8 +199,9 @@ impl XrayInstaller {
             ));
         }
 
-        info!(target: "xray", "Starting Xray installation");
-        self.run_official_script(session, "install").await?;
+        info!(target: "xray", channel = ?channel, "Starting Xray installation");
+        self.run_official_script(session, &install_script_args(channel))
+            .await?;
         self.verify_service_running(session, DEFAULT_UNIT_NAME)
             .await?;
         info!(target: "xray", "Xray installation completed");
@@ -163,11 +211,12 @@ impl XrayInstaller {
     /// Updates an existing Xray installation (official script `install` upgrades in place).
     ///
     /// Backs up binary, unit file, and configuration files first. Does not modify
-    /// configuration contents.
+    /// configuration contents. `InstallChannel::Beta` passes `--beta` to the script.
     pub async fn update<S: SshSession + Sync>(
         &self,
         session: &S,
         installation: &XrayInstallation,
+        channel: InstallChannel,
     ) -> InstallerResult<()> {
         ensure_supported(installation.init_system)?;
         if installation.binary_path.is_none() {
@@ -177,9 +226,10 @@ impl XrayInstaller {
             ));
         }
 
-        info!(target: "xray", "Starting Xray update");
+        info!(target: "xray", channel = ?channel, "Starting Xray update");
         self.backup_for_update(session, installation).await?;
-        self.run_official_script(session, "install").await?;
+        self.run_official_script(session, &install_script_args(channel))
+            .await?;
 
         let unit = installation
             .service_name
@@ -203,51 +253,80 @@ impl XrayInstaller {
 
         info!(target: "xray", "Starting Xray removal");
         self.backup_for_remove(session, installation).await?;
-        self.run_official_script(session, "remove").await?;
+        self.run_official_script(session, &["remove".to_owned()])
+            .await?;
         info!(target: "xray", "Xray removal completed");
         Ok(())
     }
 
-    /// Queries the latest Xray-core release tag via the GitHub API on the remote host.
-    pub async fn available_version<S: SshSession + Sync>(
+    /// Queries stable and beta available tags via the GitHub API on the remote host.
+    ///
+    /// Always attempts both channels sequentially (stable → MACHINE → beta).
+    /// Per-channel failures are recorded on [`AvailableVersions`]; this method
+    /// does not fail the whole check when only one channel errors.
+    pub async fn available_versions<S: SshSession + Sync>(
+        &self,
+        session: &S,
+    ) -> AvailableVersions {
+        let mut versions = AvailableVersions::default();
+
+        match self.probe_stable_tag(session).await {
+            Ok(tag) => versions.stable = Some(tag),
+            Err(error) => {
+                versions.stable_error = Some(sanitize_detail(&error.message()));
+            }
+        }
+
+        match self.resolve_xray_machine(session).await {
+            Ok(machine) => match self.probe_beta_tag(session, &machine).await {
+                Ok(tag) => versions.beta = tag,
+                Err(error) => {
+                    versions.beta_error = Some(sanitize_detail(&error.message()));
+                }
+            },
+            Err(error) => {
+                versions.beta_error = Some(sanitize_detail(&error.message()));
+            }
+        }
+
+        versions
+    }
+
+    async fn probe_stable_tag<S: SshSession + Sync>(
         &self,
         session: &S,
     ) -> InstallerResult<String> {
-        let result = run_remote(
-            session,
-            "curl",
-            vec![
-                "-sL".to_owned(),
-                "-f".to_owned(),
-                "-A".to_owned(),
-                "Feldjaeger".to_owned(),
-                LATEST_RELEASE_API_URL.to_owned(),
-            ],
-        )
-        .await
-        .map_err(|error| {
-            if error.kind() == InstallerErrorKind::PermissionDenied {
-                error
-            } else {
-                InstallerError::new(
-                    InstallerErrorKind::DownloadFailed,
-                    sanitize_detail(error.detail()),
-                )
-            }
-        })?;
+        let result = github_curl(session, LATEST_RELEASE_API_URL).await?;
+        parse_latest_tag(&result.stdout)
+    }
 
+    async fn probe_beta_tag<S: SshSession + Sync>(
+        &self,
+        session: &S,
+        machine: &str,
+    ) -> InstallerResult<Option<String>> {
+        let result = github_curl(session, RELEASES_API_URL).await?;
+        parse_beta_tag(&result.stdout, machine)
+    }
+
+    /// Resolves script `MACHINE` from remote `uname -m` (+ side-checks).
+    pub async fn resolve_xray_machine<S: SshSession + Sync>(
+        &self,
+        session: &S,
+    ) -> InstallerResult<String> {
+        let result = run_remote(session, "uname", vec!["-m".to_owned()]).await?;
         if result.exit_code != 0 {
             return Err(InstallerError::new(
-                InstallerErrorKind::DownloadFailed,
+                InstallerErrorKind::CommandFailed,
                 format!(
-                    "curl exited with code {}: {}",
+                    "uname -m exited with code {}: {}",
                     result.exit_code,
                     sanitize_detail(&String::from_utf8_lossy(&result.stderr))
                 ),
             ));
         }
-
-        parse_latest_tag(&result.stdout)
+        let uname_m = String::from_utf8_lossy(&result.stdout).trim().to_owned();
+        map_uname_to_machine(session, &uname_m).await
     }
 
     async fn backup_for_update<S: SshSession + Sync>(
@@ -355,8 +434,12 @@ impl XrayInstaller {
     async fn run_official_script<S: SshSession + Sync>(
         &self,
         session: &S,
-        action: &str,
+        script_args: &[String],
     ) -> InstallerResult<()> {
+        let action = script_args
+            .first()
+            .map(String::as_str)
+            .unwrap_or("install");
         let script_path = temp_script_path()?;
         let remote_path = RemotePath::new(script_path.clone()).map_err(|error| {
             InstallerError::new(InstallerErrorKind::CommandFailed, error.message())
@@ -417,12 +500,9 @@ impl XrayInstaller {
         }
 
         // 3. Run
-        let run = run_remote(
-            session,
-            "bash",
-            vec![script_path.clone(), action.to_owned()],
-        )
-        .await;
+        let mut bash_args = vec![script_path.clone()];
+        bash_args.extend(script_args.iter().cloned());
+        let run = run_remote(session, "bash", bash_args).await;
 
         // 4. Cleanup (best effort)
         if let Err(error) = session.remove_file(&remote_path).await {
@@ -474,6 +554,13 @@ impl XrayInstaller {
     }
 }
 
+fn install_script_args(channel: InstallChannel) -> Vec<String> {
+    match channel {
+        InstallChannel::Stable => vec!["install".to_owned()],
+        InstallChannel::Beta => vec!["install".to_owned(), "--beta".to_owned()],
+    }
+}
+
 fn ensure_supported(init_system: InitSystemKind) -> InstallerResult<()> {
     if init_system.supports_service_control() {
         Ok(())
@@ -495,6 +582,47 @@ fn temp_script_path() -> InstallerResult<String> {
         "/tmp/feldjaeger-xray-install-{}.sh",
         uuid::Uuid::new_v4()
     ))
+}
+
+async fn github_curl<S: SshSession + Sync>(
+    session: &S,
+    url: &str,
+) -> InstallerResult<ExecResult> {
+    let result = run_remote(
+        session,
+        "curl",
+        vec![
+            "-sL".to_owned(),
+            "-f".to_owned(),
+            "-A".to_owned(),
+            "Feldjaeger".to_owned(),
+            url.to_owned(),
+        ],
+    )
+    .await
+    .map_err(|error| {
+        if error.kind() == InstallerErrorKind::PermissionDenied {
+            error
+        } else {
+            InstallerError::new(
+                InstallerErrorKind::DownloadFailed,
+                sanitize_detail(error.detail()),
+            )
+        }
+    })?;
+
+    if result.exit_code != 0 {
+        return Err(InstallerError::new(
+            InstallerErrorKind::DownloadFailed,
+            format!(
+                "curl exited with code {}: {}",
+                result.exit_code,
+                sanitize_detail(&String::from_utf8_lossy(&result.stderr))
+            ),
+        ));
+    }
+
+    Ok(result)
 }
 
 async fn run_remote<S: SshSession + Sync>(
@@ -561,6 +689,120 @@ fn classify_script_failure(action: &str, result: &ExecResult) -> InstallerError 
     InstallerError::new(kind, detail)
 }
 
+/// Strips a leading `v` for comparison / display with Xray version output.
+pub fn normalize_version_tag(tag: &str) -> &str {
+    tag.trim().strip_prefix('v').unwrap_or(tag.trim())
+}
+
+/// Returns `true` when `candidate` is strictly newer than `current` (script `sort -V`).
+pub fn version_gt(candidate: &str, current: &str) -> bool {
+    compare_version_tags(candidate, current) == std::cmp::Ordering::Greater
+}
+
+fn compare_version_tags(a: &str, b: &str) -> std::cmp::Ordering {
+    let a_parts = version_numeric_parts(normalize_version_tag(a));
+    let b_parts = version_numeric_parts(normalize_version_tag(b));
+    let len = a_parts.len().max(b_parts.len());
+    for i in 0..len {
+        let av = a_parts.get(i).copied().unwrap_or(0);
+        let bv = b_parts.get(i).copied().unwrap_or(0);
+        match av.cmp(&bv) {
+            std::cmp::Ordering::Equal => {}
+            other => return other,
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
+fn version_numeric_parts(tag: &str) -> Vec<u64> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    for ch in tag.chars() {
+        if ch.is_ascii_digit() {
+            current.push(ch);
+        } else if !current.is_empty() {
+            if let Ok(n) = current.parse::<u64>() {
+                parts.push(n);
+            }
+            current.clear();
+        }
+    }
+    if !current.is_empty()
+        && let Ok(n) = current.parse::<u64>()
+    {
+        parts.push(n);
+    }
+    parts
+}
+
+/// Maps `uname -m` (+ side-checks) to install-release.sh `MACHINE`.
+pub async fn map_uname_to_machine<S: SshSession + Sync>(
+    session: &S,
+    uname_m: &str,
+) -> InstallerResult<String> {
+    match uname_m {
+        "i386" | "i686" => Ok("32".to_owned()),
+        "amd64" | "x86_64" => Ok("64".to_owned()),
+        "armv5tel" => Ok("arm32-v5".to_owned()),
+        "armv6l" => {
+            if cpuinfo_has_vfp(session).await? {
+                Ok("arm32-v6".to_owned())
+            } else {
+                Ok("arm32-v5".to_owned())
+            }
+        }
+        "armv7" | "armv7l" => {
+            if cpuinfo_has_vfp(session).await? {
+                Ok("arm32-v7a".to_owned())
+            } else {
+                Ok("arm32-v5".to_owned())
+            }
+        }
+        "armv8" | "aarch64" => Ok("arm64-v8a".to_owned()),
+        "mips" => Ok("mips32".to_owned()),
+        "mipsle" => Ok("mips32le".to_owned()),
+        "mips64" => {
+            if lscpu_little_endian(session).await? {
+                Ok("mips64le".to_owned())
+            } else {
+                Ok("mips64".to_owned())
+            }
+        }
+        "mips64le" => Ok("mips64le".to_owned()),
+        "ppc64" => Ok("ppc64".to_owned()),
+        "ppc64le" => Ok("ppc64le".to_owned()),
+        "riscv64" => Ok("riscv64".to_owned()),
+        "s390x" => Ok("s390x".to_owned()),
+        other => Err(InstallerError::new(
+            InstallerErrorKind::UnsupportedSystem,
+            format!("architecture is not supported: {other}"),
+        )),
+    }
+}
+
+async fn cpuinfo_has_vfp<S: SshSession + Sync>(session: &S) -> InstallerResult<bool> {
+    let result = run_remote(
+        session,
+        "grep",
+        vec!["Features".to_owned(), "/proc/cpuinfo".to_owned()],
+    )
+    .await?;
+    if result.exit_code != 0 {
+        return Ok(false);
+    }
+    Ok(String::from_utf8_lossy(&result.stdout)
+        .to_ascii_lowercase()
+        .contains("vfp"))
+}
+
+async fn lscpu_little_endian<S: SshSession + Sync>(session: &S) -> InstallerResult<bool> {
+    let result = run_remote(session, "lscpu", Vec::new()).await?;
+    if result.exit_code != 0 {
+        return Ok(false);
+    }
+    Ok(String::from_utf8_lossy(&result.stdout).contains("Little Endian"))
+}
+
 /// Parses `tag_name` from a GitHub releases/latest JSON payload.
 pub fn parse_latest_tag(stdout: &[u8]) -> InstallerResult<String> {
     let value: serde_json::Value = serde_json::from_slice(stdout).map_err(|error| {
@@ -582,9 +824,46 @@ pub fn parse_latest_tag(stdout: &[u8]) -> InstallerResult<String> {
             )
         })?;
 
-    // Strip a leading 'v' for display consistency with Xray version output.
-    let normalized = tag.strip_prefix('v').unwrap_or(tag).to_owned();
-    Ok(normalized)
+    Ok(normalize_version_tag(tag).to_owned())
+}
+
+/// Picks `PRE_RELEASE_LATEST` like install-release.sh: first release tag whose
+/// `Xray-linux-{MACHINE}.zip` download URL appears in the releases JSON.
+pub fn parse_beta_tag(stdout: &[u8], machine: &str) -> InstallerResult<Option<String>> {
+    let value: serde_json::Value = serde_json::from_slice(stdout).map_err(|error| {
+        InstallerError::new(
+            InstallerErrorKind::VerificationFailed,
+            format!("invalid GitHub releases JSON: {error}"),
+        )
+    })?;
+
+    let releases = value.as_array().ok_or_else(|| {
+        InstallerError::new(
+            InstallerErrorKind::VerificationFailed,
+            "GitHub releases JSON is not an array",
+        )
+    })?;
+
+    let text = String::from_utf8_lossy(stdout);
+    for release in releases {
+        let Some(tag) = release
+            .get("tag_name")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        else {
+            continue;
+        };
+        let tag_v = format!("v{}", normalize_version_tag(tag));
+        let url_zip = format!(
+            "https://github.com/XTLS/Xray-core/releases/download/{tag_v}/Xray-linux-{machine}.zip"
+        );
+        if text.contains(&url_zip) {
+            return Ok(Some(normalize_version_tag(tag).to_owned()));
+        }
+    }
+
+    Ok(None)
 }
 
 
@@ -704,6 +983,14 @@ mod tests {
             future::ready(Ok(()))
         }
 
+        fn path_is_file(
+            &self,
+            path: &RemotePath,
+        ) -> impl Future<Output = SshResult<bool>> + Send {
+            let is_file = self.files.lock().unwrap().contains_key(path.as_str());
+            future::ready(Ok(is_file))
+        }
+
         fn exec(
             &self,
             command: &RemoteCommand,
@@ -717,13 +1004,20 @@ mod tests {
                     .cloned()
                     .unwrap_or_else(|| ExecResult::new(Vec::new(), Vec::new(), 0))
             } else if command.program() == "bash"
-                && command.args().last().map(String::as_str) == Some("install")
+                && command.args().get(1).map(String::as_str) == Some("install")
+                && command.args().get(2).map(String::as_str) == Some("--beta")
+            {
+                map.get("bash install --beta")
+                    .cloned()
+                    .unwrap_or_else(|| ExecResult::new(Vec::new(), Vec::new(), 0))
+            } else if command.program() == "bash"
+                && command.args().get(1).map(String::as_str) == Some("install")
             {
                 map.get("bash install")
                     .cloned()
                     .unwrap_or_else(|| ExecResult::new(Vec::new(), Vec::new(), 0))
             } else if command.program() == "bash"
-                && command.args().last().map(String::as_str) == Some("remove")
+                && command.args().get(1).map(String::as_str) == Some("remove")
             {
                 map.get("bash remove")
                     .cloned()
@@ -744,11 +1038,28 @@ mod tests {
                         0,
                     )
                 })
+            } else if command.program() == "uname" {
+                map.get("uname -m").cloned().unwrap_or_else(|| {
+                    ExecResult::new(b"x86_64\n".to_vec(), Vec::new(), 0)
+                })
             } else if command.program() == "curl"
-                && command.args().iter().any(|a| a.contains("api.github.com"))
+                && command.args().iter().any(|a| a.contains("/releases/latest"))
             {
                 map.get("curl github api").cloned().unwrap_or_else(|| {
                     ExecResult::new(br#"{"tag_name":"v26.3.31"}"#.to_vec(), Vec::new(), 0)
+                })
+            } else if command.program() == "curl"
+                && command
+                    .args()
+                    .iter()
+                    .any(|a| a.contains("/releases") && !a.contains("/releases/latest"))
+            {
+                map.get("curl github releases").cloned().unwrap_or_else(|| {
+                    ExecResult::new(
+                        br#"[{"tag_name":"v26.4.0-pre","assets":[{"browser_download_url":"https://github.com/XTLS/Xray-core/releases/download/v26.4.0-pre/Xray-linux-64.zip"}]}]"#.to_vec(),
+                        Vec::new(),
+                        0,
+                    )
                 })
             } else {
                 let key = {
@@ -766,6 +1077,15 @@ mod tests {
             };
             future::ready(Ok(result))
         }
+
+    fn exec_with_stdin(
+        &self,
+        command: &feldjaeger_ssh::RemoteCommand,
+        stdin: &[u8],
+    ) -> impl Future<Output = feldjaeger_ssh::SshResult<feldjaeger_ssh::ExecResult>> + Send {
+        let _ = stdin;
+        self.exec(command)
+    }
 
         fn disconnect(self) -> impl Future<Output = SshResult<()>> + Send {
             future::ready(Ok(()))
@@ -841,12 +1161,28 @@ mod tests {
         fn remove_file(&self, path: &RemotePath) -> impl Future<Output = SshResult<()>> + Send {
             self.inner.remove_file(path)
         }
+        fn path_is_file(
+            &self,
+            path: &RemotePath,
+        ) -> impl Future<Output = SshResult<bool>> + Send {
+            self.inner.path_is_file(path)
+        }
         fn exec(
             &self,
             command: &RemoteCommand,
         ) -> impl Future<Output = SshResult<ExecResult>> + Send {
             self.inner.exec(command)
         }
+
+    fn exec_with_stdin(
+        &self,
+        command: &feldjaeger_ssh::RemoteCommand,
+        stdin: &[u8],
+    ) -> impl std::future::Future<Output = feldjaeger_ssh::SshResult<feldjaeger_ssh::ExecResult>> + Send {
+        let _ = stdin;
+        self.exec(command)
+    }
+
         fn disconnect(self) -> impl Future<Output = SshResult<()>> + Send {
             self.inner.disconnect()
         }
@@ -894,7 +1230,7 @@ mod tests {
         let session = MockSession::new();
         let installer = XrayInstaller::new();
         let error = installer
-            .install(&session, InitSystemKind::Systemd, true)
+            .install(&session, InitSystemKind::Systemd, true, InstallChannel::Stable)
             .await
             .unwrap_err();
         assert_eq!(error.kind(), InstallerErrorKind::AlreadyInstalled);
@@ -906,7 +1242,7 @@ mod tests {
         let session = MockSession::new();
         let installer = XrayInstaller::new();
         let error = installer
-            .install(&session, InitSystemKind::Runit, false)
+            .install(&session, InitSystemKind::Runit, false, InstallChannel::Stable)
             .await
             .unwrap_err();
         assert_eq!(error.kind(), InstallerErrorKind::UnsupportedSystem);
@@ -921,7 +1257,7 @@ mod tests {
         );
         let installer = XrayInstaller::new();
         installer
-            .install(&session, InitSystemKind::Systemd, false)
+            .install(&session, InitSystemKind::Systemd, false, InstallChannel::Stable)
             .await
             .expect("install should succeed");
 
@@ -940,7 +1276,7 @@ mod tests {
         );
         let installer = XrayInstaller::new();
         let error = installer
-            .install(&session, InitSystemKind::Systemd, false)
+            .install(&session, InitSystemKind::Systemd, false, InstallChannel::Stable)
             .await
             .unwrap_err();
         assert_eq!(error.kind(), InstallerErrorKind::DownloadFailed);
@@ -954,7 +1290,7 @@ mod tests {
         );
         let installer = XrayInstaller::new();
         let error = installer
-            .install(&session, InitSystemKind::Systemd, false)
+            .install(&session, InitSystemKind::Systemd, false, InstallChannel::Stable)
             .await
             .unwrap_err();
         assert_eq!(error.kind(), InstallerErrorKind::VerificationFailed);
@@ -974,7 +1310,7 @@ mod tests {
         );
         let installer = XrayInstaller::new();
         let error = installer
-            .install(&session, InitSystemKind::Systemd, false)
+            .install(&session, InitSystemKind::Systemd, false, InstallChannel::Stable)
             .await
             .unwrap_err();
         assert_eq!(error.kind(), InstallerErrorKind::ServiceStartFailed);
@@ -996,7 +1332,7 @@ mod tests {
         );
         let installer = XrayInstaller::new();
         let error = installer
-            .install(&session, InitSystemKind::Systemd, false)
+            .install(&session, InitSystemKind::Systemd, false, InstallChannel::Stable)
             .await
             .unwrap_err();
         assert_eq!(error.kind(), InstallerErrorKind::PermissionDenied);
@@ -1014,7 +1350,7 @@ mod tests {
         );
         let installer = XrayInstaller::new();
         installer
-            .update(&session, &sample_installation())
+            .update(&session, &sample_installation(), InstallChannel::Stable)
             .await
             .expect("update should succeed");
 
@@ -1033,7 +1369,7 @@ mod tests {
             .with_exec("curl download script", ExecResult::new(Vec::new(), Vec::new(), 0));
         let installer = XrayInstaller::new();
         let error = installer
-            .update(&session, &sample_installation())
+            .update(&session, &sample_installation(), InstallChannel::Stable)
             .await
             .unwrap_err();
         assert_eq!(error.kind(), InstallerErrorKind::BackupFailed);
@@ -1066,14 +1402,103 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn available_version_parses_tag() {
+    async fn available_versions_parses_stable_and_beta() {
         let session = MockSession::new();
         let installer = XrayInstaller::new();
-        let version = installer
-            .available_version(&session)
+        let versions = installer.available_versions(&session).await;
+        assert_eq!(versions.stable.as_deref(), Some("26.3.31"));
+        assert_eq!(versions.beta.as_deref(), Some("26.4.0-pre"));
+        assert!(versions.stable_error.is_none());
+        assert!(versions.beta_error.is_none());
+    }
+
+    #[tokio::test]
+    async fn available_versions_partial_success_when_beta_fails() {
+        let session = MockSession::new().with_exec(
+            "curl github releases",
+            ExecResult::new(Vec::new(), b"curl: (22) HTTP 403\n".to_vec(), 22),
+        );
+        let installer = XrayInstaller::new();
+        let versions = installer.available_versions(&session).await;
+        assert_eq!(versions.stable.as_deref(), Some("26.3.31"));
+        assert!(versions.beta.is_none());
+        assert!(versions.beta_error.is_some());
+    }
+
+    #[tokio::test]
+    async fn install_beta_passes_beta_flag() {
+        let session = ScriptSession::valid(
+            MockSession::new()
+                .with_exec("curl download script", ExecResult::new(Vec::new(), Vec::new(), 0))
+                .with_exec(
+                    "bash install --beta",
+                    ExecResult::new(Vec::new(), Vec::new(), 0),
+                ),
+        );
+        let installer = XrayInstaller::new();
+        installer
+            .install(
+                &session,
+                InitSystemKind::Systemd,
+                false,
+                InstallChannel::Beta,
+            )
             .await
-            .expect("version check");
-        assert_eq!(version, "26.3.31");
+            .expect("beta install should succeed");
+
+        let calls = session.inner.exec_calls.lock().unwrap();
+        let beta_bash = calls.iter().find(|c| {
+            c.program() == "bash"
+                && c.args().iter().any(|a| a == "--beta")
+                && c.args().iter().any(|a| a == "install")
+        });
+        assert!(beta_bash.is_some(), "expected bash … install --beta");
+    }
+
+    #[test]
+    fn version_gt_compares_numeric_segments() {
+        assert!(version_gt("25.7.1", "25.3.6"));
+        assert!(version_gt("1.8.10", "1.8.9"));
+        assert!(!version_gt("26.3.31", "26.3.31"));
+        assert!(!version_gt("26.3.30", "26.3.31"));
+        assert!(version_gt("v26.4.0", "26.3.31"));
+    }
+
+    #[test]
+    fn parse_beta_tag_picks_first_with_machine_zip() {
+        let json = br#"[
+          {"tag_name":"v26.5.0","assets":[]},
+          {"tag_name":"v26.4.0-pre","assets":[{"browser_download_url":"https://github.com/XTLS/Xray-core/releases/download/v26.4.0-pre/Xray-linux-64.zip"}]},
+          {"tag_name":"v26.3.0","assets":[{"browser_download_url":"https://github.com/XTLS/Xray-core/releases/download/v26.3.0/Xray-linux-64.zip"}]}
+        ]"#;
+        let tag = parse_beta_tag(json, "64").unwrap();
+        assert_eq!(tag.as_deref(), Some("26.4.0-pre"));
+    }
+
+    #[test]
+    fn parse_beta_tag_empty_when_no_zip() {
+        let json = br#"[{"tag_name":"v26.4.0","assets":[]}]"#;
+        let tag = parse_beta_tag(json, "64").unwrap();
+        assert!(tag.is_none());
+    }
+
+    #[tokio::test]
+    async fn map_uname_common_arches() {
+        let session = MockSession::new();
+        assert_eq!(
+            map_uname_to_machine(&session, "x86_64").await.unwrap(),
+            "64"
+        );
+        assert_eq!(
+            map_uname_to_machine(&session, "aarch64").await.unwrap(),
+            "arm64-v8a"
+        );
+        assert_eq!(
+            map_uname_to_machine(&session, "i686").await.unwrap(),
+            "32"
+        );
+        let err = map_uname_to_machine(&session, "sparc").await.unwrap_err();
+        assert_eq!(err.kind(), InstallerErrorKind::UnsupportedSystem);
     }
 
     #[test]

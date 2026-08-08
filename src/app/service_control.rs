@@ -127,11 +127,24 @@ pub struct ServicePageModel {
     /// Last known service state.
     pub state: Option<ServiceState>,
     /// Whether Start/Stop/… buttons may be used.
-    pub management_allowed: bool,
-    /// Explanation when management is not allowed.
+    pub lifecycle_allowed: bool,
+    /// Whether Create / override unit may be used.
+    pub unit_create_allowed: bool,
+    /// Whether Edit unit may be used.
+    pub unit_edit_allowed: bool,
+    /// Cached host probe (None until probed).
+    pub unit_probe: Option<crate::init::UnitHostProbe>,
+    /// Explanation when lifecycle is not allowed.
     pub blocked_reason: Option<&'static str>,
     /// Current control-operation lifecycle.
     pub control: ServiceControlState,
+}
+
+impl ServicePageModel {
+    /// Compatibility alias for lifecycle buttons.
+    pub fn management_allowed(&self) -> bool {
+        self.lifecycle_allowed
+    }
 }
 
 /// Outcome delivered from the service-control worker thread.
@@ -262,22 +275,156 @@ pub fn user_facing_service_error(error: &ServiceControlError) -> String {
     }
 }
 
-/// Builds the Service page model from discovery and control state.
+/// Maps a unit-file error to a short user-facing Status Bar message.
+pub fn user_facing_unit_error(error: &crate::init::UnitFileError) -> String {
+    use crate::init::UnitFileErrorKind;
+    match error.kind() {
+        UnitFileErrorKind::SshConnectionFailed => user_message_see_log("SSH connection failed."),
+        UnitFileErrorKind::PermissionDenied => user_message_see_log("Permission denied."),
+        UnitFileErrorKind::PreflightFailed => {
+            "Config path not world-readable for unit user (need o+r / o+x).".to_owned()
+        }
+        UnitFileErrorKind::BackupFailed => user_message_see_log("Unit backup failed."),
+        UnitFileErrorKind::WriteFailed => user_message_see_log("Unit file write failed."),
+        UnitFileErrorKind::DaemonReloadFailed => user_message_see_log("daemon-reload failed."),
+        UnitFileErrorKind::SudoFailed => user_message_see_log("sudo failed."),
+        UnitFileErrorKind::UnsupportedInitSystem => "Unsupported init system.".to_owned(),
+        UnitFileErrorKind::InvalidSpec => format!("Invalid unit: {}", error.detail()),
+        UnitFileErrorKind::CommandFailed => user_message_see_log("Remote command failed."),
+    }
+}
+
+/// Request to apply a unit Create/Edit.
+#[derive(Debug, Clone)]
+pub struct UnitApplyRequest {
+    /// Unit specification to write.
+    pub spec: crate::init::UnitSpec,
+    /// Optional sudo password (cleared by caller after spawn).
+    pub sudo_password: Option<String>,
+    /// After write, enable and start the service.
+    pub enable_and_start: bool,
+}
+
+/// Outcome of a unit Apply worker.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct UnitApplyOutcome {
+    /// Unit name written.
+    pub service_name: String,
+    /// Apply result.
+    pub result: Result<(), crate::init::UnitFileError>,
+    /// Whether enable+start was requested.
+    pub enable_and_start: bool,
+    /// Whether the service appeared Running before apply (caller may prompt Restart).
+    pub was_running: bool,
+}
+
+/// Connect → install_or_replace_unit → optional enable+start → disconnect.
+pub async fn run_unit_apply<B>(
+    backend: &B,
+    profile: &StoredConnectionProfile,
+    secrets: &ConnectionSecrets,
+    request: UnitApplyRequest,
+    was_running: bool,
+) -> UnitApplyOutcome
+where
+    B: SshBackend,
+    B::Session: Sync,
+{
+    let service_name = request.spec.unit_name.as_str().to_owned();
+    let enable_and_start = request.enable_and_start;
+
+    let connect = build_connect_request(profile, secrets);
+    let session = match backend.connect(&connect).await {
+        Ok(s) => s,
+        Err(err) => {
+            return UnitApplyOutcome {
+                service_name,
+                result: Err(crate::init::UnitFileError::new(
+                    crate::init::UnitFileErrorKind::SshConnectionFailed,
+                    crate::logging::redact::sanitize_detail(err.message()),
+                )),
+                enable_and_start,
+                was_running,
+            };
+        }
+    };
+
+    let options = crate::init::InstallUnitOptions {
+        sudo_password: request.sudo_password,
+    };
+    let result =
+        crate::init::install_or_replace_unit(&session, &request.spec, options).await;
+
+    let result = match result {
+        Ok(()) if enable_and_start => {
+            let init = SystemdManager::new();
+            let enable = init.enable_service(&session, &service_name).await;
+            let start = match enable {
+                Ok(()) => init.start_service(&session, &service_name).await,
+                Err(e) => Err(e),
+            };
+            match start {
+                Ok(()) => Ok(()),
+                Err(e) => Err(crate::init::UnitFileError::new(
+                    crate::init::UnitFileErrorKind::CommandFailed,
+                    e.message(),
+                )),
+            }
+        }
+        other => other,
+    };
+
+    let _ = session.disconnect().await;
+
+    UnitApplyOutcome {
+        service_name,
+        result,
+        enable_and_start,
+        was_running,
+    }
+}
+
+/// Builds the Service page model from discovery, control state, and unit probe.
+///
+/// Flag matrix:
+/// ```text
+/// lifecycle_allowed  = systemd + service_name Some
+/// unit_create_allowed = systemd + discovery_ready + !@ + !etc_exists (probe)
+/// unit_edit_allowed   = systemd + discovery_ready + !@ + etc_exists (probe)
+/// ```
 pub fn build_service_page_model(
     discovery: &crate::xray::DiscoveryState,
     control: &ServiceControlState,
     override_state: Option<ServiceState>,
+    unit_probe: Option<crate::init::UnitHostProbe>,
 ) -> ServicePageModel {
+    use crate::init::is_instance_unit_name;
     use crate::xray::DiscoveryState;
 
     match discovery {
         DiscoveryState::Succeeded(installation) => {
-            let management_allowed = installation.service_control_supported()
-                && installation.service_name.is_some();
-            let blocked_reason = if !installation.service_control_supported() {
+            let systemd = installation.service_control_supported();
+            let lifecycle_allowed = systemd && installation.service_name.is_some();
+            let name_for_authoring = installation
+                .service_name
+                .as_deref()
+                .unwrap_or("xray.service");
+            let is_instance = is_instance_unit_name(name_for_authoring);
+            let (create, edit) = match unit_probe {
+                Some(p) if systemd && !is_instance => (!p.etc_unit_exists, p.etc_unit_exists),
+                None if systemd && !is_instance => {
+                    // Until probe returns: suggest create when no discovered unit.
+                    (installation.service_name.is_none(), installation.service_name.is_some())
+                }
+                _ => (false, false),
+            };
+            let blocked_reason = if !systemd {
                 Some("Do not attempt service management.")
-            } else if installation.service_name.is_none() {
+            } else if installation.service_name.is_none() && !create {
                 Some("Xray service unit was not found during discovery.")
+            } else if installation.service_name.is_none() {
+                None
             } else {
                 None
             };
@@ -286,24 +433,40 @@ pub fn build_service_page_model(
                 service_name: installation.service_name.clone(),
                 init_system: Some(installation.init_system),
                 state: override_state.or(installation.service_state),
-                management_allowed,
+                lifecycle_allowed,
+                unit_create_allowed: create,
+                unit_edit_allowed: edit,
+                unit_probe,
                 blocked_reason,
                 control: control.clone(),
             }
         }
-        DiscoveryState::NotFound { init_system, .. } => ServicePageModel {
-            discovery_ready: true,
-            service_name: None,
-            init_system: Some(*init_system),
-            state: None,
-            management_allowed: false,
-            blocked_reason: if init_system.supports_service_control() {
-                Some("Xray installation not found.")
-            } else {
-                Some("Do not attempt service management.")
-            },
-            control: control.clone(),
-        },
+        DiscoveryState::NotFound { init_system, .. } => {
+            let systemd = init_system.supports_service_control();
+            let (create, edit) = match unit_probe {
+                Some(p) if systemd => (!p.etc_unit_exists, p.etc_unit_exists),
+                None if systemd => (true, false),
+                _ => (false, false),
+            };
+            ServicePageModel {
+                discovery_ready: true,
+                service_name: None,
+                init_system: Some(*init_system),
+                state: None,
+                lifecycle_allowed: false,
+                unit_create_allowed: create,
+                unit_edit_allowed: edit,
+                unit_probe,
+                blocked_reason: if !systemd {
+                    Some("Do not attempt service management.")
+                } else if !create && !edit {
+                    Some("Xray installation not found.")
+                } else {
+                    None
+                },
+                control: control.clone(),
+            }
+        }
         DiscoveryState::Idle
         | DiscoveryState::Discovering
         | DiscoveryState::Failed { .. } => ServicePageModel {
@@ -311,7 +474,10 @@ pub fn build_service_page_model(
             service_name: None,
             init_system: None,
             state: None,
-            management_allowed: false,
+            lifecycle_allowed: false,
+            unit_create_allowed: false,
+            unit_edit_allowed: false,
+            unit_probe: None,
             blocked_reason: Some("Run discovery on the Connection page first."),
             control: control.clone(),
         },
@@ -398,6 +564,13 @@ mod tests {
             future::ready(Err(SshError::new("not supported")))
         }
 
+        fn path_is_file(
+            &self,
+            _path: &RemotePath,
+        ) -> impl Future<Output = SshResult<bool>> + Send {
+            async { Ok(true) }
+        }
+
         fn exec(
             &self,
             command: &RemoteCommand,
@@ -423,6 +596,15 @@ mod tests {
                 });
             future::ready(Ok(result))
         }
+
+    fn exec_with_stdin(
+        &self,
+        command: &feldjaeger_ssh::RemoteCommand,
+        stdin: &[u8],
+    ) -> impl Future<Output = feldjaeger_ssh::SshResult<feldjaeger_ssh::ExecResult>> + Send {
+        let _ = stdin;
+        self.exec(command)
+    }
 
         fn disconnect(self) -> impl Future<Output = SshResult<()>> + Send {
             future::ready(Ok(()))
@@ -637,8 +819,9 @@ mod tests {
     #[test]
     fn page_model_blocks_unsupported_init() {
         let discovery = DiscoveryState::Succeeded(sample_installation(InitSystemKind::OpenRC, None));
-        let model = build_service_page_model(&discovery, &ServiceControlState::Idle, None);
-        assert!(!model.management_allowed);
+        let model = build_service_page_model(&discovery, &ServiceControlState::Idle, None, None);
+        assert!(!model.lifecycle_allowed);
+        assert!(!model.unit_create_allowed);
         assert_eq!(
             model.blocked_reason,
             Some("Do not attempt service management.")
@@ -649,10 +832,22 @@ mod tests {
     fn page_model_allows_systemd_with_unit() {
         let discovery =
             DiscoveryState::Succeeded(sample_installation(InitSystemKind::Systemd, Some("xray.service")));
-        let model = build_service_page_model(&discovery, &ServiceControlState::Idle, None);
-        assert!(model.management_allowed);
+        let model = build_service_page_model(&discovery, &ServiceControlState::Idle, None, None);
+        assert!(model.lifecycle_allowed);
+        assert!(model.unit_edit_allowed);
+        assert!(!model.unit_create_allowed);
         assert_eq!(model.service_name.as_deref(), Some("xray.service"));
         assert_eq!(model.state, Some(ServiceState::Running));
+    }
+
+    #[test]
+    fn page_model_create_when_no_unit() {
+        let discovery =
+            DiscoveryState::Succeeded(sample_installation(InitSystemKind::Systemd, None));
+        let model = build_service_page_model(&discovery, &ServiceControlState::Idle, None, None);
+        assert!(!model.lifecycle_allowed);
+        assert!(model.unit_create_allowed);
+        assert!(!model.unit_edit_allowed);
     }
 
     #[test]
@@ -661,12 +856,30 @@ mod tests {
             &DiscoveryState::Idle,
             &ServiceControlState::Idle,
             None,
+            None,
         );
         assert!(!model.discovery_ready);
         assert_eq!(
             model.blocked_reason,
             Some("Run discovery on the Connection page first.")
         );
+    }
+
+    #[test]
+    fn page_model_blocks_instance_authoring() {
+        let discovery = DiscoveryState::Succeeded(sample_installation(
+            InitSystemKind::Systemd,
+            Some("xray@foo.service"),
+        ));
+        let probe = crate::init::UnitHostProbe {
+            etc_unit_exists: true,
+            can_write_unit_dir: true,
+        };
+        let model =
+            build_service_page_model(&discovery, &ServiceControlState::Idle, None, Some(probe));
+        assert!(model.lifecycle_allowed);
+        assert!(!model.unit_create_allowed);
+        assert!(!model.unit_edit_allowed);
     }
 
     #[test]

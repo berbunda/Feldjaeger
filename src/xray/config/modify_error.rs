@@ -1,4 +1,4 @@
-//! Typed errors for VLESS client configuration modifications.
+//! Typed errors for configuration modifications (users, log settings, …).
 
 use std::fmt;
 
@@ -23,12 +23,32 @@ pub enum ConfigModifyErrorKind {
     UserNotFound,
     /// Target inbound was not found or is out of range.
     InboundNotFound,
-    /// Selected inbound protocol is not editable (not VLESS).
+    /// Selected inbound protocol is not editable (not Tier‑2 / not enabled).
     UnsupportedInbound,
+    /// Inbound has both `settings.clients` and `settings.users`.
+    AmbiguousClientsArray,
+    /// Client JSON fingerprint does not match the expected value (stale UI).
+    FingerprintMismatch,
     /// Another client already uses the same UUID.
     UuidConflict,
     /// Another client already uses the same email.
     EmailConflict,
+    /// Top-level `log` value is not a JSON object.
+    MalformedLogObject,
+    /// A log field contains an unsupported value that blocks the requested edit.
+    UnsupportedLogValue,
+    /// Access/error file path failed validation.
+    InvalidFilePath,
+    /// Custom `maskAddress` format is invalid.
+    InvalidMaskFormat,
+    /// Remote file changed since the configuration was loaded.
+    ConfigurationChangedRemotely,
+    /// Official / structural Xray configuration validation failed.
+    XrayValidationFailed,
+    /// Requested outbound tag already exists.
+    OutboundTagConflict,
+    /// Target outbound was not found.
+    OutboundNotFound,
 }
 
 impl ConfigModifyErrorKind {
@@ -38,14 +58,24 @@ impl ConfigModifyErrorKind {
             Self::BackupFailed => "Backup failed",
             Self::ValidationFailed => "Validation failed",
             Self::SerializationFailed => "Serialization failed",
-            Self::UploadFailed => "Upload failed",
+            Self::UploadFailed => "Remote write failed",
             Self::PermissionDenied => "Permission denied",
-            Self::ConnectionLost => "Connection lost",
+            Self::ConnectionLost => "No SSH connection",
             Self::UserNotFound => "User not found",
             Self::InboundNotFound => "Inbound not found",
             Self::UnsupportedInbound => "Unsupported inbound type",
+            Self::AmbiguousClientsArray => "Ambiguous clients/users arrays",
+            Self::FingerprintMismatch => "Configuration changed since edit started",
             Self::UuidConflict => "Validation failed",
             Self::EmailConflict => "Validation failed",
+            Self::MalformedLogObject => "Malformed log object",
+            Self::UnsupportedLogValue => "Unsupported log value",
+            Self::InvalidFilePath => "Invalid file path",
+            Self::InvalidMaskFormat => "Invalid mask format",
+            Self::ConfigurationChangedRemotely => "Configuration changed remotely",
+            Self::XrayValidationFailed => "Xray configuration validation failed",
+            Self::OutboundTagConflict => "Outbound tag conflict",
+            Self::OutboundNotFound => "Outbound not found",
         }
     }
 }

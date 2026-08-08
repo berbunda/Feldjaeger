@@ -4,7 +4,7 @@ use feldjaeger_ssh::{RemotePath, SshError, SshSession};
 use tracing::info;
 
 use crate::error::{AppError, AppResult};
-use crate::remote::BackupManager;
+use crate::remote::{BackupManager, ConfigBackup};
 
 /// Orchestrates remote operations over an SSH session.
 ///
@@ -42,6 +42,9 @@ impl RemoteAdmin {
 
     /// Creates a backup, then atomically replaces the remote configuration file.
     ///
+    /// Returns the backup metadata so callers can restore after a failed
+    /// `xray run -test` (IB-L6).
+    ///
     /// If backup creation fails, the original file is left untouched and the
     /// error message starts with `Backup failed`.
     pub async fn write_config_safe<S: SshSession>(
@@ -49,7 +52,7 @@ impl RemoteAdmin {
         session: &S,
         path: &RemotePath,
         contents: &[u8],
-    ) -> AppResult<()> {
+    ) -> AppResult<ConfigBackup> {
         info!(
             target: "remote",
             host = %session.profile().host,
@@ -59,7 +62,8 @@ impl RemoteAdmin {
             "safe config write"
         );
 
-        self.backup
+        let backup = self
+            .backup
             .create_backup(session, path)
             .await
             .map_err(|error| {
@@ -82,7 +86,7 @@ impl RemoteAdmin {
             "safe config write completed"
         );
 
-        Ok(())
+        Ok(backup)
     }
 }
 
