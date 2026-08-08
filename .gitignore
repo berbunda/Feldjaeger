@@ -26,12 +26,12 @@ target
 /target
 
 # Added by user
-/.cursor
-/.claude
-/.history
-/docs
-/.cursor
-/.gstack
-/Tasks
-/Completed
-/tests
+.cursor
+.claude
+.history
+docs
+.cursor
+.gstack
+Tasks
+Completed
+tests
