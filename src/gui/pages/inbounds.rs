@@ -17,9 +17,10 @@ use crate::app::{
 use crate::gui::pages::users;
 use crate::xray::{
     ALPN_PRESETS, CERT_USAGE_PRESETS, CURVE_PRESETS, FINGERPRINT_PRESETS, FallbackDest,
-    FallbackDestKind, FallbackObject, FinalMaskLayerDraft, InboundSummary, KCP_MTU_MAX,
-    KCP_MTU_MIN, KCP_TTI_MAX,
-    KCP_TTI_MIN, KcpStreamSettings, TCP_FINALMASK_TYPES, TLS_VERSION_PRESETS, TUNNEL_NETWORKS,
+    FallbackDestKind, FallbackObject, FinalMaskLayerDraft, InboundStreamDraft, InboundSummary,
+    KCP_MTU_MAX, KCP_MTU_MIN, KCP_TTI_MAX,
+    KCP_TTI_MIN, KcpStreamSettings, SockoptDraft, TCP_FINALMASK_TYPES, TLS_VERSION_PRESETS,
+    TPROXY_MODES, TUNNEL_NETWORKS, TcpFastOpenDraft,
     UDP_FINALMASK_TYPES, CertificateDraft,
     TlsSettingsDraft, XHTTP_DOWNLOAD_SECURITIES, XHTTP_MODES, XHTTP_MODE_DEFAULT, XHTTP_PADDING_METHODS,
     XHTTP_PATH_DEFAULT, XHTTP_PLACEMENTS, XHTTP_SESSION_ID_TABLES, XHTTP_UPLINK_METHODS,
@@ -878,11 +879,12 @@ fn show_tunnel_protocol_readonly(
     service: &ApplicationService,
     row: &InboundSummary,
 ) {
-    let draft = service
+    let inbound_value = service
         .loaded_config()
         .editable()
         .and_then(|e| e.sections().inbounds().get(row.index))
-        .and_then(|inbound| crate::xray::parse_inbound_protocol(inbound.value()));
+        .map(|inbound| inbound.value());
+    let draft = inbound_value.and_then(crate::xray::parse_inbound_protocol);
     let Some(InboundProtocolDraft::Tunnel {
         allowed_network,
         rewrite_address,
@@ -899,6 +901,12 @@ fn show_tunnel_protocol_readonly(
         );
         return;
     };
+    let tproxy = inbound_value
+        .and_then(|v| v.get("streamSettings"))
+        .and_then(|s| s.get("sockopt"))
+        .and_then(|s| s.get("tproxy"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty());
 
     egui::Grid::new("tunnel_protocol_view_grid")
         .num_columns(2)
@@ -919,6 +927,9 @@ fn show_tunnel_protocol_readonly(
             ui.end_row();
             ui.label("followRedirect");
             ui.label(if follow_redirect { "true" } else { "false" });
+            ui.end_row();
+            ui.label("sockopt.tproxy");
+            ui.label(tproxy.unwrap_or("(unset)"));
             ui.end_row();
             ui.label("userLevel");
             ui.label(user_level.to_string());
@@ -1243,6 +1254,8 @@ fn show_tunnel_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
     }
 
     let mut dirty = false;
+    let mut tproxy = session.stream.sockopt.tproxy.clone();
+    let tproxy_before = tproxy.clone();
     {
         let InboundProtocolDraft::Tunnel {
             allowed_network,
@@ -1295,7 +1308,16 @@ fn show_tunnel_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
                 ui.end_row();
 
                 ui.label("followRedirect");
-                if ui.checkbox(&mut follow, "").changed() {
+                if ui.checkbox(&mut follow, "")
+                    .on_hover_text("Xray-level fallback forwarding")
+                    .changed()
+                {
+                    dirty = true;
+                }
+                ui.end_row();
+
+                ui.label("sockopt.tproxy");
+                if tproxy_combo_field(ui, "tunnel_sockopt_tproxy", &mut tproxy) {
                     dirty = true;
                 }
                 ui.end_row();
@@ -1318,6 +1340,16 @@ fn show_tunnel_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
         *rewrite_port = port_text.trim().parse::<u64>().ok().filter(|p| *p != 0);
         *follow_redirect = follow;
         *user_level = level.max(0) as u64;
+
+        ui.label(
+            RichText::new(
+                "followRedirect is Xray-level fallback forwarding; sockopt.tproxy is OS-level \
+                 transparent proxy integration (iptables REDIRECT/TPROXY) — usually only one is \
+                 needed.",
+            )
+            .size(12.0)
+            .color(Color32::from_rgb(140, 140, 140)),
+        );
 
         ui.add_space(8.0);
         ui.strong("portMap");
@@ -1401,6 +1433,12 @@ fn show_tunnel_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
             .data_mut(|d| d.insert_temp(new_id, (new_local, new_target)));
     }
 
+    if tproxy != tproxy_before {
+        session.stream.sockopt.tproxy = tproxy;
+        session.stream.write_sockopt = true;
+        dirty = true;
+    }
+
     if dirty {
         session.dirty = true;
     }
@@ -1463,6 +1501,7 @@ fn show_stream_readonly(ui: &mut Ui, service: &ApplicationService, row: &Inbound
         .and_then(|e| e.sections().inbounds().get(row.index))
         .map(|inbound| parse_inbound_stream(inbound.value()))
         .unwrap_or_default();
+    let protocol = row.protocol.as_deref().unwrap_or("").to_ascii_lowercase();
 
     if let Some(other) = draft.other_method.as_deref() {
         ui.label(
@@ -1472,9 +1511,25 @@ fn show_stream_readonly(ui: &mut Ui, service: &ApplicationService, row: &Inbound
             .size(14.0)
             .color(Color32::from_rgb(140, 140, 140)),
         );
-        return;
+    } else {
+        show_stream_readonly_method_grid(ui, &draft);
     }
 
+    // Sockopt is a streamSettings sibling (like security), not transport-specific, so it renders
+    // regardless of whether the transport method above is editable.
+    if matches!(protocol.as_str(), "vless" | "trojan" | "hysteria") {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+        egui::CollapsingHeader::new("Sockopt")
+            .default_open(false)
+            .show(ui, |ui| {
+                show_sockopt_readonly(ui, &draft.sockopt);
+            });
+    }
+}
+
+fn show_stream_readonly_method_grid(ui: &mut Ui, draft: &InboundStreamDraft) {
     let method = draft.method.unwrap_or(StreamMethod::Tcp);
     egui::Grid::new("stream_view_grid")
         .num_columns(2)
@@ -2006,6 +2061,28 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
             session.dirty = true;
         }
     }
+
+    if matches!(protocol, "vless" | "trojan" | "hysteria") {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+        egui::CollapsingHeader::new("Sockopt")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(
+                        "streamSettings.sockopt — low-level socket options; applies regardless of transport method. Outbound-only fields (mark, domainStrategy, dialerProxy, tcpcongestion, interface, tcpMptcp, addressPortStrategy, happyEyeballs) are preserved but not yet editable here.",
+                    )
+                    .size(12.0)
+                    .color(Color32::from_rgb(140, 140, 140)),
+                );
+                ui.add_space(4.0);
+                if show_sockopt_edit(ui, &mut session.stream.sockopt) {
+                    session.stream.write_sockopt = true;
+                    session.dirty = true;
+                }
+            });
+    }
 }
 
 /// Editor for one `finalmask.tcp` / `finalmask.udp` layer chain; returns true when the layer
@@ -2099,6 +2176,379 @@ fn show_finalmask_layers_edit(
     }
 
     dirty
+}
+
+/// `sockopt.tproxy` combo (documented presets) + free-text fallback. Shared by the Stream tab's
+/// full Sockopt editor and the Tunnel Protocol tab's narrow tproxy field (Roadmap §2.3:88).
+/// Returns true when changed.
+fn tproxy_combo_field(ui: &mut Ui, id_salt: &str, tproxy: &mut String) -> bool {
+    let mut value = tproxy.clone();
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(if value.is_empty() {
+                "(unset)"
+            } else {
+                value.as_str()
+            })
+            .show_ui(ui, |ui| {
+                for &preset in TPROXY_MODES {
+                    ui.selectable_value(&mut value, preset.to_owned(), preset);
+                }
+            });
+        ui.text_edit_singleline(&mut value);
+    });
+    if value != *tproxy {
+        *tproxy = value;
+        true
+    } else {
+        false
+    }
+}
+
+/// Editor for `streamSettings.sockopt` (Roadmap §2.3:87). Inbound-applicable fields only —
+/// outbound-only fields stay typed/round-tripped via [`SockoptDraft::extras`]-adjacent fields
+/// with no widget yet. Returns true when any field changed.
+fn show_sockopt_edit(ui: &mut Ui, sockopt: &mut SockoptDraft) -> bool {
+    let mut dirty = false;
+    let mut tcp_max_seg = sockopt
+        .tcp_max_seg
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    let mut tcp_keep_alive_idle = sockopt
+        .tcp_keep_alive_idle
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    let mut tcp_keep_alive_interval = sockopt
+        .tcp_keep_alive_interval
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    let mut tcp_user_timeout = sockopt
+        .tcp_user_timeout
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    let mut tcp_window_clamp = sockopt
+        .tcp_window_clamp
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    let mut trusted_x_forwarded_for = sockopt.trusted_x_forwarded_for.join("\n");
+    let mut custom_sockopt_text = sockopt
+        .custom_sockopt
+        .as_ref()
+        .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+        .unwrap_or_default();
+
+    egui::Grid::new("stream_sockopt_edit_grid")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("tproxy");
+            if tproxy_combo_field(ui, "sockopt_tproxy", &mut sockopt.tproxy) {
+                dirty = true;
+            }
+            ui.end_row();
+
+            ui.label("tcpFastOpen");
+            if show_tcp_fast_open_edit(ui, &mut sockopt.tcp_fast_open) {
+                dirty = true;
+            }
+            ui.end_row();
+
+            ui.label("acceptProxyProtocol");
+            let mut accept_proxy_protocol = sockopt.accept_proxy_protocol;
+            if ui.checkbox(&mut accept_proxy_protocol, "").changed() {
+                sockopt.accept_proxy_protocol = accept_proxy_protocol;
+                dirty = true;
+            }
+            ui.end_row();
+
+            ui.label("V6Only");
+            let mut v6_only = sockopt.v6_only;
+            if ui.checkbox(&mut v6_only, "").changed() {
+                sockopt.v6_only = v6_only;
+                dirty = true;
+            }
+            ui.end_row();
+
+            ui.label("tcpMaxSeg");
+            if ui
+                .add(egui::TextEdit::singleline(&mut tcp_max_seg).hint_text("optional; integer"))
+                .changed()
+            {
+                let trimmed = tcp_max_seg.trim();
+                if trimmed.is_empty() {
+                    sockopt.tcp_max_seg = None;
+                    dirty = true;
+                } else if let Ok(value) = trimmed.parse::<u64>() {
+                    sockopt.tcp_max_seg = Some(value);
+                    dirty = true;
+                }
+            }
+            ui.end_row();
+
+            ui.label("tcpKeepAliveIdle (s)");
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut tcp_keep_alive_idle)
+                        .hint_text("optional; seconds"),
+                )
+                .changed()
+            {
+                let trimmed = tcp_keep_alive_idle.trim();
+                if trimmed.is_empty() {
+                    sockopt.tcp_keep_alive_idle = None;
+                    dirty = true;
+                } else if let Ok(value) = trimmed.parse::<i64>() {
+                    sockopt.tcp_keep_alive_idle = Some(value);
+                    dirty = true;
+                }
+            }
+            ui.end_row();
+
+            ui.label("tcpKeepAliveInterval (s)");
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut tcp_keep_alive_interval)
+                        .hint_text("optional; seconds"),
+                )
+                .changed()
+            {
+                let trimmed = tcp_keep_alive_interval.trim();
+                if trimmed.is_empty() {
+                    sockopt.tcp_keep_alive_interval = None;
+                    dirty = true;
+                } else if let Ok(value) = trimmed.parse::<i64>() {
+                    sockopt.tcp_keep_alive_interval = Some(value);
+                    dirty = true;
+                }
+            }
+            ui.end_row();
+
+            ui.label("tcpUserTimeout (ms)");
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut tcp_user_timeout)
+                        .hint_text("optional; milliseconds"),
+                )
+                .changed()
+            {
+                let trimmed = tcp_user_timeout.trim();
+                if trimmed.is_empty() {
+                    sockopt.tcp_user_timeout = None;
+                    dirty = true;
+                } else if let Ok(value) = trimmed.parse::<u64>() {
+                    sockopt.tcp_user_timeout = Some(value);
+                    dirty = true;
+                }
+            }
+            ui.end_row();
+
+            ui.label("tcpWindowClamp");
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut tcp_window_clamp)
+                        .hint_text("optional; integer"),
+                )
+                .changed()
+            {
+                let trimmed = tcp_window_clamp.trim();
+                if trimmed.is_empty() {
+                    sockopt.tcp_window_clamp = None;
+                    dirty = true;
+                } else if let Ok(value) = trimmed.parse::<u64>() {
+                    sockopt.tcp_window_clamp = Some(value);
+                    dirty = true;
+                }
+            }
+            ui.end_row();
+
+            ui.label("trustedXForwardedFor (one per line)");
+            if ui
+                .add(egui::TextEdit::multiline(&mut trusted_x_forwarded_for).desired_rows(2))
+                .changed()
+            {
+                sockopt.trusted_x_forwarded_for = lines_to_vec(&trusted_x_forwarded_for);
+                dirty = true;
+            }
+            ui.end_row();
+        });
+
+    ui.add_space(4.0);
+    ui.label(
+        RichText::new("customSockopt (JSON array; advanced)")
+            .size(12.0)
+            .color(Color32::from_rgb(140, 140, 140)),
+    );
+    if resizable_multiline(ui, &mut custom_sockopt_text, 3, "sockopt_custom_sockopt").changed() {
+        let trimmed = custom_sockopt_text.trim();
+        if trimmed.is_empty() {
+            sockopt.custom_sockopt = None;
+            dirty = true;
+        } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+            && value.is_array()
+        {
+            sockopt.custom_sockopt = Some(value);
+            dirty = true;
+        }
+    }
+
+    dirty
+}
+
+/// `sockopt.tcpFastOpen` editor: `bool | number` union — unset / false / true / custom backlog.
+fn show_tcp_fast_open_edit(ui: &mut Ui, value: &mut TcpFastOpenDraft) -> bool {
+    let mut dirty = false;
+    let label = match *value {
+        TcpFastOpenDraft::Unset => "(unset)",
+        TcpFastOpenDraft::Bool(false) => "false",
+        TcpFastOpenDraft::Bool(true) => "true",
+        TcpFastOpenDraft::Backlog(_) => "custom backlog",
+    };
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt("sockopt_tcp_fast_open")
+            .selected_text(label)
+            .show_ui(ui, |ui| {
+                if ui
+                    .selectable_label(matches!(value, TcpFastOpenDraft::Unset), "(unset)")
+                    .clicked()
+                    && !matches!(value, TcpFastOpenDraft::Unset)
+                {
+                    *value = TcpFastOpenDraft::Unset;
+                    dirty = true;
+                }
+                if ui
+                    .selectable_label(matches!(value, TcpFastOpenDraft::Bool(false)), "false")
+                    .clicked()
+                    && !matches!(value, TcpFastOpenDraft::Bool(false))
+                {
+                    *value = TcpFastOpenDraft::Bool(false);
+                    dirty = true;
+                }
+                if ui
+                    .selectable_label(matches!(value, TcpFastOpenDraft::Bool(true)), "true")
+                    .clicked()
+                    && !matches!(value, TcpFastOpenDraft::Bool(true))
+                {
+                    *value = TcpFastOpenDraft::Bool(true);
+                    dirty = true;
+                }
+                if ui
+                    .selectable_label(
+                        matches!(value, TcpFastOpenDraft::Backlog(_)),
+                        "custom backlog",
+                    )
+                    .clicked()
+                    && !matches!(value, TcpFastOpenDraft::Backlog(_))
+                {
+                    *value = TcpFastOpenDraft::Backlog(0);
+                    dirty = true;
+                }
+            });
+        if let TcpFastOpenDraft::Backlog(n) = value {
+            let mut text = n.to_string();
+            if ui
+                .add(egui::TextEdit::singleline(&mut text).desired_width(80.0))
+                .changed()
+                && let Ok(parsed) = text.trim().parse::<u64>()
+            {
+                *value = TcpFastOpenDraft::Backlog(parsed);
+                dirty = true;
+            }
+        }
+    });
+    dirty
+}
+
+/// Compact read-only summary of populated `sockopt` fields (only-inbound fields plus shared
+/// fields; outbound-only fields aren't rendered here — see [`show_sockopt_edit`]).
+fn show_sockopt_readonly(ui: &mut Ui, sockopt: &SockoptDraft) {
+    let mut any = false;
+    egui::Grid::new("stream_sockopt_view_grid")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            if !sockopt.tproxy.is_empty() {
+                ui.label("tproxy");
+                ui.label(sockopt.tproxy.as_str());
+                ui.end_row();
+                any = true;
+            }
+            match sockopt.tcp_fast_open {
+                TcpFastOpenDraft::Unset => {}
+                TcpFastOpenDraft::Bool(b) => {
+                    ui.label("tcpFastOpen");
+                    ui.label(bool_label(b));
+                    ui.end_row();
+                    any = true;
+                }
+                TcpFastOpenDraft::Backlog(n) => {
+                    ui.label("tcpFastOpen");
+                    ui.label(format!("backlog {n}"));
+                    ui.end_row();
+                    any = true;
+                }
+            }
+            if sockopt.accept_proxy_protocol {
+                ui.label("acceptProxyProtocol");
+                ui.label("true");
+                ui.end_row();
+                any = true;
+            }
+            if sockopt.v6_only {
+                ui.label("V6Only");
+                ui.label("true");
+                ui.end_row();
+                any = true;
+            }
+            if let Some(seg) = sockopt.tcp_max_seg {
+                ui.label("tcpMaxSeg");
+                ui.label(seg.to_string());
+                ui.end_row();
+                any = true;
+            }
+            if let Some(idle) = sockopt.tcp_keep_alive_idle {
+                ui.label("tcpKeepAliveIdle");
+                ui.label(format!("{idle} s"));
+                ui.end_row();
+                any = true;
+            }
+            if let Some(interval) = sockopt.tcp_keep_alive_interval {
+                ui.label("tcpKeepAliveInterval");
+                ui.label(format!("{interval} s"));
+                ui.end_row();
+                any = true;
+            }
+            if let Some(timeout) = sockopt.tcp_user_timeout {
+                ui.label("tcpUserTimeout");
+                ui.label(format!("{timeout} ms"));
+                ui.end_row();
+                any = true;
+            }
+            if let Some(clamp) = sockopt.tcp_window_clamp {
+                ui.label("tcpWindowClamp");
+                ui.label(clamp.to_string());
+                ui.end_row();
+                any = true;
+            }
+            if !sockopt.trusted_x_forwarded_for.is_empty() {
+                ui.label("trustedXForwardedFor");
+                ui.label(sockopt.trusted_x_forwarded_for.join(", "));
+                ui.end_row();
+                any = true;
+            }
+            if sockopt.custom_sockopt.is_some() {
+                ui.label("customSockopt");
+                ui.label("set (see Edit / Preview diff)");
+                ui.end_row();
+                any = true;
+            }
+        });
+    if !any {
+        ui.label(
+            RichText::new("No sockopt fields set.")
+                .size(13.0)
+                .color(Color32::from_rgb(140, 140, 140)),
+        );
+    }
 }
 
 // ─── Security tab (VLESS + Trojan; Reality keygen) ───────────────────────────

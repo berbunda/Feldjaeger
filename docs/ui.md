@@ -186,6 +186,7 @@ Protocol tab:
 - VLESS: decryption field (display)
 - Trojan: informational note (no editable fields in IB-L1)
 - Hysteria: `settings.version` = 2 (fixed)
+- Tunnel: `allowedNetwork` combo, `rewriteAddress`, `rewritePort`, `followRedirect`, `sockopt.tproxy` (combo + free text; shared widget with the Stream-tab Sockopt editor), `userLevel`, `portMap` table (add/edit/delete; target forms `host:port` / `:port` / `host:`); Shell Save writes only `streamSettings.sockopt` for Tunnel — every other `streamSettings`/`security` key stays untouched
 
 Stream tab (Wave A + C1 + C3):
 - Editable for tcp/raw | xhttp | grpc | websocket | mkcp | hysteria; exotic methods preserved read-only
@@ -196,6 +197,8 @@ Stream tab (Wave A + C1 + C3):
 - xhttp `mode`: combo `auto` | `packet-up` | `stream-one` | `stream-up` (unknown on-disk values preserved)
 - Share XHTTP: `path` / optional `host` / `mode` + URL-encoded `extra=` JSON (all advanced fields except host/path/mode)
 - FinalMask (VLESS/Trojan; not Hysteria, which owns `finalmask.quicParams`): editor for `streamSettings.finalmask.tcp[]` / `.udp[]` masking-layer chains — per-layer `type` combo (presets + free text for unlisted types) and a `settings` JSON object text area; Add/Remove + Move up/down (layer order is meaningful — first entry is innermost); Reality + non-empty `finalmask.tcp` shows an inline warning and is hard-blocked on Save (G4)
+- Sockopt (VLESS/Trojan/Hysteria; method-independent — applies regardless of transport): editor for `streamSettings.sockopt` — tproxy (combo + free text), tcpFastOpen (unset/false/true/custom backlog), acceptProxyProtocol, V6Only, tcpMaxSeg, tcpKeepAliveIdle/Interval, tcpUserTimeout, tcpWindowClamp, trustedXForwardedFor (one per line), customSockopt (raw JSON array); outbound-only fields (mark, domainStrategy, dialerProxy, tcpcongestion, interface, tcpMptcp, addressPortStrategy, happyEyeballs) preserved but not yet editable here
+- Tunnel does not use the Stream tab (disabled); it exposes only `sockopt.tproxy` via a narrow field on its own Protocol tab (see above) — the rest of `streamSettings` is preserved untouched on Shell Save
 
 Security tab (VLESS + Trojan + Hysteria):
 - VLESS: `none` | `tls` | `reality` (matrix-filtered)

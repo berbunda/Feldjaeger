@@ -22,7 +22,7 @@ use super::inbound_protocol::{InboundProtocolDraft, apply_inbound_protocol};
 use super::inbound_security::{
     InboundSecurityDraft, InboundSecurityMode, apply_inbound_security,
 };
-use super::inbound_stream::{InboundStreamDraft, apply_inbound_stream};
+use super::inbound_stream::{InboundStreamDraft, apply_inbound_stream, apply_tunnel_sockopt};
 use super::log_settings::{apply_log_settings_to_value, validate_log_settings, LogSettings};
 use super::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 use super::serialize::validate_serialized_json;
@@ -720,8 +720,11 @@ pub fn update_inbound_shell(
             apply_inbound_general(inbound, &request.general)?;
             apply_inbound_protocol(inbound, &request.protocol)?;
 
-            // Tunnel: leave streamSettings/security on disk; GUI does not edit them.
-            if protocol != InboundClientProtocol::Tunnel {
+            // Tunnel: leave streamSettings/security on disk except sockopt.tproxy (Roadmap
+            // §2.3:88); GUI does not otherwise edit them.
+            if protocol == InboundClientProtocol::Tunnel {
+                apply_tunnel_sockopt(inbound, &request.stream)?;
+            } else {
                 apply_inbound_stream(inbound, &request.stream)?;
                 if let Some(security) = request.security.as_ref() {
                     apply_inbound_security(inbound, security)?;

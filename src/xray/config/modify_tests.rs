@@ -2938,3 +2938,124 @@ fn tunnel_shell_save_preserves_stream_and_unknown_settings() {
     assert_eq!(inbound["settings"]["futureField"], "keep");
     assert_eq!(inbound["streamSettings"]["sockopt"]["tproxy"], "redirect");
 }
+
+#[test]
+fn tunnel_shell_save_edits_tproxy_and_preserves_other_stream_fields() {
+    use super::inbound_protocol::InboundProtocolDraft;
+    use super::inbound_stream::parse_inbound_stream;
+    use super::modify::{UpdateInboundShellRequest, update_inbound_shell};
+
+    let mut config = single_file_editable(
+        r#"{
+            "inbounds":[{
+                "tag":"tun-in",
+                "protocol":"tunnel",
+                "port":10085,
+                "listen":"127.0.0.1",
+                "settings":{
+                    "allowedNetwork":"tcp",
+                    "rewriteAddress":"localhost",
+                    "followRedirect":false,
+                    "userLevel":0
+                },
+                "streamSettings":{
+                    "network":"tcp",
+                    "security":"none",
+                    "sockopt":{"tproxy":"redirect","acceptProxyProtocol":true},
+                    "futureStreamField":"keep"
+                }
+            }]
+        }"#,
+    );
+    let inbound_ref = shell_ref(&config, 0);
+    let mut stream = parse_inbound_stream(
+        &config.file_roots()["/etc/xray/config.json"]["inbounds"][0],
+    );
+    assert!(stream.write_sockopt);
+    stream.sockopt.tproxy = "tproxy".to_owned();
+    update_inbound_shell(
+        &mut config,
+        UpdateInboundShellRequest {
+            inbound_ref,
+            general: InboundGeneral {
+                tag: Some("tun-in".to_owned()),
+                listen: Some("127.0.0.1".to_owned()),
+                port: Some(10085),
+            },
+            protocol: InboundProtocolDraft::Tunnel {
+                allowed_network: "tcp".to_owned(),
+                rewrite_address: "localhost".to_owned(),
+                rewrite_port: None,
+                port_map: Vec::new(),
+                follow_redirect: false,
+                user_level: 0,
+            },
+            stream,
+            sniffing: SniffingSettings::default(),
+            security: None,
+        },
+    )
+    .expect("tunnel tproxy shell save");
+    let stream_settings =
+        &config.file_roots()["/etc/xray/config.json"]["inbounds"][0]["streamSettings"];
+    assert_eq!(stream_settings["sockopt"]["tproxy"], "tproxy");
+    assert_eq!(stream_settings["sockopt"]["acceptProxyProtocol"], true);
+    assert_eq!(stream_settings["network"], "tcp");
+    assert_eq!(stream_settings["security"], "none");
+    assert_eq!(stream_settings["futureStreamField"], "keep");
+}
+
+#[test]
+fn sockopt_shell_save_edits_field_and_preserves_unknown_field() {
+    use super::inbound_protocol::InboundProtocolDraft;
+    use super::inbound_stream::parse_inbound_stream;
+    use super::modify::{UpdateInboundShellRequest, update_inbound_shell};
+
+    let mut config = single_file_editable(
+        r#"{
+            "inbounds":[{
+                "tag":"vless-sockopt",
+                "protocol":"vless",
+                "listen":"0.0.0.0",
+                "port":443,
+                "settings":{"clients":[],"decryption":"none"},
+                "streamSettings":{
+                    "network":"tcp",
+                    "security":"none",
+                    "sockopt":{"tproxy":"off","acceptProxyProtocol":false,"futureField":"keep-me"}
+                }
+            }]
+        }"#,
+    );
+    let inbound_ref = shell_ref(&config, 0);
+    let mut stream = parse_inbound_stream(
+        &config.file_roots()["/etc/xray/config.json"]["inbounds"][0],
+    );
+    assert!(stream.write_sockopt);
+    stream.sockopt.tproxy = "redirect".to_owned();
+    stream.sockopt.accept_proxy_protocol = true;
+    update_inbound_shell(
+        &mut config,
+        UpdateInboundShellRequest {
+            inbound_ref,
+            general: InboundGeneral {
+                tag: Some("vless-sockopt".to_owned()),
+                listen: Some("0.0.0.0".to_owned()),
+                port: Some(443),
+            },
+            protocol: InboundProtocolDraft::Vless {
+                decryption: "none".to_owned(),
+                fallbacks: Vec::new(),
+            },
+            stream,
+            sniffing: SniffingSettings::default(),
+            security: None,
+        },
+    )
+    .expect("vless sockopt shell save");
+    let sockopt = &config.file_roots()["/etc/xray/config.json"]["inbounds"][0]["streamSettings"]
+        ["sockopt"];
+    assert_eq!(sockopt["tproxy"], "redirect");
+    assert_eq!(sockopt["acceptProxyProtocol"], true);
+    assert_eq!(sockopt["futureField"], "keep-me");
+}

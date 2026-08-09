@@ -10,11 +10,17 @@ use serde_json::{Map, Value};
 use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 
 mod finalmask;
+mod sockopt;
 mod xhttp;
 
 pub use finalmask::{
     FinalMaskLayerDraft, TCP_FINALMASK_TYPES, UDP_FINALMASK_TYPES, finalmask_layers_to_value,
     parse_finalmask_layers, validate_finalmask_layers,
+};
+pub use sockopt::{
+    ADDRESS_PORT_STRATEGIES, DOMAIN_STRATEGIES, HappyEyeballsDraft, SockoptDraft,
+    TCP_CONGESTION_PRESETS, TPROXY_MODES, TcpFastOpenDraft, parse_sockopt, sockopt_to_value,
+    validate_sockopt,
 };
 pub use xhttp::{
     XHTTP_DEFAULT_PADDING_FROM, XHTTP_DEFAULT_PADDING_TO, XHTTP_DEFAULT_SC_MAX_BUFFERED_POSTS,
@@ -279,7 +285,11 @@ pub struct InboundStreamDraft {
     pub finalmask_udp: Vec<FinalMaskLayerDraft>,
     /// Whether to write `finalmask.udp` from [`Self::finalmask_udp`].
     pub write_finalmask_udp: bool,
-    /// Unknown keys under `streamSettings` (excluding security / reality / tls / method keys / *Settings we own).
+    /// Typed `sockopt` (VLESS/Trojan/Hysteria; method-independent; Roadmap §2.3:87).
+    pub sockopt: SockoptDraft,
+    /// Whether to write `sockopt` from [`Self::sockopt`] (false ⇒ raw clone-through fallback).
+    pub write_sockopt: bool,
+    /// Unknown keys under `streamSettings` (excluding security / reality / tls / method keys / *Settings / sockopt we own).
     pub extras: Map<String, Value>,
 }
 
@@ -301,6 +311,8 @@ impl Default for InboundStreamDraft {
             write_finalmask_tcp: false,
             finalmask_udp: Vec::new(),
             write_finalmask_udp: false,
+            sockopt: SockoptDraft::default(),
+            write_sockopt: false,
             extras: Map::new(),
         }
     }
@@ -374,6 +386,8 @@ pub fn parse_inbound_stream(inbound: &Value) -> InboundStreamDraft {
         write_finalmask_tcp: false,
         finalmask_udp: Vec::new(),
         write_finalmask_udp: false,
+        sockopt: SockoptDraft::default(),
+        write_sockopt: false,
         extras,
     };
 
@@ -424,6 +438,10 @@ pub fn parse_inbound_stream(inbound: &Value) -> InboundStreamDraft {
             draft.finalmask_udp = layers;
             draft.write_finalmask_udp = true;
         }
+    }
+    if let Some(sockopt) = stream.get("sockopt").and_then(Value::as_object) {
+        draft.sockopt = parse_sockopt(sockopt);
+        draft.write_sockopt = true;
     }
 
     draft
@@ -931,7 +949,10 @@ pub fn apply_inbound_stream(
         stream.insert("finalmask".to_owned(), value);
     }
 
-    if let Some(value) = sockopt {
+    if draft.write_sockopt {
+        validate_sockopt(&draft.sockopt)?;
+        stream.insert("sockopt".to_owned(), sockopt_to_value(&draft.sockopt));
+    } else if let Some(value) = sockopt {
         stream.insert("sockopt".to_owned(), value);
     }
     for (key, value) in &draft.extras {
@@ -940,6 +961,47 @@ pub fn apply_inbound_stream(
         }
     }
 
+    Ok(())
+}
+
+/// Applies only `streamSettings.sockopt` (Tunnel Shell Save, Roadmap §2.3:88). Unlike
+/// [`apply_inbound_stream`], leaves every other `streamSettings` key (network, security,
+/// tlsSettings, …) byte-for-byte untouched — Tunnel Shell Save must not mutate transport/security.
+pub fn apply_tunnel_sockopt(
+    inbound: &mut Value,
+    draft: &InboundStreamDraft,
+) -> ConfigModifyResult<()> {
+    if !draft.write_sockopt {
+        return Ok(());
+    }
+    validate_sockopt(&draft.sockopt)?;
+
+    let root = inbound.as_object_mut().ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "inbound must be a JSON object".to_owned(),
+        )
+    })?;
+    if !root.contains_key("streamSettings") || root.get("streamSettings").is_some_and(Value::is_null)
+    {
+        root.insert("streamSettings".to_owned(), Value::Object(Map::new()));
+    }
+    let stream = root
+        .get_mut("streamSettings")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            ConfigModifyError::new(
+                ConfigModifyErrorKind::ValidationFailed,
+                "streamSettings must be a JSON object".to_owned(),
+            )
+        })?;
+
+    let value = sockopt_to_value(&draft.sockopt);
+    if value.as_object().is_some_and(Map::is_empty) {
+        stream.remove("sockopt");
+    } else {
+        stream.insert("sockopt".to_owned(), value);
+    }
     Ok(())
 }
 
@@ -1224,5 +1286,119 @@ mod tests {
         let err = apply_inbound_stream(&mut inbound, &draft).unwrap_err();
         assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
         assert!(err.to_string().contains("type"));
+    }
+
+    #[test]
+    fn parse_reads_sockopt_object_and_sets_write_flag() {
+        let inbound = json!({
+            "streamSettings": {
+                "network": "tcp",
+                "sockopt": {"tproxy": "redirect", "acceptProxyProtocol": true}
+            }
+        });
+        let draft = parse_inbound_stream(&inbound);
+        assert!(draft.write_sockopt);
+        assert_eq!(draft.sockopt.tproxy, "redirect");
+        assert!(draft.sockopt.accept_proxy_protocol);
+    }
+
+    #[test]
+    fn apply_writes_sockopt_from_draft_when_edited() {
+        let mut inbound = json!({"streamSettings": {"network": "tcp"}});
+        let mut draft = parse_inbound_stream(&inbound);
+        assert!(!draft.write_sockopt);
+        draft.sockopt.accept_proxy_protocol = true;
+        draft.sockopt.tproxy = "tproxy".to_owned();
+        draft.write_sockopt = true;
+        apply_inbound_stream(&mut inbound, &draft).unwrap();
+        let sockopt = &inbound["streamSettings"]["sockopt"];
+        assert_eq!(sockopt["acceptProxyProtocol"], true);
+        assert_eq!(sockopt["tproxy"], "tproxy");
+    }
+
+    #[test]
+    fn apply_without_sockopt_edits_preserves_malformed_shape_untouched() {
+        let mut inbound = json!({
+            "streamSettings": {
+                "network": "tcp",
+                "sockopt": "not-an-object"
+            }
+        });
+        let before = inbound["streamSettings"]["sockopt"].clone();
+        let draft = parse_inbound_stream(&inbound);
+        assert!(!draft.write_sockopt);
+        apply_inbound_stream(&mut inbound, &draft).unwrap();
+        assert_eq!(inbound["streamSettings"]["sockopt"], before);
+    }
+
+    #[test]
+    fn apply_sockopt_unknown_future_field_roundtrips_via_extras() {
+        let mut inbound = json!({
+            "streamSettings": {
+                "network": "tcp",
+                "sockopt": {"tproxy": "off", "futureField": "keep-me"}
+            }
+        });
+        let mut draft = parse_inbound_stream(&inbound);
+        assert!(draft.write_sockopt);
+        draft.sockopt.tproxy = "redirect".to_owned();
+        apply_inbound_stream(&mut inbound, &draft).unwrap();
+        let sockopt = &inbound["streamSettings"]["sockopt"];
+        assert_eq!(sockopt["tproxy"], "redirect");
+        assert_eq!(sockopt["futureField"], "keep-me");
+    }
+
+    #[test]
+    fn apply_tunnel_sockopt_noop_when_not_edited() {
+        let mut inbound = json!({
+            "protocol": "tunnel",
+            "streamSettings": {
+                "network": "tcp",
+                "security": "none",
+                "sockopt": {"tproxy": "redirect"},
+                "futureField": "keep"
+            }
+        });
+        let before = inbound["streamSettings"].clone();
+        let draft = parse_inbound_stream(&inbound);
+        assert!(draft.write_sockopt);
+        // Simulate a Shell Save where the Tunnel GUI never touched sockopt.
+        let mut untouched = InboundStreamDraft::default();
+        untouched.sockopt = draft.sockopt.clone();
+        apply_tunnel_sockopt(&mut inbound, &untouched).unwrap();
+        assert_eq!(inbound["streamSettings"], before);
+    }
+
+    #[test]
+    fn apply_tunnel_sockopt_writes_only_sockopt_key() {
+        let mut inbound = json!({
+            "protocol": "tunnel",
+            "streamSettings": {
+                "network": "tcp",
+                "security": "none",
+                "sockopt": {"tproxy": "redirect", "acceptProxyProtocol": true},
+                "futureField": "keep"
+            }
+        });
+        let mut draft = parse_inbound_stream(&inbound);
+        assert!(draft.write_sockopt);
+        draft.sockopt.tproxy = "tproxy".to_owned();
+        apply_tunnel_sockopt(&mut inbound, &draft).unwrap();
+        let stream = &inbound["streamSettings"];
+        assert_eq!(stream["sockopt"]["tproxy"], "tproxy");
+        assert_eq!(stream["sockopt"]["acceptProxyProtocol"], true);
+        assert_eq!(stream["network"], "tcp");
+        assert_eq!(stream["security"], "none");
+        assert_eq!(stream["futureField"], "keep");
+    }
+
+    #[test]
+    fn apply_tunnel_sockopt_creates_stream_settings_when_absent() {
+        let mut inbound = json!({"protocol": "tunnel"});
+        let mut draft = InboundStreamDraft::default();
+        draft.sockopt.tproxy = "off".to_owned();
+        draft.write_sockopt = true;
+        apply_tunnel_sockopt(&mut inbound, &draft).unwrap();
+        assert_eq!(inbound["streamSettings"]["sockopt"]["tproxy"], "off");
     }
 }
