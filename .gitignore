@@ -26,13 +26,9 @@ target
 /target
 
 # Added by user
-.cursor
 .claude
 .history
 docs
-.cursor
-.gstack
 Tasks
 Completed
 tests
-.kanban/
