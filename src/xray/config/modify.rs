@@ -25,6 +25,8 @@ use super::inbound_security::{
 use super::inbound_stream::{InboundStreamDraft, apply_inbound_stream, apply_tunnel_sockopt};
 use super::log_settings::{apply_log_settings_to_value, validate_log_settings, LogSettings};
 use super::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
+use super::outbound_edit::{OutboundGeneral, OutboundRef, apply_outbound_general};
+use super::outbound_protocol::{OutboundSettingsDraft, apply_outbound_settings, is_shell_editable_protocol};
 use super::serialize::validate_serialized_json;
 use crate::xray::secret::SecretString;
 
@@ -176,6 +178,30 @@ pub struct ReplaceOutboundRequest {
 pub struct RemoveOutboundRequest {
     /// Outbound tag to remove.
     pub tag: String,
+}
+
+/// Add a shell-editable outbound (Freedom, Blackhole; Roadmap §2.4:94, §2.4:95).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddOutboundShellRequest {
+    /// General fields (tag required).
+    pub general: OutboundGeneral,
+    /// Protocol-tab draft.
+    pub settings: OutboundSettingsDraft,
+    /// Preferred primary config path.
+    pub preferred_source_file: Option<String>,
+}
+
+/// Shell Save for an existing shell-editable outbound (Freedom, Blackhole; Roadmap §2.4:94, §2.4:95).
+///
+/// Tag rename is not supported here (Roadmap §2.4:99, separate follow-up).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateOutboundShellRequest {
+    /// Outbound identity + fingerprint at edit intent.
+    pub outbound_ref: OutboundRef,
+    /// General fields (tag must match the existing outbound).
+    pub general: OutboundGeneral,
+    /// Protocol-tab draft.
+    pub settings: OutboundSettingsDraft,
 }
 
 /// Request to update inbound General fields (tag / listen / port).
@@ -1168,6 +1194,77 @@ pub fn remove_outbound(
     finish_outbound_modification(config, &location.source_file, &original_by_file)
 }
 
+/// Adds a new shell-editable outbound (Freedom, Blackhole; Roadmap §2.4:94, §2.4:95).
+pub fn add_outbound_shell(
+    config: &mut EditableXrayConfig,
+    request: AddOutboundShellRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    let protocol = outbound_settings_protocol_name(&request.settings);
+    let mut outbound = json!({ "protocol": protocol, "settings": {} });
+    apply_outbound_general(&mut outbound, &request.general)?;
+    apply_outbound_settings(&mut outbound, &request.settings)?;
+    add_outbound(
+        config,
+        AddOutboundRequest {
+            outbound,
+            preferred_source_file: request.preferred_source_file,
+        },
+    )
+}
+
+/// Maps a Protocol-tab draft to its Xray `protocol` string.
+fn outbound_settings_protocol_name(settings: &OutboundSettingsDraft) -> &'static str {
+    match settings {
+        OutboundSettingsDraft::Freedom { .. } => "freedom",
+        OutboundSettingsDraft::Blackhole { .. } => "blackhole",
+    }
+}
+
+/// Shell Save for an existing shell-editable outbound (Freedom, Blackhole; Roadmap §2.4:94, §2.4:95).
+///
+/// Fingerprint-checked (mirrors [`update_inbound_shell`]); tag rename is rejected by the
+/// underlying [`replace_outbound`] tag-match guard (Roadmap §2.4:99 will relax this).
+pub fn update_outbound_shell(
+    config: &mut EditableXrayConfig,
+    request: UpdateOutboundShellRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    let index = request.outbound_ref.outbound_index;
+    let _ = config.locate_outbound(index)?;
+    let actual = config.outbound_object_fingerprint(index)?;
+    if actual != request.outbound_ref.expected_fingerprint {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::FingerprintMismatch,
+            String::new(),
+        ));
+    }
+
+    let original_tag = config
+        .sections()
+        .outbounds()
+        .get(index)
+        .and_then(|o| o.value().get("tag"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            ConfigModifyError::new(
+                ConfigModifyErrorKind::ValidationFailed,
+                "outbound tag is required".to_owned(),
+            )
+        })?;
+
+    let mut outbound = config.sections().outbounds()[index].value().clone();
+    apply_outbound_general(&mut outbound, &request.general)?;
+    apply_outbound_settings(&mut outbound, &request.settings)?;
+
+    replace_outbound(
+        config,
+        ReplaceOutboundRequest {
+            tag: original_tag,
+            outbound,
+        },
+    )
+}
+
 fn finish_modification(
     config: &EditableXrayConfig,
     source_file: &str,
@@ -1338,10 +1435,10 @@ fn validate_outbound_object(outbound: &Value) -> ConfigModifyResult<()> {
                 "outbound protocol is required".to_owned(),
             )
         })?;
-    if !protocol.eq_ignore_ascii_case("wireguard") {
+    if !protocol.eq_ignore_ascii_case("wireguard") && !is_shell_editable_protocol(protocol) {
         return Err(ConfigModifyError::new(
             ConfigModifyErrorKind::ValidationFailed,
-            "only wireguard outbounds may be written by this path".to_owned(),
+            "only wireguard, freedom, or blackhole outbounds may be written by this path".to_owned(),
         ));
     }
     let tag = object

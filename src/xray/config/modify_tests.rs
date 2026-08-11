@@ -14,11 +14,12 @@ use super::inbound_edit::{
     InboundGeneral, InboundRef, SniffingSettings, SniffingWriteOutcome, KNOWN_DEST_OVERRIDE,
 };
 use super::modify::{
-    AddOutboundRequest, AddUserRequest, DeleteUserRequest, RemoveOutboundRequest,
-    ReplaceOutboundRequest, UpdateInboundGeneralRequest, UpdateInboundSniffingRequest,
-    UpdateLogSettingsRequest, UpdateUserRequest, add_outbound, add_user, delete_user,
+    AddOutboundRequest, AddOutboundShellRequest, AddUserRequest, DeleteUserRequest,
+    RemoveOutboundRequest, ReplaceOutboundRequest, UpdateInboundGeneralRequest,
+    UpdateInboundSniffingRequest, UpdateLogSettingsRequest, UpdateOutboundShellRequest,
+    UpdateUserRequest, add_outbound, add_outbound_shell, add_user, delete_user,
     generate_client_uuid, remove_outbound, replace_outbound, update_inbound_general,
-    update_inbound_sniffing, update_log_settings, update_user,
+    update_inbound_sniffing, update_log_settings, update_outbound_shell, update_user,
 };
 use super::modify_error::ConfigModifyErrorKind;
 use super::serialize::validate_serialized_json;
@@ -1139,6 +1140,228 @@ fn replace_and_remove_wireguard_outbound() {
     )
     .expect("remove");
     assert!(config.find_outbound_index_by_tag("warp").is_none());
+}
+
+#[test]
+fn add_freedom_outbound_shell_writes_settings() {
+    use super::outbound_edit::OutboundGeneral;
+    use super::outbound_protocol::{FragmentDraft, NoiseDraft, OutboundSettingsDraft};
+
+    let mut config = single_file_editable(r#"{"outbounds":[]}"#);
+    let outcome = add_outbound_shell(
+        &mut config,
+        AddOutboundShellRequest {
+            general: OutboundGeneral {
+                tag: Some("direct".to_owned()),
+                send_through: Some("0.0.0.0".to_owned()),
+            },
+            settings: OutboundSettingsDraft::Freedom {
+                domain_strategy: "UseIP".to_owned(),
+                redirect: "127.0.0.1:3366".to_owned(),
+                user_level: 1,
+                fragment: Some(FragmentDraft {
+                    packets: "tlshello".to_owned(),
+                    length: "100-200".to_owned(),
+                    interval: "10-20".to_owned(),
+                    extras: Default::default(),
+                }),
+                noises: vec![NoiseDraft {
+                    kind: "rand".to_owned(),
+                    packet: "10-20".to_owned(),
+                    delay: "10-16".to_owned(),
+                    extras: Default::default(),
+                }],
+            },
+            preferred_source_file: None,
+        },
+    )
+    .expect("add freedom outbound");
+    assert_eq!(outcome.source_file, "/etc/xray/config.json");
+    let idx = config.find_outbound_index_by_tag("direct").expect("found");
+    let outbound = config.sections().outbounds()[idx].value();
+    assert_eq!(outbound["protocol"], "freedom");
+    assert_eq!(outbound["sendThrough"], "0.0.0.0");
+    assert_eq!(outbound["settings"]["domainStrategy"], "UseIP");
+    assert_eq!(outbound["settings"]["redirect"], "127.0.0.1:3366");
+    assert_eq!(outbound["settings"]["userLevel"], 1);
+    assert_eq!(outbound["settings"]["fragment"]["packets"], "tlshello");
+    assert_eq!(outbound["settings"]["noises"][0]["type"], "rand");
+    // Routing untouched.
+    assert!(config.sections().routing().is_none());
+}
+
+#[test]
+fn update_freedom_outbound_shell_edits_settings_and_preserves_unrelated_fields() {
+    use super::outbound_edit::{OutboundGeneral, OutboundRef};
+    use super::outbound_protocol::OutboundSettingsDraft;
+
+    let mut config = single_file_editable(
+        r#"{
+            "outbounds":[{
+                "tag":"direct",
+                "protocol":"freedom",
+                "settings":{"domainStrategy":"AsIs","futureField":"keep"},
+                "mux":{"enabled":true}
+            }]
+        }"#,
+    );
+    let index = config.find_outbound_index_by_tag("direct").expect("found");
+    let expected_fingerprint = config
+        .outbound_object_fingerprint(index)
+        .expect("fingerprint");
+
+    update_outbound_shell(
+        &mut config,
+        UpdateOutboundShellRequest {
+            outbound_ref: OutboundRef {
+                outbound_index: index,
+                expected_fingerprint,
+            },
+            general: OutboundGeneral {
+                tag: Some("direct".to_owned()),
+                send_through: None,
+            },
+            settings: OutboundSettingsDraft::Freedom {
+                domain_strategy: "UseIPv4".to_owned(),
+                redirect: String::new(),
+                user_level: 0,
+                fragment: None,
+                noises: Vec::new(),
+            },
+        },
+    )
+    .expect("update freedom outbound shell");
+
+    let outbound = config.sections().outbounds()[index].value();
+    assert_eq!(outbound["settings"]["domainStrategy"], "UseIPv4");
+    assert_eq!(outbound["settings"]["futureField"], "keep");
+    assert_eq!(outbound["mux"]["enabled"], true);
+}
+
+#[test]
+fn update_freedom_outbound_shell_fingerprint_mismatch_rejected() {
+    use super::outbound_edit::{OutboundGeneral, OutboundRef};
+    use super::outbound_protocol::OutboundSettingsDraft;
+
+    let mut config = single_file_editable(
+        r#"{"outbounds":[{"tag":"direct","protocol":"freedom","settings":{}}]}"#,
+    );
+    let error = update_outbound_shell(
+        &mut config,
+        UpdateOutboundShellRequest {
+            outbound_ref: OutboundRef {
+                outbound_index: 0,
+                expected_fingerprint: "stale".to_owned(),
+            },
+            general: OutboundGeneral {
+                tag: Some("direct".to_owned()),
+                send_through: None,
+            },
+            settings: OutboundSettingsDraft::freedom_default(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), ConfigModifyErrorKind::FingerprintMismatch);
+}
+
+#[test]
+fn update_freedom_outbound_shell_rejects_tag_rename() {
+    use super::outbound_edit::{OutboundGeneral, OutboundRef};
+    use super::outbound_protocol::OutboundSettingsDraft;
+
+    let mut config = single_file_editable(
+        r#"{"outbounds":[{"tag":"direct","protocol":"freedom","settings":{}}]}"#,
+    );
+    let expected_fingerprint = config.outbound_object_fingerprint(0).expect("fingerprint");
+    let error = update_outbound_shell(
+        &mut config,
+        UpdateOutboundShellRequest {
+            outbound_ref: OutboundRef {
+                outbound_index: 0,
+                expected_fingerprint,
+            },
+            general: OutboundGeneral {
+                tag: Some("direct-renamed".to_owned()),
+                send_through: None,
+            },
+            settings: OutboundSettingsDraft::freedom_default(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), ConfigModifyErrorKind::ValidationFailed);
+}
+
+#[test]
+fn add_blackhole_outbound_shell_writes_settings() {
+    use super::outbound_edit::OutboundGeneral;
+    use super::outbound_protocol::OutboundSettingsDraft;
+
+    let mut config = single_file_editable(r#"{"outbounds":[]}"#);
+    let outcome = add_outbound_shell(
+        &mut config,
+        AddOutboundShellRequest {
+            general: OutboundGeneral {
+                tag: Some("block".to_owned()),
+                send_through: None,
+            },
+            settings: OutboundSettingsDraft::Blackhole {
+                response_type: "http".to_owned(),
+                response_extras: Default::default(),
+            },
+            preferred_source_file: None,
+        },
+    )
+    .expect("add blackhole outbound");
+    assert_eq!(outcome.source_file, "/etc/xray/config.json");
+    let idx = config.find_outbound_index_by_tag("block").expect("found");
+    let outbound = config.sections().outbounds()[idx].value();
+    assert_eq!(outbound["protocol"], "blackhole");
+    assert_eq!(outbound["settings"]["response"]["type"], "http");
+}
+
+#[test]
+fn update_blackhole_outbound_shell_edits_settings_and_preserves_unrelated_fields() {
+    use super::outbound_edit::{OutboundGeneral, OutboundRef};
+    use super::outbound_protocol::OutboundSettingsDraft;
+
+    let mut config = single_file_editable(
+        r#"{
+            "outbounds":[{
+                "tag":"block",
+                "protocol":"blackhole",
+                "settings":{"response":{"type":"none"},"futureField":"keep"},
+                "mux":{"enabled":true}
+            }]
+        }"#,
+    );
+    let index = config.find_outbound_index_by_tag("block").expect("found");
+    let expected_fingerprint = config
+        .outbound_object_fingerprint(index)
+        .expect("fingerprint");
+
+    update_outbound_shell(
+        &mut config,
+        UpdateOutboundShellRequest {
+            outbound_ref: OutboundRef {
+                outbound_index: index,
+                expected_fingerprint,
+            },
+            general: OutboundGeneral {
+                tag: Some("block".to_owned()),
+                send_through: None,
+            },
+            settings: OutboundSettingsDraft::Blackhole {
+                response_type: "http".to_owned(),
+                response_extras: Default::default(),
+            },
+        },
+    )
+    .expect("update blackhole outbound shell");
+
+    let outbound = config.sections().outbounds()[index].value();
+    assert_eq!(outbound["settings"]["response"]["type"], "http");
+    assert_eq!(outbound["settings"]["futureField"], "keep");
+    assert_eq!(outbound["mux"]["enabled"], true);
 }
 
 #[test]

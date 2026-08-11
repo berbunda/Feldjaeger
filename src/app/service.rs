@@ -74,17 +74,19 @@ use super::xray_logs::{
     xray_log_event_channel, xray_log_probe_channel,
 };
 use crate::xray::{
-    AddInboundRequest, AddUserRequest, AvailableVersions, BurstObservatorySummary,
-    DeleteInboundRequest, DeleteUserRequest, DiscoveryState, DnsSummary, DuplicateInboundRequest,
-    EditableXrayConfig, FakeDnsSummary, InboundClientProtocol, InboundGeneral, InboundProtocolDraft,
-    InboundRef, InboundSecurityDraft, InboundSecurityMode, InboundStreamDraft, InboundSummary,
-    InstallChannel, LogSettings, ObservatorySummary, OutboundSummary, PolicySummary, RoutingSummary,
-    SniffingSettings, StreamMethod, UpdateInboundGeneralRequest, UpdateInboundShellRequest,
-    UpdateInboundSniffingRequest, UpdateLogSettingsRequest, UpdateUserRequest, UserSummary,
-    VlessClientSummary, XrayInstaller, XrayLogLineLimit, XrayLogService, XrayLogSourceKind,
-    add_inbound, parse_inbound_general, parse_inbound_protocol, parse_inbound_security,
-    parse_inbound_stream, parse_sniffing_settings, port_is_shell_editable, update_inbound_shell,
-    validate_log_settings,
+    AddInboundRequest, AddOutboundShellRequest, AddUserRequest, AvailableVersions,
+    BurstObservatorySummary, DeleteInboundRequest, DeleteUserRequest, DiscoveryState, DnsSummary,
+    DuplicateInboundRequest, EditableXrayConfig, FakeDnsSummary, InboundClientProtocol,
+    InboundGeneral, InboundProtocolDraft, InboundRef, InboundSecurityDraft, InboundSecurityMode,
+    InboundStreamDraft, InboundSummary, InstallChannel, LogSettings, ObservatorySummary,
+    OutboundGeneral, OutboundRef, OutboundSettingsDraft, OutboundSummary, PolicySummary,
+    RoutingSummary, SniffingSettings, StreamMethod, UpdateInboundGeneralRequest,
+    UpdateInboundShellRequest, UpdateInboundSniffingRequest, UpdateLogSettingsRequest,
+    UpdateOutboundShellRequest, UpdateUserRequest, UserSummary, VlessClientSummary, XrayInstaller,
+    XrayLogLineLimit, XrayLogService, XrayLogSourceKind, add_inbound, is_shell_editable_protocol,
+    parse_inbound_general, parse_inbound_protocol, parse_inbound_security, parse_inbound_stream,
+    parse_outbound_general, parse_outbound_settings, parse_sniffing_settings,
+    port_is_shell_editable, update_inbound_shell, validate_log_settings,
 };
 
 /// How long a transient Status Bar message remains visible.
@@ -177,8 +179,10 @@ pub struct ApplicationService {
     share_materials: super::share_material::ShareMaterialStore,
     /// In-flight unified inbound mutation (Shell / Add / GenerateX25519).
     inbound_mutation_rx: Option<Receiver<InboundMutationOutcome>>,
-    /// In-flight outbound mutation (Delete).
+    /// In-flight outbound mutation (Add / Update / Delete).
     outbound_mutation_rx: Option<Receiver<super::outbound_ops::OutboundMutationOutcome>>,
+    /// Outbound Shell editor session (Freedom only today; Roadmap §2.4:94).
+    outbound_editor_session: Option<super::outbound_ops::OutboundEditorSession>,
     log_settings_draft: Option<LogSettings>,
     log_settings_error: Option<String>,
     log_settings_saved_flash: bool,
@@ -420,6 +424,7 @@ impl ApplicationService {
             share_materials: super::share_material::ShareMaterialStore::new(),
             inbound_mutation_rx: None,
             outbound_mutation_rx: None,
+            outbound_editor_session: None,
             log_settings_draft: None,
             log_settings_error: None,
             log_settings_saved_flash: false,
@@ -1677,6 +1682,248 @@ impl ApplicationService {
         Ok(())
     }
 
+    // ─── Outbound Shell (Freedom, Blackhole; Roadmap §2.4:94, §2.4:95) ───────
+
+    /// Returns the current outbound editor session, if any.
+    pub fn outbound_editor_session(&self) -> Option<&super::outbound_ops::OutboundEditorSession> {
+        self.outbound_editor_session.as_ref()
+    }
+
+    /// Returns the current outbound editor session, mutably.
+    pub fn outbound_editor_session_mut(
+        &mut self,
+    ) -> Option<&mut super::outbound_ops::OutboundEditorSession> {
+        self.outbound_editor_session.as_mut()
+    }
+
+    /// Cancels the outbound editor session.
+    pub fn cancel_outbound_editor_session(&mut self) {
+        self.outbound_editor_session = None;
+    }
+
+    /// Opens an Add session for a new Freedom outbound.
+    pub fn begin_add_outbound_freedom(&mut self) -> Result<(), String> {
+        self.begin_add_outbound(OutboundSettingsDraft::freedom_default())
+    }
+
+    /// Opens an Add session for a new Blackhole outbound.
+    pub fn begin_add_outbound_blackhole(&mut self) -> Result<(), String> {
+        self.begin_add_outbound(OutboundSettingsDraft::blackhole_default())
+    }
+
+    fn begin_add_outbound(&mut self, settings: OutboundSettingsDraft) -> Result<(), String> {
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        self.outbound_editor_session = Some(super::outbound_ops::OutboundEditorSession {
+            outbound_index: usize::MAX,
+            outbound_ref: None,
+            general: OutboundGeneral {
+                tag: None,
+                send_through: None,
+            },
+            settings,
+            is_add: true,
+        });
+        Ok(())
+    }
+
+    /// Opens a Shell Save session for an existing shell-editable outbound (Freedom, Blackhole).
+    pub fn begin_edit_outbound_shell(&mut self, outbound_index: usize) -> Result<(), String> {
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        let outbound_ref = self.build_outbound_ref(outbound_index)?;
+        let editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?;
+        let outbound_value = editable
+            .sections()
+            .outbounds()
+            .get(outbound_index)
+            .ok_or_else(|| "Outbound not found.".to_owned())?
+            .value()
+            .clone();
+        let settings = parse_outbound_settings(&outbound_value)
+            .ok_or_else(|| "Protocol not supported for shell edit.".to_owned())?;
+        let general = parse_outbound_general(&outbound_value);
+        self.outbound_editor_session = Some(super::outbound_ops::OutboundEditorSession {
+            outbound_index,
+            outbound_ref: Some(outbound_ref),
+            general,
+            settings,
+            is_add: false,
+        });
+        Ok(())
+    }
+
+    fn build_outbound_ref(&self, outbound_index: usize) -> Result<OutboundRef, String> {
+        let editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?;
+        let _ = editable
+            .locate_outbound(outbound_index)
+            .map_err(|error| error.message())?;
+        let protocol = editable
+            .sections()
+            .outbounds()
+            .get(outbound_index)
+            .and_then(|outbound| outbound.value().get("protocol"))
+            .and_then(|value| value.as_str())
+            .map(str::to_ascii_lowercase);
+        if !protocol.as_deref().is_some_and(is_shell_editable_protocol) {
+            return Err("Shell editing is not supported for this outbound protocol.".to_owned());
+        }
+        let expected_fingerprint = editable
+            .outbound_object_fingerprint(outbound_index)
+            .map_err(|error| error.message())?;
+        Ok(OutboundRef {
+            outbound_index,
+            expected_fingerprint,
+        })
+    }
+
+    /// Submits an Add Outbound request from the editor session.
+    pub fn start_add_outbound_shell(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        let (general, settings) = {
+            let session = self
+                .outbound_editor_session
+                .as_ref()
+                .ok_or_else(|| "No Add session active.".to_owned())?;
+            if !session.is_add {
+                return Err("Use start_save_outbound_shell for Edit mode.".to_owned());
+            }
+            (session.general.clone(), session.settings.clone())
+        };
+        let editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(p) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    p
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+        let preferred_source_file = editable.primary_source_file().map(str::to_owned);
+        let request = AddOutboundShellRequest {
+            general,
+            settings,
+            preferred_source_file,
+        };
+        let (tx, rx) = mpsc::channel();
+        self.outbound_mutation_rx = Some(rx);
+        self.status_message_until = None;
+        self.operation = CurrentOperation::AddingOutbound;
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let validate_hint = self.config_validate_hint();
+        info!(target: "app", "starting add outbound");
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            let outcome = runtime.block_on(super::outbound_ops::run_add_outbound_shell(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
+    /// Submits a Shell Save request from the editor session.
+    pub fn start_save_outbound_shell(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        let (outbound_ref, general, settings) = {
+            let session = self
+                .outbound_editor_session
+                .as_ref()
+                .ok_or_else(|| "Not editing an outbound.".to_owned())?;
+            if session.is_add {
+                return Err("Use start_add_outbound_shell for Add mode.".to_owned());
+            }
+            let outbound_ref = session
+                .outbound_ref
+                .clone()
+                .ok_or_else(|| "Missing outbound ref.".to_owned())?;
+            (outbound_ref, session.general.clone(), session.settings.clone())
+        };
+        let editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(p) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    p
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+        let request = UpdateOutboundShellRequest {
+            outbound_ref,
+            general,
+            settings,
+        };
+        let (tx, rx) = mpsc::channel();
+        self.outbound_mutation_rx = Some(rx);
+        self.status_message_until = None;
+        self.operation = CurrentOperation::UpdatingOutboundShell;
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let validate_hint = self.config_validate_hint();
+        info!(target: "app", "starting outbound shell save");
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            let outcome = runtime.block_on(super::outbound_ops::run_update_outbound_shell(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
     /// Duplicates a shell-editable inbound (unique tag, same source file).
     pub fn start_duplicate_inbound(&mut self, inbound_index: usize) -> Result<(), String> {
         if self.ssh_status != SshStatus::Connected {
@@ -2142,10 +2389,24 @@ impl ApplicationService {
                             "Outbound deleted. Configuration updated. Xray restart required.",
                         );
                     }
+                    Ok(super::outbound_ops::OutboundMutationSuccess::Add { editable }) => {
+                        self.replace_loaded_editable(editable);
+                        self.outbound_editor_session = None;
+                        self.show_status_message(
+                            "Outbound added. Configuration updated. Xray restart required.",
+                        );
+                    }
+                    Ok(super::outbound_ops::OutboundMutationSuccess::Update { editable }) => {
+                        self.replace_loaded_editable(editable);
+                        self.outbound_editor_session = None;
+                        self.show_status_message(
+                            "Outbound saved. Configuration updated. Xray restart required.",
+                        );
+                    }
                     Err(error) => {
                         let user_message = if error.message().is_empty() {
                             crate::logging::redact::user_message_see_log(
-                                "Unable to delete outbound.",
+                                "Unable to modify outbound.",
                             )
                         } else {
                             error.message().to_owned()
@@ -2163,10 +2424,15 @@ impl ApplicationService {
         }
     }
 
-    /// Returns true when an outbound Delete is in flight.
+    /// Returns true when an outbound Add / Shell Save / Delete is in flight.
     pub fn is_outbound_mutation_busy(&self) -> bool {
         self.outbound_mutation_rx.is_some()
-            || matches!(self.operation, CurrentOperation::DeletingOutbound)
+            || matches!(
+                self.operation,
+                CurrentOperation::AddingOutbound
+                    | CurrentOperation::UpdatingOutboundShell
+                    | CurrentOperation::DeletingOutbound
+            )
     }
 
     /// Returns true when inbound shell Save is in flight.
@@ -5582,6 +5848,8 @@ impl ApplicationService {
             | CurrentOperation::AddingInbound
             | CurrentOperation::DeletingInbound
             | CurrentOperation::DuplicatingInbound
+            | CurrentOperation::AddingOutbound
+            | CurrentOperation::UpdatingOutboundShell
             | CurrentOperation::DeletingOutbound
             | CurrentOperation::GeneratingX25519
             | CurrentOperation::GeneratingMldsa65

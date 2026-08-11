@@ -74,6 +74,10 @@ pub enum CurrentOperation {
     DeletingInbound,
     /// Duplicating an inbound.
     DuplicatingInbound,
+    /// Adding a new outbound (Freedom shell; Roadmap §2.4:94).
+    AddingOutbound,
+    /// Saving an outbound Shell edit (Freedom; Roadmap §2.4:94).
+    UpdatingOutboundShell,
     /// Deleting an outbound.
     DeletingOutbound,
     /// Generating x25519 key pair for Reality.
@@ -133,6 +137,8 @@ impl CurrentOperation {
             Self::AddingInbound => "Adding inbound...".to_owned(),
             Self::DeletingInbound => "Deleting inbound...".to_owned(),
             Self::DuplicatingInbound => "Duplicating inbound...".to_owned(),
+            Self::AddingOutbound => "Adding outbound...".to_owned(),
+            Self::UpdatingOutboundShell => "Saving outbound...".to_owned(),
             Self::DeletingOutbound => "Deleting outbound...".to_owned(),
             Self::GeneratingX25519 => "Generating x25519 key pair...".to_owned(),
             Self::GeneratingMldsa65 => "Generating mldsa65 key pair...".to_owned(),
@@ -161,6 +167,8 @@ impl CurrentOperation {
             | Self::AddingInbound
             | Self::DeletingInbound
             | Self::DuplicatingInbound
+            | Self::AddingOutbound
+            | Self::UpdatingOutboundShell
             | Self::DeletingOutbound
             | Self::GeneratingX25519
             | Self::GeneratingMldsa65

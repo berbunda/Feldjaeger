@@ -32,11 +32,13 @@ mod xray_logs;
 mod xray_management;
 
 pub use crate::xray::{
-    AddInboundRequest, AddUserRequest, DeleteInboundRequest, DeleteUserRequest,
-    DiscoveryState, DuplicateInboundRequest, InboundClientProtocol,
-    InboundClientSummary, InboundGeneral, InboundProtocolDraft, InboundSecurityDraft,
-    InboundSecurityMode, InboundStreamDraft, KNOWN_DEST_OVERRIDE, LogLevel, LogOutput, LogSettings,
-    MaskAddress, RealitySettingsDraft, SecretFieldDraft, SecretString, SniffingSettings,
+    AddInboundRequest, AddUserRequest, BLACKHOLE_RESPONSE_TYPES, DeleteInboundRequest,
+    DeleteUserRequest, DOMAIN_STRATEGIES,
+    DiscoveryState, DuplicateInboundRequest, FREEDOM_NOISE_TYPES, FragmentDraft,
+    InboundClientProtocol, InboundClientSummary, InboundGeneral, InboundProtocolDraft,
+    InboundSecurityDraft, InboundSecurityMode, InboundStreamDraft, KNOWN_DEST_OVERRIDE, LogLevel,
+    LogOutput, LogSettings, MaskAddress, NoiseDraft, OutboundGeneral, OutboundKind,
+    OutboundSettingsDraft, RealitySettingsDraft, SecretFieldDraft, SecretString, SniffingSettings,
     StreamMethod, TrojanClientSummary, UpdateInboundGeneralRequest, UpdateInboundShellRequest,
     UpdateInboundSniffingRequest, UpdateLogSettingsRequest, UpdateUserRequest,
     allowed_security_modes, allowed_stream_methods, coerce_display_stream_method,
@@ -83,6 +85,7 @@ pub use observatory::{
     ObservatoryGeneralDisplay, ObservatoryPageModel, ObservatoryPageState,
     build_observatory_page_model, derive_observatory_page_state, observatory_general_display,
 };
+pub use outbound_ops::{OutboundEditorSession, OutboundMutationKind, OutboundMutationSuccess};
 pub use outbounds::{
     OutboundRowDisplay, OutboundsPageModel, OutboundsPageState, OutboundsSort, OutboundsSortColumn,
     build_outbounds_page_model, derive_outbounds_page_state, outbound_row_display,

@@ -6,8 +6,9 @@
 use egui::{Color32, RichText, Sense, Ui};
 
 use crate::app::{
-    ApplicationService, MISSING_FIELD, OutboundsPageState, OutboundsSortColumn,
-    outbound_row_display,
+    ApplicationService, BLACKHOLE_RESPONSE_TYPES, DOMAIN_STRATEGIES, FREEDOM_NOISE_TYPES,
+    FragmentDraft, MISSING_FIELD, NoiseDraft, OutboundKind, OutboundSettingsDraft,
+    OutboundsPageState, OutboundsSortColumn, outbound_row_display,
 };
 use crate::xray::OutboundSummary;
 
@@ -47,7 +48,37 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
         OutboundsPageState::ConfigurationLoaded => {}
     }
 
+    // Table header with Add button (Freedom, Blackhole; Roadmap §2.4:94, §2.4:95).
+    ui.horizontal(|ui| {
+        ui.strong("Outbounds");
+        ui.add_space(12.0);
+        let busy = service.is_outbound_mutation_busy();
+        let adding = service.outbound_editor_session().is_some_and(|s| s.is_add);
+        ui.add_enabled_ui(!adding && !busy, |ui| {
+            ui.menu_button("Add Outbound", |ui| {
+                if ui.button("Freedom").clicked() {
+                    if let Err(e) = service.begin_add_outbound_freedom() {
+                        service.show_status_message(e);
+                    }
+                    ui.close();
+                }
+                if ui.button("Blackhole").clicked() {
+                    if let Err(e) = service.begin_add_outbound_blackhole() {
+                        service.show_status_message(e);
+                    }
+                    ui.close();
+                }
+            });
+        });
+    });
+    ui.add_space(4.0);
+
     show_table(ui, service, &model.rows);
+    ui.add_space(12.0);
+
+    if service.outbound_editor_session().is_some() {
+        show_outbound_editor_pane(ui, service);
+    }
 }
 
 fn show_state_message(ui: &mut Ui, state: OutboundsPageState) {
@@ -146,10 +177,19 @@ fn show_outbound_context_menu(
 
         ui.separator();
 
-        ui.add_enabled(false, egui::Button::new("Edit"))
-            .on_disabled_hover_text("Not implemented yet");
-
         let busy = service.is_outbound_mutation_busy();
+        let edit_ok = matches!(row.kind(), OutboundKind::Freedom | OutboundKind::Blackhole);
+        if ui
+            .add_enabled(edit_ok && !busy, egui::Button::new("Edit"))
+            .on_disabled_hover_text("Shell editing is available for Freedom and Blackhole outbounds only")
+            .clicked()
+        {
+            if let Err(e) = service.begin_edit_outbound_shell(row.index) {
+                service.show_status_message(e);
+            }
+            ui.close();
+        }
+
         if ui
             .add_enabled(!busy, egui::Button::new("Delete"))
             .on_disabled_hover_text("Delete requires an idle connection")
@@ -223,7 +263,7 @@ fn show_delete_outbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
             ui.add_space(6.0);
             ui.label(
                 RichText::new(
-                    "Outbound shell edit is not available yet. Deletion cannot be undone from the UI (restore from backup if needed).",
+                    "Deletion cannot be undone from the UI (restore from backup if needed).",
                 )
                 .size(13.0)
                 .color(Color32::from_rgb(160, 120, 40)),
@@ -265,4 +305,263 @@ fn show_delete_outbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
     if !open {
         clear_pending_outbound_delete(ui);
     }
+}
+
+// ─── Outbound Shell editor (Freedom, Blackhole; Roadmap §2.4:94, §2.4:95) ────
+
+fn outbound_protocol_label(settings: &OutboundSettingsDraft) -> &'static str {
+    match settings {
+        OutboundSettingsDraft::Freedom { .. } => "Freedom",
+        OutboundSettingsDraft::Blackhole { .. } => "Blackhole",
+    }
+}
+
+fn show_outbound_editor_pane(ui: &mut Ui, service: &mut ApplicationService) {
+    let Some(session) = service.outbound_editor_session() else {
+        return;
+    };
+    let is_add = session.is_add;
+    let protocol_label = outbound_protocol_label(&session.settings);
+
+    ui.separator();
+    ui.add_space(4.0);
+    ui.strong(format!(
+        "{} Outbound ({protocol_label})",
+        if is_add { "Add" } else { "Edit" }
+    ));
+    ui.add_space(4.0);
+
+    show_outbound_general_edit(ui, service, is_add);
+    ui.add_space(6.0);
+    ui.strong(format!("Protocol ({protocol_label})"));
+    match service.outbound_editor_session().map(|s| &s.settings) {
+        Some(OutboundSettingsDraft::Freedom { .. }) => show_freedom_settings_edit(ui, service),
+        Some(OutboundSettingsDraft::Blackhole { .. }) => show_blackhole_settings_edit(ui, service),
+        None => {}
+    }
+    ui.add_space(8.0);
+
+    let busy = service.is_outbound_mutation_busy();
+    ui.horizontal(|ui| {
+        let save_label = if is_add { "Add Outbound" } else { "Save" };
+        if ui
+            .add_enabled(!busy, egui::Button::new(save_label))
+            .clicked()
+        {
+            let result = if is_add {
+                service.start_add_outbound_shell()
+            } else {
+                service.start_save_outbound_shell()
+            };
+            if let Err(e) = result {
+                service.show_status_message(e);
+            }
+        }
+        if ui.button("Cancel").clicked() {
+            service.cancel_outbound_editor_session();
+        }
+    });
+}
+
+fn show_outbound_general_edit(ui: &mut Ui, service: &mut ApplicationService, is_add: bool) {
+    let Some(session) = service.outbound_editor_session_mut() else {
+        return;
+    };
+    let general = &mut session.general;
+    let mut tag = general.tag.clone().unwrap_or_default();
+    let mut send_through = general.send_through.clone().unwrap_or_default();
+
+    egui::Grid::new("outbound_general_edit_grid")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("tag");
+            if is_add {
+                ui.text_edit_singleline(&mut tag);
+            } else {
+                ui.label(if tag.is_empty() { MISSING_FIELD } else { &tag })
+                    .on_hover_text("Rename is not supported yet (Roadmap §2.4:99)");
+            }
+            ui.end_row();
+
+            ui.label("sendThrough");
+            ui.text_edit_singleline(&mut send_through)
+                .on_hover_text("Bind address; empty = system default");
+            ui.end_row();
+        });
+
+    general.tag = Some(tag);
+    general.send_through = Some(send_through);
+}
+
+fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
+    let Some(session) = service.outbound_editor_session_mut() else {
+        return;
+    };
+    let OutboundSettingsDraft::Freedom {
+        domain_strategy,
+        redirect,
+        user_level,
+        fragment,
+        noises,
+    } = &mut session.settings
+    else {
+        return;
+    };
+
+    let mut strategy = domain_strategy.clone();
+    let mut redirect_text = redirect.clone();
+    let mut level = *user_level as i64;
+
+    egui::Grid::new("freedom_settings_edit_grid")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("domainStrategy");
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("freedom_domain_strategy")
+                    .selected_text(if strategy.is_empty() {
+                        "(unset — AsIs)"
+                    } else {
+                        strategy.as_str()
+                    })
+                    .show_ui(ui, |ui| {
+                        for &preset in DOMAIN_STRATEGIES {
+                            ui.selectable_value(&mut strategy, preset.to_owned(), preset);
+                        }
+                    });
+                ui.text_edit_singleline(&mut strategy);
+            });
+            ui.end_row();
+
+            ui.label("redirect");
+            ui.text_edit_singleline(&mut redirect_text)
+                .on_hover_text("host:port or :port; empty = disabled");
+            ui.end_row();
+
+            ui.label("userLevel");
+            ui.add(egui::DragValue::new(&mut level).range(0..=u32::MAX as i64));
+            ui.end_row();
+        });
+
+    *domain_strategy = strategy;
+    *redirect = redirect_text;
+    *user_level = level.max(0) as u64;
+
+    ui.add_space(6.0);
+    let mut fragment_enabled = fragment.is_some();
+    if ui
+        .checkbox(&mut fragment_enabled, "fragment")
+        .on_hover_text("Packet fragmentation for DPI evasion")
+        .changed()
+    {
+        *fragment = if fragment_enabled {
+            Some(FragmentDraft::default())
+        } else {
+            None
+        };
+    }
+    if let Some(fragment) = fragment {
+        egui::Grid::new("freedom_fragment_edit_grid")
+            .num_columns(2)
+            .spacing([16.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("packets");
+                ui.text_edit_singleline(&mut fragment.packets)
+                    .on_hover_text("e.g. tlshello or 1-3");
+                ui.end_row();
+                ui.label("length");
+                ui.text_edit_singleline(&mut fragment.length)
+                    .on_hover_text("e.g. 100-200");
+                ui.end_row();
+                ui.label("interval");
+                ui.text_edit_singleline(&mut fragment.interval)
+                    .on_hover_text("ms, e.g. 10-20");
+                ui.end_row();
+            });
+    }
+
+    ui.add_space(8.0);
+    ui.strong("noises");
+    show_freedom_noises_edit(ui, noises);
+}
+
+fn show_freedom_noises_edit(ui: &mut Ui, noises: &mut Vec<NoiseDraft>) {
+    let mut remove_idx: Option<usize> = None;
+    egui::Grid::new("freedom_noises_edit_grid")
+        .num_columns(4)
+        .spacing([12.0, 4.0])
+        .show(ui, |ui| {
+            ui.label(RichText::new("type").strong());
+            ui.label(RichText::new("packet").strong());
+            ui.label(RichText::new("delay").strong());
+            ui.label("");
+            ui.end_row();
+
+            for (idx, noise) in noises.iter_mut().enumerate() {
+                egui::ComboBox::from_id_salt(("freedom_noise_type", idx))
+                    .selected_text(if noise.kind.is_empty() {
+                        "(unset)"
+                    } else {
+                        noise.kind.as_str()
+                    })
+                    .show_ui(ui, |ui| {
+                        for &preset in FREEDOM_NOISE_TYPES {
+                            ui.selectable_value(&mut noise.kind, preset.to_owned(), preset);
+                        }
+                    });
+                ui.text_edit_singleline(&mut noise.packet);
+                ui.text_edit_singleline(&mut noise.delay);
+                if ui.small_button("Del").clicked() {
+                    remove_idx = Some(idx);
+                }
+                ui.end_row();
+            }
+        });
+    if let Some(idx) = remove_idx {
+        noises.remove(idx);
+    }
+
+    if ui.button("Add noise").clicked() {
+        noises.push(NoiseDraft {
+            kind: "rand".to_owned(),
+            packet: String::new(),
+            delay: String::new(),
+            extras: Default::default(),
+        });
+    }
+}
+
+fn show_blackhole_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
+    let Some(session) = service.outbound_editor_session_mut() else {
+        return;
+    };
+    let OutboundSettingsDraft::Blackhole { response_type, .. } = &mut session.settings else {
+        return;
+    };
+
+    let mut kind = response_type.clone();
+    egui::Grid::new("blackhole_settings_edit_grid")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("response.type")
+                .on_hover_text("none = close immediately; http = send a fake HTTP 403 then close");
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("blackhole_response_type")
+                    .selected_text(if kind.is_empty() {
+                        "(unset — none)"
+                    } else {
+                        kind.as_str()
+                    })
+                    .show_ui(ui, |ui| {
+                        for &preset in BLACKHOLE_RESPONSE_TYPES {
+                            ui.selectable_value(&mut kind, preset.to_owned(), preset);
+                        }
+                    });
+                ui.text_edit_singleline(&mut kind);
+            });
+            ui.end_row();
+        });
+    *response_type = kind;
 }

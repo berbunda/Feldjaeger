@@ -17,6 +17,8 @@ mod json_diff;
 mod log_settings;
 mod modify;
 mod modify_error;
+mod outbound_edit;
+mod outbound_protocol;
 mod parser;
 mod sections;
 mod serialize;
@@ -86,18 +88,24 @@ pub use log_settings::{
     log_settings_to_new_value, validate_custom_mask_format, validate_log_settings,
 };
 pub use modify::{
-    AddInboundClientRequest, AddInboundRequest, AddOutboundRequest, AddUserRequest,
-    DeleteInboundClientRequest, DeleteInboundRequest, DeleteOutboundRequest, DeleteUserRequest,
-    DuplicateInboundRequest, ModifyConfigOutcome, ModifyUserOutcome, RemoveOutboundRequest,
-    ReplaceOutboundRequest, UpdateInboundClientRequest, UpdateInboundGeneralRequest,
-    UpdateInboundShellRequest, UpdateInboundSniffingRequest, UpdateLogSettingsRequest,
-    UpdateUserRequest, add_inbound, add_inbound_client, add_outbound, add_user, delete_inbound,
+    AddInboundClientRequest, AddInboundRequest, AddOutboundRequest, AddOutboundShellRequest,
+    AddUserRequest, DeleteInboundClientRequest, DeleteInboundRequest, DeleteOutboundRequest,
+    DeleteUserRequest, DuplicateInboundRequest, ModifyConfigOutcome, ModifyUserOutcome,
+    RemoveOutboundRequest, ReplaceOutboundRequest, UpdateInboundClientRequest,
+    UpdateInboundGeneralRequest, UpdateInboundShellRequest, UpdateInboundSniffingRequest,
+    UpdateLogSettingsRequest, UpdateOutboundShellRequest, UpdateUserRequest, add_inbound,
+    add_inbound_client, add_outbound, add_outbound_shell, add_user, delete_inbound,
     delete_inbound_client, delete_outbound, delete_user, duplicate_inbound, generate_client_auth,
     generate_client_uuid, remove_outbound, replace_outbound, update_inbound_client,
     update_inbound_general, update_inbound_shell, update_inbound_sniffing, update_log_settings,
-    update_user,
+    update_outbound_shell, update_user,
 };
 pub use modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
+pub use outbound_edit::{OutboundGeneral, OutboundRef, apply_outbound_general, parse_outbound_general};
+pub use outbound_protocol::{
+    BLACKHOLE_RESPONSE_TYPES, FREEDOM_NOISE_TYPES, FragmentDraft, NoiseDraft, OutboundSettingsDraft,
+    apply_outbound_settings, is_shell_editable_protocol, parse_outbound_settings,
+};
 pub use parser::{ConfigParseOutcome, XrayConfigParser};
 pub use sections::{KNOWN_SECTION_NAMES, XrayConfig, XrayConfigSections};
 pub use sourced_section::SourcedSection;
