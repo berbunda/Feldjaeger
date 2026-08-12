@@ -1194,7 +1194,7 @@ pub fn remove_outbound(
     finish_outbound_modification(config, &location.source_file, &original_by_file)
 }
 
-/// Adds a new shell-editable outbound (Freedom, Blackhole; Roadmap §2.4:94, §2.4:95).
+/// Adds a new shell-editable outbound (Freedom, Blackhole, DNS; Roadmap §2.4:94, §2.4:95, §2.4:96).
 pub fn add_outbound_shell(
     config: &mut EditableXrayConfig,
     request: AddOutboundShellRequest,
@@ -1217,10 +1217,12 @@ fn outbound_settings_protocol_name(settings: &OutboundSettingsDraft) -> &'static
     match settings {
         OutboundSettingsDraft::Freedom { .. } => "freedom",
         OutboundSettingsDraft::Blackhole { .. } => "blackhole",
+        OutboundSettingsDraft::Dns { .. } => "dns",
     }
 }
 
-/// Shell Save for an existing shell-editable outbound (Freedom, Blackhole; Roadmap §2.4:94, §2.4:95).
+/// Shell Save for an existing shell-editable outbound (Freedom, Blackhole, DNS; Roadmap §2.4:94,
+/// §2.4:95, §2.4:96).
 ///
 /// Fingerprint-checked (mirrors [`update_inbound_shell`]); tag rename is rejected by the
 /// underlying [`replace_outbound`] tag-match guard (Roadmap §2.4:99 will relax this).
@@ -1438,7 +1440,7 @@ fn validate_outbound_object(outbound: &Value) -> ConfigModifyResult<()> {
     if !protocol.eq_ignore_ascii_case("wireguard") && !is_shell_editable_protocol(protocol) {
         return Err(ConfigModifyError::new(
             ConfigModifyErrorKind::ValidationFailed,
-            "only wireguard, freedom, or blackhole outbounds may be written by this path".to_owned(),
+            "only wireguard, freedom, blackhole, or dns outbounds may be written by this path".to_owned(),
         ));
     }
     let tag = object

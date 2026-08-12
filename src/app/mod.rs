@@ -32,8 +32,9 @@ mod xray_logs;
 mod xray_management;
 
 pub use crate::xray::{
-    AddInboundRequest, AddUserRequest, BLACKHOLE_RESPONSE_TYPES, DeleteInboundRequest,
-    DeleteUserRequest, DOMAIN_STRATEGIES,
+    AddInboundRequest, AddUserRequest, BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS,
+    DNS_RULE_ACTIONS, DeleteInboundRequest,
+    DeleteUserRequest, DOMAIN_STRATEGIES, DnsRuleDraft,
     DiscoveryState, DuplicateInboundRequest, FREEDOM_NOISE_TYPES, FragmentDraft,
     InboundClientProtocol, InboundClientSummary, InboundGeneral, InboundProtocolDraft,
     InboundSecurityDraft, InboundSecurityMode, InboundStreamDraft, KNOWN_DEST_OVERRIDE, LogLevel,

@@ -103,7 +103,8 @@ pub use modify::{
 pub use modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 pub use outbound_edit::{OutboundGeneral, OutboundRef, apply_outbound_general, parse_outbound_general};
 pub use outbound_protocol::{
-    BLACKHOLE_RESPONSE_TYPES, FREEDOM_NOISE_TYPES, FragmentDraft, NoiseDraft, OutboundSettingsDraft,
+    BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS, DnsRuleDraft,
+    FREEDOM_NOISE_TYPES, FragmentDraft, NoiseDraft, OutboundSettingsDraft,
     apply_outbound_settings, is_shell_editable_protocol, parse_outbound_settings,
 };
 pub use parser::{ConfigParseOutcome, XrayConfigParser};

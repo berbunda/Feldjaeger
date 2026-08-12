@@ -6,9 +6,10 @@
 use egui::{Color32, RichText, Sense, Ui};
 
 use crate::app::{
-    ApplicationService, BLACKHOLE_RESPONSE_TYPES, DOMAIN_STRATEGIES, FREEDOM_NOISE_TYPES,
-    FragmentDraft, MISSING_FIELD, NoiseDraft, OutboundKind, OutboundSettingsDraft,
-    OutboundsPageState, OutboundsSortColumn, outbound_row_display,
+    ApplicationService, BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS,
+    DOMAIN_STRATEGIES, DnsRuleDraft, FREEDOM_NOISE_TYPES, FragmentDraft, MISSING_FIELD, NoiseDraft,
+    OutboundKind, OutboundSettingsDraft, OutboundsPageState, OutboundsSortColumn,
+    outbound_row_display,
 };
 use crate::xray::OutboundSummary;
 
@@ -64,6 +65,12 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
                 }
                 if ui.button("Blackhole").clicked() {
                     if let Err(e) = service.begin_add_outbound_blackhole() {
+                        service.show_status_message(e);
+                    }
+                    ui.close();
+                }
+                if ui.button("DNS").clicked() {
+                    if let Err(e) = service.begin_add_outbound_dns() {
                         service.show_status_message(e);
                     }
                     ui.close();
@@ -178,10 +185,13 @@ fn show_outbound_context_menu(
         ui.separator();
 
         let busy = service.is_outbound_mutation_busy();
-        let edit_ok = matches!(row.kind(), OutboundKind::Freedom | OutboundKind::Blackhole);
+        let edit_ok = matches!(
+            row.kind(),
+            OutboundKind::Freedom | OutboundKind::Blackhole | OutboundKind::Dns
+        );
         if ui
             .add_enabled(edit_ok && !busy, egui::Button::new("Edit"))
-            .on_disabled_hover_text("Shell editing is available for Freedom and Blackhole outbounds only")
+            .on_disabled_hover_text("Shell editing is available for Freedom, Blackhole, and DNS outbounds only")
             .clicked()
         {
             if let Err(e) = service.begin_edit_outbound_shell(row.index) {
@@ -307,12 +317,13 @@ fn show_delete_outbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
     }
 }
 
-// ─── Outbound Shell editor (Freedom, Blackhole; Roadmap §2.4:94, §2.4:95) ────
+// ─── Outbound Shell editor (Freedom, Blackhole, DNS; Roadmap §2.4:94, §2.4:95, §2.4:96) ────
 
 fn outbound_protocol_label(settings: &OutboundSettingsDraft) -> &'static str {
     match settings {
         OutboundSettingsDraft::Freedom { .. } => "Freedom",
         OutboundSettingsDraft::Blackhole { .. } => "Blackhole",
+        OutboundSettingsDraft::Dns { .. } => "DNS",
     }
 }
 
@@ -337,6 +348,7 @@ fn show_outbound_editor_pane(ui: &mut Ui, service: &mut ApplicationService) {
     match service.outbound_editor_session().map(|s| &s.settings) {
         Some(OutboundSettingsDraft::Freedom { .. }) => show_freedom_settings_edit(ui, service),
         Some(OutboundSettingsDraft::Blackhole { .. }) => show_blackhole_settings_edit(ui, service),
+        Some(OutboundSettingsDraft::Dns { .. }) => show_dns_settings_edit(ui, service),
         None => {}
     }
     ui.add_space(8.0);
@@ -564,4 +576,166 @@ fn show_blackhole_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
             ui.end_row();
         });
     *response_type = kind;
+}
+
+fn show_dns_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
+    let Some(session) = service.outbound_editor_session_mut() else {
+        return;
+    };
+    let OutboundSettingsDraft::Dns {
+        rewrite_network,
+        rewrite_address,
+        rewrite_port,
+        user_level,
+        rules,
+    } = &mut session.settings
+    else {
+        return;
+    };
+
+    let mut network = rewrite_network.clone();
+    let mut address = rewrite_address.clone();
+    let mut port = rewrite_port.clone();
+    let mut level = *user_level as i64;
+
+    egui::Grid::new("dns_settings_edit_grid")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("rewriteNetwork");
+            ui.horizontal(|ui| {
+                egui::ComboBox::from_id_salt("dns_rewrite_network")
+                    .selected_text(if network.is_empty() {
+                        "(unset — unchanged)"
+                    } else {
+                        network.as_str()
+                    })
+                    .show_ui(ui, |ui| {
+                        for &preset in DNS_REWRITE_NETWORKS {
+                            ui.selectable_value(&mut network, preset.to_owned(), preset);
+                        }
+                    });
+                ui.text_edit_singleline(&mut network);
+            });
+            ui.end_row();
+
+            ui.label("rewriteAddress");
+            ui.text_edit_singleline(&mut address)
+                .on_hover_text("Target DNS server address; empty = unchanged");
+            ui.end_row();
+
+            ui.label("rewritePort");
+            ui.text_edit_singleline(&mut port)
+                .on_hover_text("1-65535; empty = unchanged");
+            ui.end_row();
+
+            ui.label("userLevel");
+            ui.add(egui::DragValue::new(&mut level).range(0..=u32::MAX as i64));
+            ui.end_row();
+        });
+
+    *rewrite_network = network;
+    *rewrite_address = address;
+    *rewrite_port = port;
+    *user_level = level.max(0) as u64;
+
+    ui.add_space(8.0);
+    ui.strong("rules").on_hover_text(
+        "Evaluated in order — first match wins. No matching rule: A/AAAA go to the internal DNS module, other types get an empty RCODE 0 response.",
+    );
+    show_dns_rules_edit(ui, rules);
+}
+
+/// Ordered `settings.rules[]` editor (Add/Remove/Move up/down; order is meaningful — mirrors the
+/// FinalMask layer-list editor convention).
+fn show_dns_rules_edit(ui: &mut Ui, rules: &mut Vec<DnsRuleDraft>) {
+    let mut remove_idx: Option<usize> = None;
+    let mut move_up_idx: Option<usize> = None;
+    let mut move_down_idx: Option<usize> = None;
+    let count = rules.len();
+
+    for (idx, rule) in rules.iter_mut().enumerate() {
+        ui.add_space(4.0);
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("rule[{idx}]"));
+                if ui.small_button("Up").on_hover_text("Move up").clicked() && idx > 0 {
+                    move_up_idx = Some(idx);
+                }
+                if ui.small_button("Down").on_hover_text("Move down").clicked() && idx + 1 < count {
+                    move_down_idx = Some(idx);
+                }
+                if ui.button("Remove").clicked() {
+                    remove_idx = Some(idx);
+                }
+            });
+
+            egui::Grid::new(("dns_rule_edit_grid", idx))
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("action");
+                    ui.horizontal(|ui| {
+                        egui::ComboBox::from_id_salt(("dns_rule_action", idx))
+                            .selected_text(if rule.action.is_empty() {
+                                "(unset)"
+                            } else {
+                                rule.action.as_str()
+                            })
+                            .show_ui(ui, |ui| {
+                                for &preset in DNS_RULE_ACTIONS {
+                                    ui.selectable_value(&mut rule.action, preset.to_owned(), preset);
+                                }
+                            });
+                        ui.text_edit_singleline(&mut rule.action);
+                    });
+                    ui.end_row();
+
+                    ui.label("qType");
+                    ui.text_edit_singleline(&mut rule.q_type).on_hover_text(
+                        "Integer (e.g. 1, 28, 65), or range/comma-list (e.g. 11,13,15-17); empty = any",
+                    );
+                    ui.end_row();
+
+                    ui.label("rCode").on_hover_text("Relevant only when action = return");
+                    let mut r_code = rule.r_code;
+                    ui.add(egui::DragValue::new(&mut r_code).range(0..=65535));
+                    rule.r_code = r_code;
+                    ui.end_row();
+                });
+
+            ui.label("domain (one per line; empty = matches all queries)");
+            let mut domain_text = rule.domain.join("\n");
+            if ui
+                .add(egui::TextEdit::multiline(&mut domain_text).desired_rows(2))
+                .changed()
+            {
+                rule.domain = domain_text
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+            }
+        });
+    }
+
+    if let Some(idx) = remove_idx {
+        rules.remove(idx);
+    } else if let Some(idx) = move_up_idx {
+        rules.swap(idx, idx - 1);
+    } else if let Some(idx) = move_down_idx {
+        rules.swap(idx, idx + 1);
+    }
+
+    ui.add_space(4.0);
+    if ui.button("Add rule").clicked() {
+        rules.push(DnsRuleDraft {
+            action: "direct".to_owned(),
+            q_type: String::new(),
+            r_code: 0,
+            domain: Vec::new(),
+            extras: Default::default(),
+        });
+    }
 }

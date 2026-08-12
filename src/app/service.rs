@@ -1711,6 +1711,11 @@ impl ApplicationService {
         self.begin_add_outbound(OutboundSettingsDraft::blackhole_default())
     }
 
+    /// Opens an Add session for a new DNS outbound.
+    pub fn begin_add_outbound_dns(&mut self) -> Result<(), String> {
+        self.begin_add_outbound(OutboundSettingsDraft::dns_default())
+    }
+
     fn begin_add_outbound(&mut self, settings: OutboundSettingsDraft) -> Result<(), String> {
         if self.is_any_remote_busy() {
             return Err("Another operation is already running.".to_owned());

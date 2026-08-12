@@ -1126,8 +1126,32 @@ fn outbound_description(protocol: Option<&str>, value: &Value) -> String {
             format!("Peers: {peers}")
         }
         OutboundKind::Socks => "Proxy server configured".to_owned(),
-        OutboundKind::Dns
-        | OutboundKind::Http
+        OutboundKind::Dns => {
+            let settings = value.get("settings");
+            let rewrite_address = settings
+                .and_then(|s| s.get("rewriteAddress"))
+                .and_then(Value::as_str)
+                .filter(|text| !text.is_empty());
+            let rule_count = settings
+                .and_then(|s| s.get("rules"))
+                .and_then(Value::as_array)
+                .map(Vec::len)
+                .unwrap_or(0);
+            match rewrite_address {
+                Some(address) => {
+                    let port = settings
+                        .and_then(|s| s.get("rewritePort"))
+                        .and_then(Value::as_u64);
+                    match port {
+                        Some(port) => format!("Rewrite: {address}:{port}"),
+                        None => format!("Rewrite: {address}"),
+                    }
+                }
+                None if rule_count > 0 => format!("{rule_count} rule(s)"),
+                None => "Default (A/AAAA → internal DNS)".to_owned(),
+            }
+        }
+        OutboundKind::Http
         | OutboundKind::Hysteria
         | OutboundKind::Loopback
         | OutboundKind::Shadowsocks

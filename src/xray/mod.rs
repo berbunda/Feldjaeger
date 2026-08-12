@@ -20,7 +20,8 @@ mod x25519_local;
 
 pub use config::{
     AddInboundClientRequest, AddInboundRequest, AddOutboundRequest, AddOutboundShellRequest,
-    AddUserRequest, BLACKHOLE_RESPONSE_TYPES, FREEDOM_NOISE_TYPES, FragmentDraft, NoiseDraft,
+    AddUserRequest, BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS, DnsRuleDraft,
+    FREEDOM_NOISE_TYPES, FragmentDraft, NoiseDraft,
     OutboundGeneral, OutboundRef, OutboundSettingsDraft, UpdateOutboundShellRequest,
     add_outbound_shell, apply_outbound_general, apply_outbound_settings, is_shell_editable_protocol,
     parse_outbound_general, parse_outbound_settings, update_outbound_shell,

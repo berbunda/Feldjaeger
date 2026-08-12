@@ -1365,6 +1365,149 @@ fn update_blackhole_outbound_shell_edits_settings_and_preserves_unrelated_fields
 }
 
 #[test]
+fn add_dns_outbound_shell_writes_settings() {
+    use super::outbound_edit::OutboundGeneral;
+    use super::outbound_protocol::{DnsRuleDraft, OutboundSettingsDraft};
+
+    let mut config = single_file_editable(r#"{"outbounds":[]}"#);
+    let outcome = add_outbound_shell(
+        &mut config,
+        AddOutboundShellRequest {
+            general: OutboundGeneral {
+                tag: Some("dns-out".to_owned()),
+                send_through: None,
+            },
+            settings: OutboundSettingsDraft::Dns {
+                rewrite_network: "udp".to_owned(),
+                rewrite_address: "1.1.1.1".to_owned(),
+                rewrite_port: "53".to_owned(),
+                user_level: 1,
+                rules: vec![DnsRuleDraft {
+                    action: "return".to_owned(),
+                    q_type: String::new(),
+                    r_code: 5,
+                    domain: vec!["domain:example.com".to_owned()],
+                    extras: Default::default(),
+                }],
+            },
+            preferred_source_file: None,
+        },
+    )
+    .expect("add dns outbound");
+    assert_eq!(outcome.source_file, "/etc/xray/config.json");
+    let idx = config.find_outbound_index_by_tag("dns-out").expect("found");
+    let outbound = config.sections().outbounds()[idx].value();
+    assert_eq!(outbound["protocol"], "dns");
+    assert_eq!(outbound["settings"]["rewriteNetwork"], "udp");
+    assert_eq!(outbound["settings"]["rewriteAddress"], "1.1.1.1");
+    assert_eq!(outbound["settings"]["rewritePort"], 53);
+    assert_eq!(outbound["settings"]["userLevel"], 1);
+    assert_eq!(outbound["settings"]["rules"][0]["action"], "return");
+    assert_eq!(outbound["settings"]["rules"][0]["rCode"], 5);
+    // Routing untouched.
+    assert!(config.sections().routing().is_none());
+}
+
+#[test]
+fn update_dns_outbound_shell_edits_settings_and_preserves_unrelated_fields() {
+    use super::outbound_edit::{OutboundGeneral, OutboundRef};
+    use super::outbound_protocol::OutboundSettingsDraft;
+
+    let mut config = single_file_editable(
+        r#"{
+            "outbounds":[{
+                "tag":"dns-out",
+                "protocol":"dns",
+                "settings":{"rewriteNetwork":"tcp","futureField":"keep"},
+                "mux":{"enabled":true}
+            }]
+        }"#,
+    );
+    let index = config.find_outbound_index_by_tag("dns-out").expect("found");
+    let expected_fingerprint = config
+        .outbound_object_fingerprint(index)
+        .expect("fingerprint");
+
+    update_outbound_shell(
+        &mut config,
+        UpdateOutboundShellRequest {
+            outbound_ref: OutboundRef {
+                outbound_index: index,
+                expected_fingerprint,
+            },
+            general: OutboundGeneral {
+                tag: Some("dns-out".to_owned()),
+                send_through: None,
+            },
+            settings: OutboundSettingsDraft::Dns {
+                rewrite_network: "udp".to_owned(),
+                rewrite_address: String::new(),
+                rewrite_port: String::new(),
+                user_level: 0,
+                rules: Vec::new(),
+            },
+        },
+    )
+    .expect("update dns outbound shell");
+
+    let outbound = config.sections().outbounds()[index].value();
+    assert_eq!(outbound["settings"]["rewriteNetwork"], "udp");
+    assert_eq!(outbound["settings"]["futureField"], "keep");
+    assert_eq!(outbound["mux"]["enabled"], true);
+}
+
+#[test]
+fn update_dns_outbound_shell_fingerprint_mismatch_rejected() {
+    use super::outbound_edit::{OutboundGeneral, OutboundRef};
+    use super::outbound_protocol::OutboundSettingsDraft;
+
+    let mut config =
+        single_file_editable(r#"{"outbounds":[{"tag":"dns-out","protocol":"dns","settings":{}}]}"#);
+    let error = update_outbound_shell(
+        &mut config,
+        UpdateOutboundShellRequest {
+            outbound_ref: OutboundRef {
+                outbound_index: 0,
+                expected_fingerprint: "stale".to_owned(),
+            },
+            general: OutboundGeneral {
+                tag: Some("dns-out".to_owned()),
+                send_through: None,
+            },
+            settings: OutboundSettingsDraft::dns_default(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), ConfigModifyErrorKind::FingerprintMismatch);
+}
+
+#[test]
+fn update_dns_outbound_shell_rejects_tag_rename() {
+    use super::outbound_edit::{OutboundGeneral, OutboundRef};
+    use super::outbound_protocol::OutboundSettingsDraft;
+
+    let mut config =
+        single_file_editable(r#"{"outbounds":[{"tag":"dns-out","protocol":"dns","settings":{}}]}"#);
+    let expected_fingerprint = config.outbound_object_fingerprint(0).expect("fingerprint");
+    let error = update_outbound_shell(
+        &mut config,
+        UpdateOutboundShellRequest {
+            outbound_ref: OutboundRef {
+                outbound_index: 0,
+                expected_fingerprint,
+            },
+            general: OutboundGeneral {
+                tag: Some("dns-out-renamed".to_owned()),
+                send_through: None,
+            },
+            settings: OutboundSettingsDraft::dns_default(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), ConfigModifyErrorKind::ValidationFailed);
+}
+
+#[test]
 fn lake1_ambiguous_clients_and_users_rejected() {
     let mut config = single_file_editable(
         r#"{

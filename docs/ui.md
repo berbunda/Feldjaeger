@@ -253,15 +253,18 @@ Add Inbound:
 - Empty clients list is allowed on save
 - Same Preview changes + post-write `-test` path as Shell Save
 
-Outbounds page (Roadmap §2.4:94, §2.4:95):
+Outbounds page (Roadmap §2.4:94, §2.4:95, §2.4:96):
 - Table: Tag, Protocol, Send Through, Summary, Source file; context menu Copy tag/protocol
-- "Add Outbound" is a menu button with two entries, **Freedom** and **Blackhole**, each opening the Add editor for that protocol
-- Context menu **Edit** — enabled for Freedom and Blackhole outbounds only ("Shell editing is available for Freedom and Blackhole outbounds only" hover otherwise); **Delete** — any protocol (unchanged, §2.4:97); **Duplicate** — still disabled (§2.4:98 backlog)
-- Editor (single pane, no tabs — neither protocol has Stream/Security/Sniffing/Users); title and Protocol-section label show the active protocol name:
-  - General (shared by both protocols): `tag` (editable on Add only; read-only label on Edit — rename is Roadmap §2.4:99), `sendThrough`
+- "Add Outbound" is a menu button with three entries, **Freedom**, **Blackhole**, and **DNS**, each opening the Add editor for that protocol
+- Context menu **Edit** — enabled for Freedom, Blackhole, and DNS outbounds only ("Shell editing is available for Freedom, Blackhole, and DNS outbounds only" hover otherwise); **Delete** — any protocol (unchanged, §2.4:97); **Duplicate** — still disabled (§2.4:98 backlog)
+- Editor (single pane, no tabs — none of the three protocols has Stream/Security/Sniffing/Users); title and Protocol-section label show the active protocol name:
+  - General (shared by all three protocols): `tag` (editable on Add only; read-only label on Edit — rename is Roadmap §2.4:99), `sendThrough`
   - Protocol (Freedom): `domainStrategy` (combo of the same presets as `streamSettings.sockopt.domainStrategy` + free text), `redirect` (`host:port`), `userLevel`
     - `fragment` checkbox toggles a `packets` / `length` / `interval` block (all free-text range strings, e.g. `tlshello`, `100-200`, `10-20`)
     - `noises[]` add/edit/delete table — `type` combo (`rand` | `str` | `hex` | `base64` + free text) / `packet` / `delay`
   - Protocol (Blackhole): `response.type` combo (`none` | `http` + free text); empty = `response` key omitted (Xray default `none`)
+  - Protocol (DNS): `rewriteNetwork` combo (`tcp` | `udp` + free text) / `rewriteAddress` / `rewritePort` (1-65535) / `userLevel`; empty rewrite fields = unchanged (Xray leaves the query as-is)
+    - `rules[]` ordered list (first match wins) — each entry: `action` combo (`direct` | `hijack` | `drop` | `return` + free text, required) / `qType` (free text — integer, or range/comma-list e.g. `11,13,15-17`) / `rCode` (0-65535, relevant for `return`) / `domain` multi-line box (one domain matcher per line; empty = matches all queries)
+    - Add rule / Remove / Move up / Move down per entry — order is meaningful, same convention as the FinalMask layer-list editor
   - Save (Add Outbound / Save) writes via a fingerprint-checked Shell Save on Edit; Cancel discards the session
 - Delete dialog unchanged: confirm + "Deletion cannot be undone from the UI (restore from backup if needed)."
