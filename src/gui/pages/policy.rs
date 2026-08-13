@@ -19,6 +19,7 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     ui.add_space(8.0);
 
     let model = service.policy_page_model();
+    show_wiring_warnings(ui, &model.wiring_warnings);
     match model.state {
         PolicyPageState::NoSshConnection
         | PolicyPageState::XrayNotDiscovered
@@ -82,6 +83,27 @@ fn show_loaded_content(
 
     show_levels_table(ui, service, rows);
     show_selected_level_details(ui, rows);
+}
+
+/// Non-fatal `stats`/`policy`/`api`/`metrics` wiring warnings (Roadmap §2.5:106).
+///
+/// Independent of the page state machine — shown whenever present, even in states that
+/// otherwise short-circuit (e.g. `PolicySectionMissing`, since `stats`/`api`/`metrics` can be
+/// misconfigured without a `policy` section existing at all).
+fn show_wiring_warnings(ui: &mut Ui, warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+    ui.strong("Wiring consistency (stats ↔ policy ↔ api ↔ metrics)");
+    ui.add_space(4.0);
+    for warning in warnings {
+        ui.label(
+            RichText::new(warning.clone())
+                .size(13.0)
+                .color(Color32::from_rgb(210, 170, 40)),
+        );
+    }
+    ui.add_space(12.0);
 }
 
 fn show_state_message(ui: &mut Ui, state: PolicyPageState) {

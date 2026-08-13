@@ -16,6 +16,7 @@ use crate::storage::{
 use crate::xray::{DefaultConfigValidator, XrayManager};
 
 use super::burst_observatory::{BurstObservatoryPageModel, build_burst_observatory_page_model};
+use super::confdir_files::{ConfdirFilesPageModel, build_confdir_files_page_model};
 use super::connection_secrets::ConnectionSecrets;
 use super::connection_test::{
     ConnectionTestOutcome, ConnectionTestState, build_connect_request, classify_ssh_error,
@@ -183,6 +184,8 @@ pub struct ApplicationService {
     outbound_mutation_rx: Option<Receiver<super::outbound_ops::OutboundMutationOutcome>>,
     /// Outbound Shell editor session (Freedom only today; Roadmap §2.4:94).
     outbound_editor_session: Option<super::outbound_ops::OutboundEditorSession>,
+    /// In-flight confdir-file mutation (Add / Remove; Roadmap §2.5:107).
+    confdir_file_mutation_rx: Option<Receiver<super::confdir_ops::ConfdirFileMutationOutcome>>,
     log_settings_draft: Option<LogSettings>,
     log_settings_error: Option<String>,
     log_settings_saved_flash: bool,
@@ -300,6 +303,13 @@ impl std::fmt::Debug for ApplicationService {
             .field(
                 "outbound_mutation_rx",
                 &self.outbound_mutation_rx.as_ref().map(|_| "Some(Receiver)"),
+            )
+            .field(
+                "confdir_file_mutation_rx",
+                &self
+                    .confdir_file_mutation_rx
+                    .as_ref()
+                    .map(|_| "Some(Receiver)"),
             )
             .field(
                 "log_settings_draft",
@@ -425,6 +435,7 @@ impl ApplicationService {
             inbound_mutation_rx: None,
             outbound_mutation_rx: None,
             outbound_editor_session: None,
+            confdir_file_mutation_rx: None,
             log_settings_draft: None,
             log_settings_error: None,
             log_settings_saved_flash: false,
@@ -1682,6 +1693,318 @@ impl ApplicationService {
         Ok(())
     }
 
+    /// Duplicates a shell-editable outbound (Freedom/Blackhole/DNS) by merged index (Roadmap §2.4:98).
+    pub fn start_duplicate_outbound(&mut self, outbound_index: usize) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        let editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let _ = editable
+            .locate_outbound(outbound_index)
+            .map_err(|error| error.message())?;
+        let request = crate::xray::DuplicateOutboundRequest { outbound_index };
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(p) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    p
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+        let (tx, rx) = mpsc::channel();
+        self.outbound_mutation_rx = Some(rx);
+        self.status_message_until = None;
+        self.operation = CurrentOperation::DuplicatingOutbound;
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let validate_hint = self.config_validate_hint();
+        info!(target: "app", outbound_index, "starting duplicate outbound");
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            let outcome = runtime.block_on(super::outbound_ops::run_duplicate_outbound(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
+    /// Returns human-readable routing/balancer references to an outbound's current tag, without
+    /// mutating anything. Used to preview rename impact before the user commits (Roadmap §2.4:99).
+    pub fn outbound_tag_reference_preview(&self, outbound_index: usize) -> Vec<String> {
+        let Some(editable) = self.loaded_config.editable() else {
+            return Vec::new();
+        };
+        let Some(tag) = editable
+            .sections()
+            .outbounds()
+            .get(outbound_index)
+            .and_then(|outbound| outbound.value().get("tag"))
+            .and_then(|value| value.as_str())
+        else {
+            return Vec::new();
+        };
+        crate::xray::outbound_tag_references(editable.sections(), tag)
+    }
+
+    /// Renames an outbound's tag by merged index (any protocol; Roadmap §2.4:99).
+    ///
+    /// Never blocked by stale routing/balancer references to the old tag — those are surfaced
+    /// via the status message after the rename completes (see [`Self::poll_outbound_mutation`]).
+    pub fn start_rename_outbound_tag(
+        &mut self,
+        outbound_index: usize,
+        new_tag: String,
+    ) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        let editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let _ = editable
+            .locate_outbound(outbound_index)
+            .map_err(|error| error.message())?;
+        let expected_fingerprint = editable
+            .outbound_object_fingerprint(outbound_index)
+            .map_err(|error| error.message())?;
+        let request = crate::xray::RenameOutboundTagRequest {
+            outbound_index,
+            expected_fingerprint: Some(expected_fingerprint),
+            new_tag,
+        };
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(p) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    p
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+        let (tx, rx) = mpsc::channel();
+        self.outbound_mutation_rx = Some(rx);
+        self.status_message_until = None;
+        self.operation = CurrentOperation::RenamingOutboundTag;
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let validate_hint = self.config_validate_hint();
+        info!(target: "app", outbound_index, "starting rename outbound tag");
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            let outcome = runtime.block_on(super::outbound_ops::run_rename_outbound_tag(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
+    // ─── Confdir files (Roadmap §2.5:107) ────────────────────────────────────
+
+    /// Builds the read-only Config Files page model.
+    pub fn confdir_files_page_model(&self) -> ConfdirFilesPageModel {
+        build_confdir_files_page_model(self.ssh_status, &self.discovery, &self.loaded_config)
+    }
+
+    /// Returns `true` when a confdir-file Add/Remove is in flight.
+    pub fn is_confdir_file_mutation_busy(&self) -> bool {
+        self.confdir_file_mutation_rx.is_some()
+            || matches!(
+                self.operation,
+                CurrentOperation::AddingConfdirFile | CurrentOperation::RemovingConfdirFile
+            )
+    }
+
+    /// Adds a new, empty file to the confdir (Roadmap §2.5:107).
+    pub fn start_add_confdir_file(&mut self, filename: String) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        let editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = crate::xray::AddConfdirFileRequest { filename };
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(p) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    p
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+        let (tx, rx) = mpsc::channel();
+        self.confdir_file_mutation_rx = Some(rx);
+        self.status_message_until = None;
+        self.operation = CurrentOperation::AddingConfdirFile;
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let validate_hint = self.config_validate_hint();
+        info!(target: "app", "starting add confdir file");
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            let outcome = runtime.block_on(super::confdir_ops::run_add_confdir_file(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
+    /// Removes an empty file from the confdir (Roadmap §2.5:107).
+    pub fn start_remove_confdir_file(&mut self, path: String) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        let editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = crate::xray::RemoveConfdirFileRequest { path };
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(p) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    p
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+        let (tx, rx) = mpsc::channel();
+        self.confdir_file_mutation_rx = Some(rx);
+        self.status_message_until = None;
+        self.operation = CurrentOperation::RemovingConfdirFile;
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let validate_hint = self.config_validate_hint();
+        info!(target: "app", "starting remove confdir file");
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            let outcome = runtime.block_on(super::confdir_ops::run_remove_confdir_file(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
+    /// Polls the in-flight confdir-file mutation, if any.
+    pub fn poll_confdir_file_mutation(&mut self) {
+        let Some(rx) = &self.confdir_file_mutation_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.confdir_file_mutation_rx = None;
+                self.operation = CurrentOperation::Ready;
+                match outcome.result {
+                    Ok(super::confdir_ops::ConfdirFileMutationSuccess::Add { editable }) => {
+                        self.replace_loaded_editable(editable);
+                        self.show_status_message(
+                            "Confdir file added. Configuration updated. Xray restart/reload required.",
+                        );
+                    }
+                    Ok(super::confdir_ops::ConfdirFileMutationSuccess::Remove {
+                        editable,
+                        removed_path: _,
+                    }) => {
+                        self.replace_loaded_editable(editable);
+                        self.show_status_message(
+                            "Confdir file removed. Configuration updated. Xray restart/reload required.",
+                        );
+                    }
+                    Err(error) => {
+                        let user_message = if error.message().is_empty() {
+                            crate::logging::redact::user_message_see_log(
+                                "Unable to modify confdir files.",
+                            )
+                        } else {
+                            error.message().to_owned()
+                        };
+                        self.show_status_message(user_message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.confdir_file_mutation_rx = None;
+                self.operation = CurrentOperation::Ready;
+                self.show_status_message("Confdir file operation failed: worker ended unexpectedly");
+            }
+        }
+    }
+
     // ─── Outbound Shell (Freedom, Blackhole; Roadmap §2.4:94, §2.4:95) ───────
 
     /// Returns the current outbound editor session, if any.
@@ -2408,6 +2731,33 @@ impl ApplicationService {
                             "Outbound saved. Configuration updated. Xray restart required.",
                         );
                     }
+                    Ok(super::outbound_ops::OutboundMutationSuccess::Duplicate {
+                        editable,
+                        new_index: _,
+                    }) => {
+                        self.replace_loaded_editable(editable);
+                        self.show_status_message(
+                            "Outbound duplicated. Configuration updated. Xray restart required.",
+                        );
+                    }
+                    Ok(super::outbound_ops::OutboundMutationSuccess::Rename {
+                        editable,
+                        old_tag,
+                        new_tag,
+                        stale_references,
+                    }) => {
+                        self.replace_loaded_editable(editable);
+                        if stale_references.is_empty() {
+                            self.show_status_message(format!(
+                                "Outbound renamed to «{new_tag}». Configuration updated. Xray restart required."
+                            ));
+                        } else {
+                            self.show_status_message(format!(
+                                "Outbound renamed «{old_tag}» → «{new_tag}». Still referenced in routing (update manually): {}",
+                                stale_references.join("; ")
+                            ));
+                        }
+                    }
                     Err(error) => {
                         let user_message = if error.message().is_empty() {
                             crate::logging::redact::user_message_see_log(
@@ -2437,6 +2787,8 @@ impl ApplicationService {
                 CurrentOperation::AddingOutbound
                     | CurrentOperation::UpdatingOutboundShell
                     | CurrentOperation::DeletingOutbound
+                    | CurrentOperation::DuplicatingOutbound
+                    | CurrentOperation::RenamingOutboundTag
             )
     }
 
@@ -3527,6 +3879,7 @@ impl ApplicationService {
             || self.unit_probe_rx.is_some()
             || self.inbound_mutation_rx.is_some()
             || self.outbound_mutation_rx.is_some()
+            || self.confdir_file_mutation_rx.is_some()
     }
 
     /// Returns `true` while a log-settings save is in flight.
@@ -5788,6 +6141,7 @@ impl ApplicationService {
         self.poll_inbound_shell_mutation();
         self.poll_inbound_mutation();
         self.poll_outbound_mutation();
+        self.poll_confdir_file_mutation();
         self.poll_log_settings_mutation();
         self.poll_service_operation();
         self.poll_unit_operations();
@@ -5856,6 +6210,10 @@ impl ApplicationService {
             | CurrentOperation::AddingOutbound
             | CurrentOperation::UpdatingOutboundShell
             | CurrentOperation::DeletingOutbound
+            | CurrentOperation::DuplicatingOutbound
+            | CurrentOperation::RenamingOutboundTag
+            | CurrentOperation::AddingConfdirFile
+            | CurrentOperation::RemovingConfdirFile
             | CurrentOperation::GeneratingX25519
             | CurrentOperation::GeneratingMldsa65
             | CurrentOperation::GeneratingVlessEnc => {}

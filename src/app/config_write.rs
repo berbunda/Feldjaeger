@@ -127,6 +127,186 @@ pub async fn write_config_validated<S: SshSession + Sync>(
     }
 }
 
+/// Creates a new, empty confdir file, then optional `xray run -test`; removes the file again
+/// on failure — nothing existed before, so there's no backup to restore (Roadmap §2.5:107).
+pub async fn create_confdir_file_validated<S: SshSession + Sync>(
+    remote: &RemoteAdmin,
+    session: &S,
+    path: &RemotePath,
+    contents: &[u8],
+    hint: &RemoteConfigValidateHint,
+) -> Result<(), ConfigModifyError> {
+    remote
+        .create_config_file(session, path, contents)
+        .await
+        .map_err(map_app_error_to_modify)?;
+
+    let Some(binary) = hint
+        .binary_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        info!(
+            target: "app",
+            path = %path.as_str(),
+            "skipping xray run -test (binary path unknown)"
+        );
+        return Ok(());
+    };
+
+    let target = ConfigTestTarget::from_source_or_file(&hint.config_source, path.as_str());
+    info!(
+        target: "app",
+        path = %path.as_str(),
+        target = ?target,
+        "post-create xray run -test"
+    );
+
+    let test_result = match timeout(CONFIG_TEST_TIMEOUT, run_config_test(session, binary, &target))
+        .await
+    {
+        Ok(inner) => inner,
+        Err(_elapsed) => {
+            warn!(
+                target: "app",
+                path = %path.as_str(),
+                "xray run -test timed out; removing newly-created file"
+            );
+            remove_after_failed_test(session, path).await?;
+            return Err(ConfigModifyError::new(
+                ConfigModifyErrorKind::XrayValidationFailed,
+                "xray run -test timed out after 45 seconds; new file removed".to_owned(),
+            ));
+        }
+    };
+
+    match test_result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let detail = crate::logging::redact::sanitize_detail(error.detail());
+            warn!(
+                target: "app",
+                kind = ?error.kind(),
+                detail = %detail,
+                "xray run -test failed; removing newly-created file"
+            );
+            remove_after_failed_test(session, path).await?;
+
+            let kind = match error.kind() {
+                RemoteCliErrorKind::ConnectionLost => ConfigModifyErrorKind::ConnectionLost,
+                RemoteCliErrorKind::TimedOut => ConfigModifyErrorKind::XrayValidationFailed,
+                RemoteCliErrorKind::CommandFailed
+                | RemoteCliErrorKind::NonZeroExit
+                | RemoteCliErrorKind::ParseFailed => ConfigModifyErrorKind::XrayValidationFailed,
+            };
+            let message = if detail.is_empty() {
+                "xray run -test failed; new file removed".to_owned()
+            } else {
+                format!("{detail}; new file removed")
+            };
+            Err(ConfigModifyError::new(kind, message))
+        }
+    }
+}
+
+/// Backs up and removes a confdir file, then optional `xray run -test`; restores the file
+/// from backup on failure (mirrors [`write_config_validated`]; Roadmap §2.5:107).
+pub async fn remove_confdir_file_validated<S: SshSession + Sync>(
+    remote: &RemoteAdmin,
+    session: &S,
+    path: &RemotePath,
+    hint: &RemoteConfigValidateHint,
+) -> Result<(), ConfigModifyError> {
+    let backup = remote
+        .remove_config_file(session, path)
+        .await
+        .map_err(map_app_error_to_modify)?;
+
+    let Some(binary) = hint
+        .binary_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        info!(
+            target: "app",
+            path = %path.as_str(),
+            "skipping xray run -test (binary path unknown)"
+        );
+        return Ok(());
+    };
+
+    let target = ConfigTestTarget::from_source_or_file(&hint.config_source, path.as_str());
+    info!(
+        target: "app",
+        path = %path.as_str(),
+        target = ?target,
+        "post-remove xray run -test"
+    );
+
+    let test_result = match timeout(CONFIG_TEST_TIMEOUT, run_config_test(session, binary, &target))
+        .await
+    {
+        Ok(inner) => inner,
+        Err(_elapsed) => {
+            warn!(
+                target: "app",
+                path = %path.as_str(),
+                "xray run -test timed out; restoring removed file"
+            );
+            restore_after_failed_test(remote, session, &backup).await?;
+            return Err(ConfigModifyError::new(
+                ConfigModifyErrorKind::XrayValidationFailed,
+                "xray run -test timed out after 45 seconds; removed file restored".to_owned(),
+            ));
+        }
+    };
+
+    match test_result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let detail = crate::logging::redact::sanitize_detail(error.detail());
+            warn!(
+                target: "app",
+                kind = ?error.kind(),
+                detail = %detail,
+                "xray run -test failed; restoring removed file"
+            );
+            restore_after_failed_test(remote, session, &backup).await?;
+
+            let kind = match error.kind() {
+                RemoteCliErrorKind::ConnectionLost => ConfigModifyErrorKind::ConnectionLost,
+                RemoteCliErrorKind::TimedOut => ConfigModifyErrorKind::XrayValidationFailed,
+                RemoteCliErrorKind::CommandFailed
+                | RemoteCliErrorKind::NonZeroExit
+                | RemoteCliErrorKind::ParseFailed => ConfigModifyErrorKind::XrayValidationFailed,
+            };
+            let message = if detail.is_empty() {
+                "xray run -test failed; removed file restored".to_owned()
+            } else {
+                format!("{detail}; removed file restored")
+            };
+            Err(ConfigModifyError::new(kind, message))
+        }
+    }
+}
+
+async fn remove_after_failed_test<S: SshSession + Sync>(
+    session: &S,
+    path: &RemotePath,
+) -> Result<(), ConfigModifyError> {
+    session.remove_file(path).await.map_err(|error| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::XrayValidationFailed,
+            format!(
+                "xray run -test failed and cleanup also failed: {}",
+                crate::logging::redact::sanitize_detail(error.message())
+            ),
+        )
+    })
+}
+
 async fn restore_after_failed_test<S: SshSession + Sync>(
     remote: &RemoteAdmin,
     session: &S,

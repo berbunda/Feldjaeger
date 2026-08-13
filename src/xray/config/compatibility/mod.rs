@@ -1,6 +1,6 @@
 //! CompatibilityGate for inbound Shell Save / Add / client mutate.
 //!
-//! Wave A Save order: **G9→G10→G6→G5→G1→G2→G8→G12→G4→G3** (G7 retired;
+//! Wave A Save order: **G9→G10→G6→G5→G1→G2→G8→G12→G4→G3→G13** (G7 retired;
 //! G11 predicate+tests only until Wave B).
 
 mod matrix;
@@ -16,7 +16,7 @@ use serde_json::Value;
 
 use super::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 
-/// Stable gate identifiers (design G1–G12).
+/// Stable gate identifiers (design G1–G12; G13 added for Roadmap §2.5:105).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompatibilityGateId {
     /// Reality + method not in {raw,tcp,xhttp,grpc}.
@@ -43,6 +43,8 @@ pub enum CompatibilityGateId {
     G11,
     /// TLS mode ⇒ every certificates[] entry has file paths or PEM (verify: key optional).
     G12,
+    /// Vision flow ⇒ security tls or reality (Roadmap §2.5:105).
+    G13,
 }
 
 impl CompatibilityGateId {
@@ -63,6 +65,7 @@ impl CompatibilityGateId {
             Self::G12 => {
                 "TLS requires each certificate entry to have file paths or PEM (key optional for usage verify)"
             }
+            Self::G13 => "xtls-rprx-vision requires security tls or reality (not none)",
         }
     }
 }
@@ -80,7 +83,7 @@ pub fn check_inbound_compatibility(inbound: &Value) -> ConfigModifyResult<()> {
 
 /// Returns the first failing gate id, if any.
 ///
-/// Wave A order: **G9→G10→G11→G6→G5→G1→G2→G8→G12→G4→G3**.
+/// Wave A order: **G9→G10→G11→G6→G5→G1→G2→G8→G12→G4→G3→G13**.
 pub fn first_failing_gate(inbound: &Value) -> Option<CompatibilityGateId> {
     let protocol = inbound
         .get("protocol")
@@ -134,8 +137,15 @@ pub fn first_failing_gate(inbound: &Value) -> Option<CompatibilityGateId> {
         return Some(CompatibilityGateId::G4);
     }
 
-    if inbound_has_vision_flow(inbound) && !matches!(method.as_str(), "raw" | "tcp") {
-        return Some(CompatibilityGateId::G3);
+    if inbound_has_vision_flow(inbound) {
+        if !matches!(method.as_str(), "raw" | "tcp") {
+            return Some(CompatibilityGateId::G3);
+        }
+        // Vision splices at the TLS record layer — it has nothing to splice without an
+        // external transport security layer (Xray docs: VLESS `security: none` warning).
+        if security == "none" {
+            return Some(CompatibilityGateId::G13);
+        }
     }
 
     None
@@ -449,6 +459,73 @@ mod tests {
                 "users":[{"id":"b"}]
             },
             "streamSettings":{"network":"xhttp","security":"none"}
+        });
+        assert_eq!(first_failing_gate(&inbound), Some(CompatibilityGateId::G3));
+    }
+
+    #[test]
+    fn g13_rejects_vision_with_security_none() {
+        let inbound = json!({
+            "protocol":"vless",
+            "settings":{
+                "decryption":"none",
+                "clients":[{"id":"a","flow":"xtls-rprx-vision"}]
+            },
+            "streamSettings":{"network":"tcp","security":"none"}
+        });
+        assert_eq!(first_failing_gate(&inbound), Some(CompatibilityGateId::G13));
+    }
+
+    #[test]
+    fn g13_passes_vision_with_tls() {
+        let inbound = json!({
+            "protocol":"vless",
+            "settings":{
+                "decryption":"none",
+                "clients":[{"id":"a","flow":"xtls-rprx-vision"}]
+            },
+            "streamSettings":{
+                "network":"tcp",
+                "security":"tls",
+                "tlsSettings":{"certificates":[{"certificateFile":"/c","keyFile":"/k"}]}
+            }
+        });
+        assert_eq!(first_failing_gate(&inbound), None);
+    }
+
+    #[test]
+    fn g13_passes_vision_with_reality() {
+        let inbound = json!({
+            "protocol":"vless",
+            "settings":{
+                "decryption":"none",
+                "clients":[{"id":"a","flow":"xtls-rprx-vision"}]
+            },
+            "streamSettings":{
+                "network":"tcp",
+                "security":"reality",
+                "realitySettings":{
+                    "target":"www.example.com:443",
+                    "privateKey":"abc",
+                    "serverNames":["www.example.com"],
+                    "shortIds":["abcd"]
+                }
+            }
+        });
+        assert_eq!(first_failing_gate(&inbound), None);
+    }
+
+    #[test]
+    fn g3_takes_priority_over_g13_when_both_would_fail() {
+        // Bad transport AND security:none simultaneously — transport (G3) is the more
+        // fundamental mismatch and must be reported first.
+        let inbound = json!({
+            "protocol":"vless",
+            "settings":{
+                "decryption":"none",
+                "clients":[{"id":"a","flow":"xtls-rprx-vision"}]
+            },
+            "streamSettings":{"network":"ws","security":"none"}
         });
         assert_eq!(first_failing_gate(&inbound), Some(CompatibilityGateId::G3));
     }

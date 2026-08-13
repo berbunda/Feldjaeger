@@ -16,6 +16,11 @@ use crate::app::{
 use crate::xray::{HysteriaClientSummary, UserSummary};
 
 /// Allowed VLESS `flow` values in Add/Edit dialogs.
+///
+/// `xtls-rprx-vision-udp443` is intentionally **not** offered here: current Xray-core inbound
+/// docs list only `xtls-rprx-vision` (the `-udp443` variant was merged into it and deprecated).
+/// A config that still has it on disk is preserved and surfaced via the "unsupported flow"
+/// hint in the Edit dialog until the user explicitly picks an allowed value (Roadmap §2.5:105).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum VlessFlowChoice {
     /// Omit `flow` from the client JSON object.
@@ -23,18 +28,15 @@ enum VlessFlowChoice {
     None,
     /// `"flow": "xtls-rprx-vision"`.
     XtlsRprxVision,
-    /// `"flow": "xtls-rprx-vision-udp443"`.
-    XtlsRprxVisionUdp443,
 }
 
 impl VlessFlowChoice {
-    const ALL: &[Self] = &[Self::None, Self::XtlsRprxVision, Self::XtlsRprxVisionUdp443];
+    const ALL: &[Self] = &[Self::None, Self::XtlsRprxVision];
 
     fn label(self) -> &'static str {
         match self {
             Self::None => "None",
             Self::XtlsRprxVision => "xtls-rprx-vision",
-            Self::XtlsRprxVisionUdp443 => "xtls-rprx-vision-udp443",
         }
     }
 
@@ -42,7 +44,6 @@ impl VlessFlowChoice {
         match self {
             Self::None => None,
             Self::XtlsRprxVision => Some("xtls-rprx-vision".to_owned()),
-            Self::XtlsRprxVisionUdp443 => Some("xtls-rprx-vision-udp443".to_owned()),
         }
     }
 }
@@ -1397,7 +1398,6 @@ fn open_edit_dialog(ui: &Ui, service: &ApplicationService, row: &UserSummary) {
     let (flow, unsupported_flow_hint) = match row.flow.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
         None => (VlessFlowChoice::None, None),
         Some("xtls-rprx-vision") => (VlessFlowChoice::XtlsRprxVision, None),
-        Some("xtls-rprx-vision-udp443") => (VlessFlowChoice::XtlsRprxVisionUdp443, None),
         Some(other) => (VlessFlowChoice::None, Some(other.to_owned())),
     };
     let fingerprint = match service.client_fingerprint(row.inbound_index, row.client_index) {

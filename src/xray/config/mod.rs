@@ -26,6 +26,7 @@ mod sourced_section;
 mod summary;
 mod tag_refs;
 mod users;
+mod wiring;
 
 pub use compatibility::{
     CompatibilityGateId, allowed_security_modes, allowed_stream_methods, check_inbound_compatibility,
@@ -88,17 +89,19 @@ pub use log_settings::{
     log_settings_to_new_value, validate_custom_mask_format, validate_log_settings,
 };
 pub use modify::{
-    AddInboundClientRequest, AddInboundRequest, AddOutboundRequest, AddOutboundShellRequest,
-    AddUserRequest, DeleteInboundClientRequest, DeleteInboundRequest, DeleteOutboundRequest,
-    DeleteUserRequest, DuplicateInboundRequest, ModifyConfigOutcome, ModifyUserOutcome,
-    RemoveOutboundRequest, ReplaceOutboundRequest, UpdateInboundClientRequest,
-    UpdateInboundGeneralRequest, UpdateInboundShellRequest, UpdateInboundSniffingRequest,
-    UpdateLogSettingsRequest, UpdateOutboundShellRequest, UpdateUserRequest, add_inbound,
-    add_inbound_client, add_outbound, add_outbound_shell, add_user, delete_inbound,
-    delete_inbound_client, delete_outbound, delete_user, duplicate_inbound, generate_client_auth,
-    generate_client_uuid, remove_outbound, replace_outbound, update_inbound_client,
-    update_inbound_general, update_inbound_shell, update_inbound_sniffing, update_log_settings,
-    update_outbound_shell, update_user,
+    AddConfdirFileRequest, AddInboundClientRequest, AddInboundRequest, AddOutboundRequest,
+    AddOutboundShellRequest, AddUserRequest, DeleteInboundClientRequest, DeleteInboundRequest,
+    DeleteOutboundRequest, DeleteUserRequest, DuplicateInboundRequest, DuplicateOutboundRequest,
+    ModifyConfigOutcome, ModifyUserOutcome, RemoveConfdirFileRequest, RemoveOutboundRequest,
+    RenameOutboundOutcome, RenameOutboundTagRequest, ReplaceOutboundRequest,
+    UpdateInboundClientRequest, UpdateInboundGeneralRequest, UpdateInboundShellRequest,
+    UpdateInboundSniffingRequest, UpdateLogSettingsRequest, UpdateOutboundShellRequest,
+    UpdateUserRequest, add_confdir_file, add_inbound, add_inbound_client, add_outbound,
+    add_outbound_shell, add_user, delete_inbound, delete_inbound_client, delete_outbound,
+    delete_user, duplicate_inbound, duplicate_outbound, generate_client_auth,
+    generate_client_uuid, remove_confdir_file, remove_outbound, rename_outbound_tag,
+    replace_outbound, update_inbound_client, update_inbound_general, update_inbound_shell,
+    update_inbound_sniffing, update_log_settings, update_outbound_shell, update_user,
 };
 pub use modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 pub use outbound_edit::{OutboundGeneral, OutboundRef, apply_outbound_general, parse_outbound_general};
@@ -127,6 +130,7 @@ pub use users::{
     extract_inbound_clients, extract_vless_clients, supported_user_inbounds,
     supported_vless_user_inbounds, vless_clients_for_inbound,
 };
+pub use wiring::{routing_wiring_warnings, stats_wiring_warnings};
 
 #[cfg(test)]
 mod modify_tests;

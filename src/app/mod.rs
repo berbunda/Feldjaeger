@@ -4,6 +4,8 @@
 //! remote administration, Xray management, and init-system control.
 
 mod burst_observatory;
+mod confdir_files;
+mod confdir_ops;
 pub(crate) mod config_write;
 mod connection_secrets;
 mod connection_test;
@@ -52,6 +54,11 @@ pub use burst_observatory::{
     BurstPingConfigDisplay, build_burst_observatory_page_model, burst_observatory_general_display,
     burst_ping_config_display, derive_burst_observatory_page_state,
 };
+pub use confdir_files::{
+    ConfdirFileRow, ConfdirFilesPageModel, ConfdirFilesPageState, build_confdir_files_page_model,
+    derive_confdir_files_page_state,
+};
+pub use confdir_ops::{ConfdirFileMutationKind, ConfdirFileMutationSuccess};
 pub use connection_secrets::ConnectionSecrets;
 pub use connection_test::ConnectionTestState;
 pub use discovery::{format_installation_summary, format_not_found_summary};

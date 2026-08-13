@@ -180,6 +180,37 @@ pub struct RemoveOutboundRequest {
     pub tag: String,
 }
 
+/// Request to deep-copy a shell-editable outbound by merged index (GUI Duplicate; Roadmap §2.4:98).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DuplicateOutboundRequest {
+    /// Merged outbound index to duplicate.
+    pub outbound_index: usize,
+}
+
+/// Request to rename an outbound's tag by merged index (GUI Rename; Roadmap §2.4:99).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameOutboundTagRequest {
+    /// Merged outbound index.
+    pub outbound_index: usize,
+    /// Fingerprint from rename intent; when `Some`, must match before rename.
+    pub expected_fingerprint: Option<String>,
+    /// New tag value.
+    pub new_tag: String,
+}
+
+/// Outcome of a successful outbound tag rename, including stale routing/balancer references.
+#[derive(Debug, Clone)]
+pub struct RenameOutboundOutcome {
+    /// File write outcome.
+    pub outcome: ModifyConfigOutcome,
+    /// Tag before the rename.
+    pub old_tag: String,
+    /// Tag after the rename.
+    pub new_tag: String,
+    /// Human-readable routing/balancer references still pointing at `old_tag` (not auto-updated).
+    pub stale_references: Vec<String>,
+}
+
 /// Add a shell-editable outbound (Freedom, Blackhole; Roadmap §2.4:94, §2.4:95).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AddOutboundShellRequest {
@@ -193,7 +224,8 @@ pub struct AddOutboundShellRequest {
 
 /// Shell Save for an existing shell-editable outbound (Freedom, Blackhole; Roadmap §2.4:94, §2.4:95).
 ///
-/// Tag rename is not supported here (Roadmap §2.4:99, separate follow-up).
+/// Tag rename is intentionally not supported here — use [`rename_outbound_tag`] instead
+/// (Roadmap §2.4:99), which is a standalone action available for any outbound protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateOutboundShellRequest {
     /// Outbound identity + fingerprint at edit intent.
@@ -1113,6 +1145,69 @@ pub fn update_log_settings(
     })
 }
 
+/// Deep-copies a shell-editable outbound (Freedom, Blackhole, DNS) into the same source file
+/// with a unique tag. Roadmap §2.4:98.
+pub fn duplicate_outbound(
+    config: &mut EditableXrayConfig,
+    request: DuplicateOutboundRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    let location = config.locate_outbound(request.outbound_index)?;
+    let source = config
+        .sections()
+        .outbounds()
+        .get(request.outbound_index)
+        .ok_or_else(|| {
+            ConfigModifyError::new(ConfigModifyErrorKind::OutboundNotFound, String::new())
+        })?;
+    let protocol = source
+        .value()
+        .get("protocol")
+        .and_then(Value::as_str)
+        .map(str::to_ascii_lowercase);
+    if !protocol.as_deref().is_some_and(is_shell_editable_protocol) {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "Duplicate is available for Freedom, Blackhole, and DNS outbounds only".to_owned(),
+        ));
+    }
+
+    let source_file = location.source_file.clone();
+    let mut clone = source.value().clone();
+    let base_tag = clone
+        .get("tag")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned);
+    let new_tag = unique_outbound_copy_tag(config, base_tag.as_deref());
+    let object = clone.as_object_mut().ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "outbound must be a JSON object".to_owned(),
+        )
+    })?;
+    object.insert("tag".to_owned(), Value::String(new_tag));
+
+    validate_outbound_object(&clone)?;
+
+    let original_by_file = snapshot_all_roots(config)?;
+    let out_location = config.add_outbound_value(clone, Some(&source_file))?;
+    finish_outbound_modification(config, &out_location.source_file, &original_by_file)
+}
+
+fn unique_outbound_copy_tag(config: &EditableXrayConfig, base: Option<&str>) -> String {
+    let base = base.unwrap_or("outbound");
+    let candidates = std::iter::once(format!("{base}-copy")).chain((2u32..).map(|n| {
+        format!("{base}-copy-{n}")
+    }));
+    for candidate in candidates {
+        if !config.outbound_tag_taken(&candidate) {
+            return candidate;
+        }
+    }
+    format!("{base}-copy-{}", Uuid::new_v4())
+}
+
 /// Appends an outbound object without touching routing or unrelated sections.
 pub fn add_outbound(
     config: &mut EditableXrayConfig,
@@ -1194,6 +1289,68 @@ pub fn remove_outbound(
     finish_outbound_modification(config, &location.source_file, &original_by_file)
 }
 
+/// Renames an outbound's tag by merged index (any protocol; Roadmap §2.4:99).
+///
+/// Does **not** rewrite routing rule `outboundTag` / balancer `selector` entries that point at
+/// the old tag — those are returned as `stale_references` for the caller to surface as a warning.
+/// The rename itself is never blocked by stale references (v1 scope, matches the analogous
+/// inbound-rename roadmap item).
+pub fn rename_outbound_tag(
+    config: &mut EditableXrayConfig,
+    request: RenameOutboundTagRequest,
+) -> ConfigModifyResult<RenameOutboundOutcome> {
+    let index = request.outbound_index;
+    let _ = config.locate_outbound(index)?;
+    if let Some(expected) = &request.expected_fingerprint {
+        let actual = config.outbound_object_fingerprint(index)?;
+        if actual != *expected {
+            return Err(ConfigModifyError::new(
+                ConfigModifyErrorKind::FingerprintMismatch,
+                String::new(),
+            ));
+        }
+    }
+
+    let old_tag = config.sections().outbounds()[index]
+        .value()
+        .get("tag")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            ConfigModifyError::new(
+                ConfigModifyErrorKind::ValidationFailed,
+                "outbound tag is required".to_owned(),
+            )
+        })?;
+    let new_tag = normalize_outbound_tag(&request.new_tag)?;
+
+    let stale_references = super::tag_refs::outbound_tag_references(config.sections(), &old_tag);
+
+    let mut updated = config.sections().outbounds()[index].value().clone();
+    updated
+        .as_object_mut()
+        .ok_or_else(|| {
+            ConfigModifyError::new(
+                ConfigModifyErrorKind::ValidationFailed,
+                "outbound must be a JSON object".to_owned(),
+            )
+        })?
+        .insert("tag".to_owned(), Value::String(new_tag.clone()));
+
+    let original_by_file = snapshot_all_roots(config)?;
+    let location = config.replace_outbound_value(index, updated)?;
+    let outcome = finish_outbound_modification(config, &location.source_file, &original_by_file)?;
+
+    Ok(RenameOutboundOutcome {
+        outcome,
+        old_tag,
+        new_tag,
+        stale_references,
+    })
+}
+
 /// Adds a new shell-editable outbound (Freedom, Blackhole, DNS; Roadmap §2.4:94, §2.4:95, §2.4:96).
 pub fn add_outbound_shell(
     config: &mut EditableXrayConfig,
@@ -1225,7 +1382,8 @@ fn outbound_settings_protocol_name(settings: &OutboundSettingsDraft) -> &'static
 /// §2.4:95, §2.4:96).
 ///
 /// Fingerprint-checked (mirrors [`update_inbound_shell`]); tag rename is rejected by the
-/// underlying [`replace_outbound`] tag-match guard (Roadmap §2.4:99 will relax this).
+/// underlying [`replace_outbound`] tag-match guard by design — rename is a separate action,
+/// [`rename_outbound_tag`] (Roadmap §2.4:99).
 pub fn update_outbound_shell(
     config: &mut EditableXrayConfig,
     request: UpdateOutboundShellRequest,
@@ -1591,5 +1749,99 @@ fn check_inbound_after_client_mutate(
             ConfigModifyError::new(ConfigModifyErrorKind::InboundNotFound, String::new())
         })?;
     check_inbound_compatibility(inbound.value())
+}
+
+/// Request to add a new, empty file to an existing confdir (Roadmap §2.5:107).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AddConfdirFileRequest {
+    /// Bare filename (no path separators); must end in `.json` so Xray's own confdir
+    /// loader (and Feldjäger's own re-discovery) picks it up.
+    pub filename: String,
+}
+
+/// Adds a new, empty (`{}`) file to the confdir, alongside the config's existing files.
+///
+/// The new file's directory is derived from an existing file root — all confdir files share
+/// one directory. Callers gate this to actual confdir layouts (`ApplicationService`); nothing
+/// here inspects `ConfigSource`, since `EditableXrayConfig` doesn't carry that concept.
+pub fn add_confdir_file(
+    config: &mut EditableXrayConfig,
+    request: AddConfdirFileRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    let filename = validate_confdir_filename(&request.filename)?;
+    let directory = config
+        .file_roots()
+        .keys()
+        .next()
+        .and_then(|path| path.rsplit_once('/').map(|(dir, _)| dir))
+        .ok_or_else(|| {
+            ConfigModifyError::new(
+                ConfigModifyErrorKind::ValidationFailed,
+                "no existing configuration file to determine the confdir directory".to_owned(),
+            )
+        })?;
+    let path = format!("{directory}/{filename}");
+
+    config.insert_empty_file_root(path.clone())?;
+
+    let serialized = config.serialize_source_file(&path)?;
+    validate_serialized_json(&serialized)?;
+
+    Ok(ModifyConfigOutcome {
+        source_file: path,
+        serialized,
+        original_serialized: Vec::new(),
+    })
+}
+
+fn validate_confdir_filename(filename: &str) -> ConfigModifyResult<String> {
+    let trimmed = filename.trim();
+    if trimmed.is_empty() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "file name must not be empty".to_owned(),
+        ));
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "file name must not contain path separators".to_owned(),
+        ));
+    }
+    if !trimmed.ends_with(".json") {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "file name must end in .json (Xray only merges .json files from a confdir)"
+                .to_owned(),
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// Request to remove an empty file from the confdir (Roadmap §2.5:107).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoveConfdirFileRequest {
+    /// Full source path, as listed in [`EditableXrayConfig::file_roots`].
+    pub path: String,
+}
+
+/// Removes a confdir file — hard-blocked when it still contains any section (known or
+/// unknown, including inbounds/outbounds).
+pub fn remove_confdir_file(
+    config: &mut EditableXrayConfig,
+    request: RemoveConfdirFileRequest,
+) -> ConfigModifyResult<()> {
+    let contents = config.sections().sections_in_file(&request.path);
+    if !contents.is_empty() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            format!(
+                "cannot remove `{}`: still contains {}. Move or remove those sections first.",
+                request.path,
+                contents.join(", ")
+            ),
+        ));
+    }
+    config.remove_file_root(&request.path)
 }
 

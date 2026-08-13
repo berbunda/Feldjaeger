@@ -7,7 +7,7 @@ description = "Backend-agnostic SSH transport library for Feldjaeger"
 readme = "README.md"
 
 [dependencies]
-russh = { version = "0.62.5", default-features = false, features = ["ring", "flate2", "rsa"] }
+russh = { version = "0.62.6", default-features = false, features = ["ring", "flate2", "rsa"] }
 tracing = "0.1.44"
 russh-sftp = "2.4.0"
 serde = { version = "1.0.229", features = ["derive"] }

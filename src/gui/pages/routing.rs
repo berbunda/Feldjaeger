@@ -19,6 +19,7 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     ui.add_space(8.0);
 
     let model = service.routing_page_model();
+    show_wiring_warnings(ui, &model.wiring_warnings);
     match model.state {
         RoutingPageState::NoSshConnection
         | RoutingPageState::XrayNotDiscovered
@@ -77,6 +78,27 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
 
     show_rules_table(ui, service, &model.rows);
     show_selected_rule_details(ui, &model.rows);
+}
+
+/// Non-fatal `routing`/`balancers`/`outbounds`/`observatory` wiring warnings
+/// (Roadmap §2.5:108).
+///
+/// Independent of the page state machine — shown whenever present, same placement rationale
+/// as the Policy page's stats/policy/api/metrics wiring block.
+fn show_wiring_warnings(ui: &mut Ui, warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+    ui.strong("Wiring consistency (routing ↔ balancers ↔ outbounds ↔ observatory)");
+    ui.add_space(4.0);
+    for warning in warnings {
+        ui.label(
+            RichText::new(warning.clone())
+                .size(13.0)
+                .color(Color32::from_rgb(210, 170, 40)),
+        );
+    }
+    ui.add_space(12.0);
 }
 
 fn show_state_message(ui: &mut Ui, state: RoutingPageState) {

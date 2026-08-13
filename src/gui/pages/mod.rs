@@ -3,6 +3,7 @@
 use egui::Ui;
 
 pub mod burst_observatory;
+pub mod confdir_files;
 pub mod connection;
 pub mod dashboard;
 pub mod dns;

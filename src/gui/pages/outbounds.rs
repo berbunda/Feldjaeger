@@ -17,6 +17,7 @@ use crate::xray::OutboundSummary;
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     service.tick_outbounds_page_status();
     show_delete_outbound_dialog(ui, service);
+    show_rename_outbound_dialog(ui, service);
 
     ui.heading("Outbounds");
     ui.add_space(8.0);
@@ -220,8 +221,41 @@ fn show_outbound_context_menu(
             ui.close();
         }
 
-        ui.add_enabled(false, egui::Button::new("Duplicate"))
-            .on_disabled_hover_text("Not implemented yet");
+        let duplicate_ok = matches!(
+            row.kind(),
+            OutboundKind::Freedom | OutboundKind::Blackhole | OutboundKind::Dns
+        );
+        if ui
+            .add_enabled(duplicate_ok && !busy, egui::Button::new("Duplicate"))
+            .on_disabled_hover_text(
+                "Duplicate is available for Freedom, Blackhole, and DNS outbounds only",
+            )
+            .clicked()
+        {
+            if let Err(error) = service.start_duplicate_outbound(row.index) {
+                service.show_status_message(error);
+            }
+            ui.close();
+        }
+
+        if ui
+            .add_enabled(!busy, egui::Button::new("Rename"))
+            .on_disabled_hover_text("Rename requires an idle connection")
+            .clicked()
+        {
+            let current_tag = row.tag.clone().unwrap_or_default();
+            set_pending_outbound_rename(
+                ui,
+                PendingOutboundRename {
+                    index: row.index,
+                    current_tag: current_tag.clone(),
+                    draft: current_tag,
+                    references: service.outbound_tag_reference_preview(row.index),
+                    error: None,
+                },
+            );
+            ui.close();
+        }
     });
 }
 
@@ -314,6 +348,99 @@ fn show_delete_outbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
 
     if !open {
         clear_pending_outbound_delete(ui);
+    }
+}
+
+#[derive(Clone)]
+struct PendingOutboundRename {
+    index: usize,
+    current_tag: String,
+    draft: String,
+    references: Vec<String>,
+    error: Option<String>,
+}
+
+fn pending_outbound_rename_id() -> egui::Id {
+    egui::Id::new("outbounds_pending_rename")
+}
+
+fn pending_outbound_rename(ui: &Ui) -> Option<PendingOutboundRename> {
+    ui.ctx()
+        .data(|d| d.get_temp::<PendingOutboundRename>(pending_outbound_rename_id()))
+}
+
+fn set_pending_outbound_rename(ui: &Ui, pending: PendingOutboundRename) {
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(pending_outbound_rename_id(), pending));
+}
+
+fn clear_pending_outbound_rename(ui: &Ui) {
+    ui.ctx()
+        .data_mut(|d| d.remove::<PendingOutboundRename>(pending_outbound_rename_id()));
+}
+
+fn show_rename_outbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
+    let Some(mut pending) = pending_outbound_rename(ui) else {
+        return;
+    };
+    let mut open = true;
+    let mut closed = false;
+    egui::Window::new("Rename outbound")
+        .collapsible(false)
+        .resizable(false)
+        .default_width(400.0)
+        .open(&mut open)
+        .show(ui.ctx(), |ui| {
+            ui.label(RichText::new(format!("Current tag: «{}»", pending.current_tag)).size(14.0));
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label("New tag:");
+                ui.text_edit_singleline(&mut pending.draft);
+            });
+            if !pending.references.is_empty() {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(format!(
+                        "Still referenced in routing (will not be updated automatically): {}",
+                        pending.references.join("; ")
+                    ))
+                    .size(13.0)
+                    .color(Color32::from_rgb(210, 170, 40)),
+                );
+            }
+            if let Some(error) = &pending.error {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(error.clone())
+                        .size(14.0)
+                        .color(Color32::from_rgb(200, 60, 60)),
+                );
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                let busy = service.is_outbound_mutation_busy();
+                let can_submit = !busy && !pending.draft.trim().is_empty();
+                if ui
+                    .add_enabled(can_submit, egui::Button::new("Rename"))
+                    .clicked()
+                {
+                    match service
+                        .start_rename_outbound_tag(pending.index, pending.draft.trim().to_owned())
+                    {
+                        Ok(()) => closed = true,
+                        Err(message) => pending.error = Some(message),
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    closed = true;
+                }
+            });
+        });
+
+    if closed || !open {
+        clear_pending_outbound_rename(ui);
+    } else {
+        set_pending_outbound_rename(ui, pending);
     }
 }
 

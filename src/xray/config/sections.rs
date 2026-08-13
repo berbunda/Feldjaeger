@@ -225,6 +225,63 @@ impl XrayConfigSections {
             .collect()
     }
 
+    /// Human-readable labels for every section (known or unknown) sourced from `path`.
+    ///
+    /// Empty when nothing in the merged config came from that file — used to gate confdir
+    /// file removal (Roadmap §2.5:107) and to describe a file's contents in the GUI.
+    pub fn sections_in_file(&self, path: &str) -> Vec<String> {
+        let mut labels = Vec::new();
+
+        let scalar_sections: &[(&str, Option<&SourcedSection<Value>>)] = &[
+            ("log", self.log.as_ref()),
+            ("api", self.api.as_ref()),
+            ("dns", self.dns.as_ref()),
+            ("fakedns", self.fakedns.as_ref()),
+            ("routing", self.routing.as_ref()),
+            ("policy", self.policy.as_ref()),
+            ("stats", self.stats.as_ref()),
+            ("reverse", self.reverse.as_ref()),
+            ("observatory", self.observatory.as_ref()),
+            ("burstObservatory", self.burst_observatory.as_ref()),
+            ("metrics", self.metrics.as_ref()),
+        ];
+        for (name, section) in scalar_sections {
+            if section.is_some_and(|s| s.source_file() == path) {
+                labels.push((*name).to_owned());
+            }
+        }
+
+        let inbound_count = self
+            .inbounds
+            .iter()
+            .filter(|s| s.source_file() == path)
+            .count();
+        if inbound_count > 0 {
+            labels.push(format!("{inbound_count} inbound(s)"));
+        }
+        let outbound_count = self
+            .outbounds
+            .iter()
+            .filter(|s| s.source_file() == path)
+            .count();
+        if outbound_count > 0 {
+            labels.push(format!("{outbound_count} outbound(s)"));
+        }
+
+        for (name, section) in &self.extra_sections {
+            if section.source_file() == path {
+                labels.push(format!("unknown section `{name}`"));
+            }
+        }
+
+        labels
+    }
+
+    /// `true` when no section (known or unknown) in the merged config is sourced from `path`.
+    pub fn is_file_empty(&self, path: &str) -> bool {
+        self.sections_in_file(path).is_empty()
+    }
+
     pub(crate) fn set_log(&mut self, section: Option<SourcedSection<Value>>) {
         self.log = section;
     }
@@ -304,3 +361,59 @@ impl XrayConfigSections {
 ///
 /// Prefer [`XrayConfigSections`] in new code.
 pub type XrayConfig = XrayConfigSections;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::xray::config::parser::XrayConfigParser;
+
+    fn sections_from(path: &str, json: &str) -> XrayConfigSections {
+        let parser = XrayConfigParser::new();
+        let outcome = parser.parse_single_file(path, json);
+        assert!(outcome.is_success(), "{:?}", outcome.errors());
+        outcome.into_sections()
+    }
+
+    #[test]
+    fn empty_file_has_no_sections() {
+        let sections = sections_from("/etc/xray/config.json", r#"{}"#);
+        assert!(sections.sections_in_file("/etc/xray/config.json").is_empty());
+        assert!(sections.is_file_empty("/etc/xray/config.json"));
+    }
+
+    #[test]
+    fn known_scalar_section_is_reported() {
+        let sections = sections_from("/etc/xray/config.json", r#"{"policy":{"levels":{}}}"#);
+        let labels = sections.sections_in_file("/etc/xray/config.json");
+        assert_eq!(labels, vec!["policy".to_owned()]);
+        assert!(!sections.is_file_empty("/etc/xray/config.json"));
+    }
+
+    #[test]
+    fn inbounds_and_outbounds_are_counted() {
+        let sections = sections_from(
+            "/etc/xray/config.json",
+            r#"{
+                "inbounds":[{"protocol":"vless","tag":"a"},{"protocol":"vless","tag":"b"}],
+                "outbounds":[{"protocol":"freedom","tag":"direct"}]
+            }"#,
+        );
+        let labels = sections.sections_in_file("/etc/xray/config.json");
+        assert!(labels.contains(&"2 inbound(s)".to_owned()));
+        assert!(labels.contains(&"1 outbound(s)".to_owned()));
+    }
+
+    #[test]
+    fn unknown_top_level_key_is_reported() {
+        let sections = sections_from("/etc/xray/config.json", r#"{"futureSection":{"a":1}}"#);
+        let labels = sections.sections_in_file("/etc/xray/config.json");
+        assert_eq!(labels, vec!["unknown section `futureSection`".to_owned()]);
+    }
+
+    #[test]
+    fn different_path_reports_nothing() {
+        let sections = sections_from("/etc/xray/config.json", r#"{"policy":{}}"#);
+        assert!(sections.sections_in_file("/etc/xray/other.json").is_empty());
+        assert!(sections.is_file_empty("/etc/xray/other.json"));
+    }
+}

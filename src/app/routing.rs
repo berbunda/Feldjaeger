@@ -6,7 +6,7 @@ use crate::app::inbounds::{
     LoadedConfigSnapshot, MISSING_FIELD, display_optional_str, display_source_file,
 };
 use crate::app::status::SshStatus;
-use crate::xray::{DiscoveryState, RoutingRuleSummary, RoutingSummary};
+use crate::xray::{DiscoveryState, RoutingRuleSummary, RoutingSummary, routing_wiring_warnings};
 
 /// Columns that support sorting on the Routing rules table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -106,6 +106,12 @@ pub struct RoutingPageModel {
     pub rows: Vec<RoutingRuleSummary>,
     /// Non-fatal configuration warnings.
     pub warnings: Vec<String>,
+    /// Cross-section wiring warnings: `routing` ↔ `balancers` ↔ `outbounds` ↔ `observatory`
+    /// (Roadmap §2.5:108).
+    ///
+    /// Independent of `warnings` (parse/load warnings) — computed fresh from the loaded
+    /// config's raw sections every time the model is built, never persisted.
+    pub wiring_warnings: Vec<String>,
     /// Active sort settings.
     pub sort: RoutingSort,
 }
@@ -160,11 +166,16 @@ pub fn build_routing_page_model(
         .map(|routing| routing.rules.clone())
         .unwrap_or_default();
     sort_routing_rule_summaries(&mut rows, sort);
+    let wiring_warnings = config
+        .editable()
+        .map(|editable| routing_wiring_warnings(editable.sections()))
+        .unwrap_or_default();
     RoutingPageModel {
         state,
         summary,
         rows,
         warnings: config.warnings().to_vec(),
+        wiring_warnings,
         sort,
     }
 }
@@ -259,7 +270,9 @@ pub fn display_routing_list(values: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xray::{ConfigSource, InitSystemKind, XrayConfigParser, XrayInstallation};
+    use crate::xray::{
+        ConfigSource, EditableXrayConfig, InitSystemKind, XrayConfigParser, XrayInstallation,
+    };
 
     fn succeeded() -> DiscoveryState {
         DiscoveryState::Succeeded(XrayInstallation {
@@ -291,6 +304,30 @@ mod tests {
             vless_clients: Vec::new(),
             warnings,
             editable: None,
+        }
+    }
+
+    fn editable_from(json: &str) -> EditableXrayConfig {
+        let parser = XrayConfigParser::new();
+        let outcome = parser.parse_single_file("/etc/xray/config.json", json);
+        assert!(!outcome.has_fatal_errors(), "{:?}", outcome.errors());
+        let root: serde_json::Value = serde_json::from_str(json).expect("json");
+        EditableXrayConfig::from_single_file("/etc/xray/config.json", root, outcome.into_sections())
+    }
+
+    fn loaded_with_editable(editable: EditableXrayConfig) -> LoadedConfigSnapshot {
+        LoadedConfigSnapshot::Loaded {
+            inbounds: Vec::new(),
+            outbounds: Vec::new(),
+            dns: None,
+            fakedns: None,
+            observatory: None,
+            burst_observatory: None,
+            routing: editable.sections().routing_summary(),
+            policy: None,
+            vless_clients: Vec::new(),
+            warnings: Vec::new(),
+            editable: Some(editable),
         }
     }
 
@@ -568,5 +605,49 @@ mod tests {
             display_source_file("/usr/local/etc/xray/04-routing.json"),
             "04-routing.json"
         );
+    }
+
+    #[test]
+    fn wiring_warnings_empty_without_editable_config() {
+        let summary = parse_routing(
+            "/etc/xray/config.json",
+            r#"{"routing":{"rules":[{"outboundTag":"direct"}]}}"#,
+        );
+        let model = build_routing_page_model(
+            SshStatus::Connected,
+            &succeeded(),
+            &loaded(Some(summary), Vec::new()),
+            RoutingSort::by_index(),
+        );
+        assert!(model.wiring_warnings.is_empty());
+    }
+
+    #[test]
+    fn wiring_warnings_surface_unknown_balancer_tag() {
+        let editable = editable_from(
+            r#"{"routing":{"rules":[{"balancerTag":"missing"}],"balancers":[{"tag":"lb"}]}}"#,
+        );
+        let model = build_routing_page_model(
+            SshStatus::Connected,
+            &succeeded(),
+            &loaded_with_editable(editable),
+            RoutingSort::by_index(),
+        );
+        assert_eq!(model.wiring_warnings.len(), 1);
+        assert!(model.wiring_warnings[0].contains("balancerTag `missing`"));
+    }
+
+    #[test]
+    fn wiring_warnings_empty_when_aligned() {
+        let editable = editable_from(
+            r#"{"routing":{"rules":[{"balancerTag":"lb"}],"balancers":[{"tag":"lb"}]}}"#,
+        );
+        let model = build_routing_page_model(
+            SshStatus::Connected,
+            &succeeded(),
+            &loaded_with_editable(editable),
+            RoutingSort::by_index(),
+        );
+        assert!(model.wiring_warnings.is_empty());
     }
 }

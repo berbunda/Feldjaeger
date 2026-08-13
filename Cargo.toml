@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "feldjaeger"
-version = "0.4.0"
+version = "0.4.3"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "Local desktop control panel for managing remote Xray servers over SSH"
@@ -15,7 +15,7 @@ name = "feldjaeger"
 path = "src/main.rs"
 
 [dependencies]
-chrono = { version = "0.4.42", default-features = false, features = ["clock", "std"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 directories = "6.0.0"
 eframe = "0.36.1"
 egui = "0.36.1"

@@ -228,7 +228,7 @@ Share:
 Shell Save / Add safety:
 - "Preview changes" shows a redacted structural JSON diff (IB-L5) before write
 - After remote write: `xray run -test` (IB-L6); on failure restore backup and surface Status Bar error
-- Compatibility gates hard-block illegal combos (incl. Vision + non-tcp on Users mutate)
+- Compatibility gates hard-block illegal combos (incl. Vision + non-tcp on Users mutate, G3; Vision + `security: none`, G13)
 
 Users tab (selected VLESS or Trojan inbound):
 ┌──────────────────────────────────────────────┐
@@ -241,6 +241,7 @@ Users tab (selected VLESS or Trojan inbound):
 - Trojan clients: password shown masked; edit dialog allows blank = preserve
 - Dirty shell drafts block the Users tab with an inline status reason
 - Vision flow on clients narrows Stream method filter (tcp/raw only) after Users mutate succeeds
+- Flow combo offers **None** | **xtls-rprx-vision** only; a legacy `xtls-rprx-vision-udp443` (or any other unrecognized value) found on disk opens Edit as None with an inline "Config had unsupported flow `{value}`. Choose an allowed value or None." hint — the original string is preserved until the user explicitly re-picks a value
 - Context menu: **Copy share URI** (`vless://` / `trojan://`)
   - Host = Connection page host; port = inbound port
   - Reality requires prior **Generate x25519** (PublicKey kept in session / retained store; never written to inbound JSON)
@@ -256,9 +257,9 @@ Add Inbound:
 Outbounds page (Roadmap §2.4:94, §2.4:95, §2.4:96):
 - Table: Tag, Protocol, Send Through, Summary, Source file; context menu Copy tag/protocol
 - "Add Outbound" is a menu button with three entries, **Freedom**, **Blackhole**, and **DNS**, each opening the Add editor for that protocol
-- Context menu **Edit** — enabled for Freedom, Blackhole, and DNS outbounds only ("Shell editing is available for Freedom, Blackhole, and DNS outbounds only" hover otherwise); **Delete** — any protocol (unchanged, §2.4:97); **Duplicate** — still disabled (§2.4:98 backlog)
+- Context menu **Edit** — enabled for Freedom, Blackhole, and DNS outbounds only ("Shell editing is available for Freedom, Blackhole, and DNS outbounds only" hover otherwise); **Delete** — any protocol (unchanged, §2.4:97); **Duplicate** — Freedom/Blackhole/DNS only, deep-copies with a unique `{tag}-copy[-N]` tag, fires immediately, no confirm dialog (§2.4:98); **Rename** — any protocol, opens a dialog with the current tag, a routing/balancer reference preview (computed locally before submit), and a text field for the new tag; renaming never blocks on stale references — it applies the rename and reports affected rules/selectors in the status message afterward (§2.4:99)
 - Editor (single pane, no tabs — none of the three protocols has Stream/Security/Sniffing/Users); title and Protocol-section label show the active protocol name:
-  - General (shared by all three protocols): `tag` (editable on Add only; read-only label on Edit — rename is Roadmap §2.4:99), `sendThrough`
+  - General (shared by all three protocols): `tag` (editable on Add only; read-only label on Edit — use the context-menu **Rename** action instead, §2.4:99), `sendThrough`
   - Protocol (Freedom): `domainStrategy` (combo of the same presets as `streamSettings.sockopt.domainStrategy` + free text), `redirect` (`host:port`), `userLevel`
     - `fragment` checkbox toggles a `packets` / `length` / `interval` block (all free-text range strings, e.g. `tlshello`, `100-200`, `10-20`)
     - `noises[]` add/edit/delete table — `type` combo (`rand` | `str` | `hex` | `base64` + free text) / `packet` / `delay`
@@ -268,3 +269,19 @@ Outbounds page (Roadmap §2.4:94, §2.4:95, §2.4:96):
     - Add rule / Remove / Move up / Move down per entry — order is meaningful, same convention as the FinalMask layer-list editor
   - Save (Add Outbound / Save) writes via a fingerprint-checked Shell Save on Edit; Cancel discards the session
 - Delete dialog unchanged: confirm + "Deletion cannot be undone from the UI (restore from backup if needed)."
+
+Policy page (read-only; §21):
+- General information: user policy count, system policy configured; System policy panel (four stats flags); User policies table (Level/Handshake/Connection Idle/Uplink Only/Downlink Only/Stats) with details panel on row select; context menu Copy level / Copy timeout values; Edit/Delete/Duplicate disabled ("Not implemented yet")
+- **Wiring consistency (stats ↔ policy ↔ api ↔ metrics)** — a standalone amber warning block, shown above everything else on the page whenever non-empty, independent of the page's own state machine (so it still shows even when the `policy` section itself is missing, e.g. a lone `stats: {}` with nothing configured to collect) (Roadmap §2.5:106):
+  - `policy` has a system or user-level stats flag `true` but the top-level `stats` object is missing (nothing will be collected)
+  - `stats` is present but no `policy` flag anywhere turns on a statistic (module running, nothing to record)
+  - `api.services` includes `StatsService` but `stats` is missing (API will report empty statistics)
+  - `api` / `metrics` have no `listen` address and no routing rule forwards an inbound to their outbound tag (`metrics` defaults to tag `Metrics` when unset; `api` has no documented default) — endpoint unreachable
+  - Purely informational — computed fresh from the loaded config every time the page model is built; never blocks Save (`stats`/`api`/`metrics` have no editors yet, only this consistency check)
+
+Config Files page (Roadmap §2.5:107):
+- Only meaningful for a confdir install (`-confdir <dir>`, multiple `.json` files); a single-file `config.json` install shows an explanatory message and nothing else ("file add/remove only applies to confdir installations")
+- Table: File (basename) / Empty (Yes/No) / Contents (human-readable list of sections sourced from that file, e.g. `policy, 2 inbound(s)`, or `—` when empty); context menu Copy path
+- **Add file** button opens a dialog with a filename field (hint: must end in `.json`; Xray merges confdir files in lexicographic order, e.g. `10-custom.json`); the new file is written empty (`{}`) — it changes nothing on its own
+- Context menu **Remove** — enabled only when the file is already empty (hard-blocked otherwise, hover shows what it still contains); confirm dialog, same "cannot be undone from the UI (restore from backup if needed)" wording as other Delete dialogs
+- After either action: "Configuration updated. Xray restart/reload required." — no automatic restart or reload is triggered (use the existing Reload action on the Service page)

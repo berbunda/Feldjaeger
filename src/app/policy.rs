@@ -6,6 +6,7 @@ use crate::app::inbounds::{LoadedConfigSnapshot, MISSING_FIELD, display_source_f
 use crate::app::status::SshStatus;
 use crate::xray::{
     DiscoveryState, PolicySummary, SystemPolicySummary, UserPolicySummary, cmp_policy_level,
+    stats_wiring_warnings,
 };
 
 /// Columns that support sorting on the Policy levels table.
@@ -104,6 +105,11 @@ pub struct PolicyPageModel {
     pub rows: Vec<UserPolicySummary>,
     /// Non-fatal configuration warnings.
     pub warnings: Vec<String>,
+    /// Cross-section wiring warnings: `stats` ↔ `policy` ↔ `api` ↔ `metrics` (Roadmap §2.5:106).
+    ///
+    /// Independent of `warnings` (parse/load warnings) — computed fresh from the loaded
+    /// config's raw sections every time the model is built, never persisted.
+    pub wiring_warnings: Vec<String>,
     /// Active sort settings.
     pub sort: PolicySort,
 }
@@ -158,11 +164,16 @@ pub fn build_policy_page_model(
         .map(|policy| policy.user_levels.clone())
         .unwrap_or_default();
     sort_user_policy_summaries(&mut rows, sort);
+    let wiring_warnings = config
+        .editable()
+        .map(|editable| stats_wiring_warnings(editable.sections()))
+        .unwrap_or_default();
     PolicyPageModel {
         state,
         summary,
         rows,
         warnings: config.warnings().to_vec(),
+        wiring_warnings,
         sort,
     }
 }
@@ -307,7 +318,33 @@ fn format_user_stats_cell(level: &UserPolicySummary) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xray::{ConfigSource, InitSystemKind, XrayConfigParser, XrayInstallation};
+    use crate::xray::{
+        ConfigSource, EditableXrayConfig, InitSystemKind, XrayConfigParser, XrayInstallation,
+    };
+
+    fn editable_from(json: &str) -> EditableXrayConfig {
+        let parser = XrayConfigParser::new();
+        let outcome = parser.parse_single_file("/etc/xray/config.json", json);
+        assert!(!outcome.has_fatal_errors(), "{:?}", outcome.errors());
+        let root: serde_json::Value = serde_json::from_str(json).expect("json");
+        EditableXrayConfig::from_single_file("/etc/xray/config.json", root, outcome.into_sections())
+    }
+
+    fn loaded_with_editable(editable: EditableXrayConfig) -> LoadedConfigSnapshot {
+        LoadedConfigSnapshot::Loaded {
+            inbounds: Vec::new(),
+            outbounds: Vec::new(),
+            dns: None,
+            fakedns: None,
+            observatory: None,
+            burst_observatory: None,
+            routing: None,
+            policy: editable.policy_summary(),
+            vless_clients: Vec::new(),
+            warnings: Vec::new(),
+            editable: Some(editable),
+        }
+    }
 
     fn succeeded() -> DiscoveryState {
         DiscoveryState::Succeeded(XrayInstallation {
@@ -565,6 +602,47 @@ mod tests {
         assert_eq!(model.state, PolicyPageState::ConfigurationContainsWarnings);
         assert!(model.state.shows_table());
         assert_eq!(model.rows.len(), 1);
+    }
+
+    #[test]
+    fn wiring_warnings_empty_without_editable_config() {
+        let summary = parse_policy(
+            "/etc/xray/config.json",
+            r#"{"policy":{"levels":{"0":{"handshake":4}}}}"#,
+        );
+        let model = build_policy_page_model(
+            SshStatus::Connected,
+            &succeeded(),
+            &loaded(Some(summary), Vec::new()),
+            PolicySort::by_level(),
+        );
+        assert!(model.wiring_warnings.is_empty());
+    }
+
+    #[test]
+    fn wiring_warnings_surface_stats_policy_mismatch() {
+        let editable = editable_from(r#"{"policy":{"levels":{"0":{"statsUserUplink":true}}}}"#);
+        let model = build_policy_page_model(
+            SshStatus::Connected,
+            &succeeded(),
+            &loaded_with_editable(editable),
+            PolicySort::by_level(),
+        );
+        assert_eq!(model.wiring_warnings.len(), 1);
+        assert!(model.wiring_warnings[0].contains("stats"));
+    }
+
+    #[test]
+    fn wiring_warnings_empty_when_aligned() {
+        let editable =
+            editable_from(r#"{"stats":{},"policy":{"levels":{"0":{"statsUserUplink":true}}}}"#);
+        let model = build_policy_page_model(
+            SshStatus::Connected,
+            &succeeded(),
+            &loaded_with_editable(editable),
+            PolicySort::by_level(),
+        );
+        assert!(model.wiring_warnings.is_empty());
     }
 
     #[test]

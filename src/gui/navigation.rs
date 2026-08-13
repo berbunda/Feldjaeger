@@ -12,6 +12,8 @@ pub enum Page {
     Dashboard,
     /// SSH connection settings and status.
     Connection,
+    /// Confdir file add/remove management (Roadmap §2.5:107).
+    ConfigFiles,
     /// Inbound proxy configuration (Summary | Users under selection).
     Inbounds,
     /// Outbound proxy configuration.
@@ -49,6 +51,7 @@ impl Page {
     pub const ALL: &'static [Page] = &[
         Page::Dashboard,
         Page::Connection,
+        Page::ConfigFiles,
         Page::Inbounds,
         Page::Outbounds,
         Page::Dns,
@@ -71,6 +74,7 @@ impl Page {
         match self {
             Page::Dashboard => "Dashboard",
             Page::Connection => "Connection",
+            Page::ConfigFiles => "Config Files",
             Page::Inbounds => "Inbounds",
             Page::Outbounds => "Outbounds",
             Page::Dns => "DNS",
@@ -110,6 +114,7 @@ impl Page {
         match self {
             Page::Dashboard => pages::dashboard::show(ui),
             Page::Connection => pages::connection::show(ui, service),
+            Page::ConfigFiles => pages::confdir_files::show(ui, service),
             Page::Inbounds => pages::inbounds::show(ui, service),
             Page::Outbounds => pages::outbounds::show(ui, service),
             Page::Dns => pages::dns::show(ui, service),

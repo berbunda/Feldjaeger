@@ -76,6 +76,32 @@ impl EditableXrayConfig {
         self.file_roots.keys().next().map(String::as_str)
     }
 
+    /// Inserts a new, empty (`{}`) file root (confdir file add; Roadmap §2.5:107).
+    pub fn insert_empty_file_root(&mut self, path: String) -> ConfigModifyResult<()> {
+        if self.file_roots.contains_key(&path) {
+            return Err(ConfigModifyError::new(
+                ConfigModifyErrorKind::ValidationFailed,
+                format!("file already present in configuration: {path}"),
+            ));
+        }
+        self.file_roots.insert(path, Value::Object(Map::new()));
+        Ok(())
+    }
+
+    /// Removes a file root (confdir file remove; Roadmap §2.5:107).
+    ///
+    /// Does **not** check whether the file is empty of sections — callers (`modify.rs`) must
+    /// gate that via [`XrayConfigSections::sections_in_file`] before calling this.
+    pub fn remove_file_root(&mut self, path: &str) -> ConfigModifyResult<()> {
+        if self.file_roots.remove(path).is_none() {
+            return Err(ConfigModifyError::new(
+                ConfigModifyErrorKind::ValidationFailed,
+                format!("file not present in configuration: {path}"),
+            ));
+        }
+        Ok(())
+    }
+
     /// Refreshable inbound summaries from the current sections.
     pub fn inbound_summaries(&self) -> Vec<InboundSummary> {
         inbound_summaries(&self.sections)

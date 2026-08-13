@@ -7,8 +7,8 @@ use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind
 /// Full-state General form payload for an outbound.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundGeneral {
-    /// Outbound tag; empty/whitespace omits the key. Immutable on Shell Save
-    /// (rename is Roadmap §2.4:99, not yet supported).
+    /// Outbound tag; empty/whitespace omits the key. Immutable on Shell Save by design —
+    /// rename is a standalone action, `rename_outbound_tag` (Roadmap §2.4:99).
     pub tag: Option<String>,
     /// `sendThrough` bind address; empty omits the key.
     pub send_through: Option<String>,

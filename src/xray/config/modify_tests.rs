@@ -93,7 +93,12 @@ fn add_user_preserves_optional_flow_when_set() {
         r#"{
             "inbounds":[{
                 "protocol":"vless",
-                "settings":{"clients":[],"decryption":"none"}
+                "settings":{"clients":[],"decryption":"none"},
+                "streamSettings":{
+                    "network":"tcp",
+                    "security":"tls",
+                    "tlsSettings":{"certificates":[{"certificateFile":"/c.pem","keyFile":"/k.pem"}]}
+                }
             }]
         }"#,
     );
@@ -198,6 +203,11 @@ fn update_user_changes_email_and_flow_keeps_uuid_and_unknown_fields() {
                         "futureField":"keep"
                     }],
                     "decryption":"none"
+                },
+                "streamSettings":{
+                    "network":"tcp",
+                    "security":"tls",
+                    "tlsSettings":{"certificates":[{"certificateFile":"/c.pem","keyFile":"/k.pem"}]}
                 }
             }]
         }"#,
@@ -3199,6 +3209,166 @@ fn duplicate_inbound_appends_unique_tag_copy() {
 }
 
 #[test]
+fn duplicate_outbound_appends_unique_tag_copy() {
+    use super::modify::{DuplicateOutboundRequest, duplicate_outbound};
+
+    let mut config = single_file_editable(
+        r#"{
+            "outbounds":[{
+                "tag":"direct",
+                "protocol":"freedom",
+                "settings":{"domainStrategy":"UseIP"}
+            }]
+        }"#,
+    );
+    duplicate_outbound(
+        &mut config,
+        DuplicateOutboundRequest { outbound_index: 0 },
+    )
+    .expect("duplicate");
+    assert_eq!(config.sections().outbounds().len(), 2);
+    let outbounds = config.file_roots()["/etc/xray/config.json"]["outbounds"]
+        .as_array()
+        .expect("array");
+    assert_eq!(outbounds[0]["tag"], "direct");
+    assert_eq!(outbounds[1]["tag"], "direct-copy");
+    assert_eq!(outbounds[1]["settings"]["domainStrategy"], "UseIP");
+
+    duplicate_outbound(
+        &mut config,
+        DuplicateOutboundRequest { outbound_index: 0 },
+    )
+    .expect("second duplicate");
+    let outbounds = config.file_roots()["/etc/xray/config.json"]["outbounds"]
+        .as_array()
+        .expect("array");
+    assert_eq!(outbounds[2]["tag"], "direct-copy-2");
+}
+
+#[test]
+fn duplicate_outbound_rejects_non_shell_protocol() {
+    use super::modify::{DuplicateOutboundRequest, duplicate_outbound};
+
+    let mut config = single_file_editable(
+        r#"{
+            "outbounds":[{
+                "tag":"vless-out",
+                "protocol":"vless",
+                "settings":{"vnext":[]}
+            }]
+        }"#,
+    );
+    let err = duplicate_outbound(
+        &mut config,
+        DuplicateOutboundRequest { outbound_index: 0 },
+    )
+    .expect_err("not shell-editable");
+    assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
+    assert_eq!(config.sections().outbounds().len(), 1);
+}
+
+#[test]
+fn rename_outbound_tag_updates_tag_and_warns_on_refs() {
+    use super::modify::{RenameOutboundTagRequest, rename_outbound_tag};
+
+    let mut config = single_file_editable(
+        r#"{
+            "outbounds":[
+                {"tag":"direct","protocol":"freedom"},
+                {"tag":"block","protocol":"blackhole"}
+            ],
+            "routing":{
+                "rules":[{"outboundTag":"block","type":"field","protocol":["bittorrent"]}],
+                "balancers":[{"tag":"b1","selector":["dir"]}]
+            }
+        }"#,
+    );
+
+    let result = rename_outbound_tag(
+        &mut config,
+        RenameOutboundTagRequest {
+            outbound_index: 0,
+            expected_fingerprint: None,
+            new_tag: "direct-2".to_owned(),
+        },
+    )
+    .expect("rename direct (balancer-referenced)");
+    assert_eq!(result.old_tag, "direct");
+    assert_eq!(result.new_tag, "direct-2");
+    assert!(result.stale_references.iter().any(|r| r.contains("selector")));
+    let outbounds = config.file_roots()["/etc/xray/config.json"]["outbounds"]
+        .as_array()
+        .expect("array");
+    assert_eq!(outbounds[0]["tag"], "direct-2");
+
+    let result = rename_outbound_tag(
+        &mut config,
+        RenameOutboundTagRequest {
+            outbound_index: 1,
+            expected_fingerprint: None,
+            new_tag: "block-2".to_owned(),
+        },
+    )
+    .expect("rename block (rule-referenced)");
+    assert_eq!(result.old_tag, "block");
+    assert_eq!(result.new_tag, "block-2");
+    assert!(result.stale_references.iter().any(|r| r.contains("outboundTag")));
+}
+
+#[test]
+fn rename_outbound_tag_rejects_conflicting_tag() {
+    use super::modify::{RenameOutboundTagRequest, rename_outbound_tag};
+
+    let mut config = single_file_editable(
+        r#"{
+            "outbounds":[
+                {"tag":"direct","protocol":"freedom"},
+                {"tag":"block","protocol":"blackhole"}
+            ]
+        }"#,
+    );
+    let err = rename_outbound_tag(
+        &mut config,
+        RenameOutboundTagRequest {
+            outbound_index: 0,
+            expected_fingerprint: None,
+            new_tag: "block".to_owned(),
+        },
+    )
+    .expect_err("conflict");
+    assert_eq!(err.kind(), ConfigModifyErrorKind::OutboundTagConflict);
+    let outbounds = config.file_roots()["/etc/xray/config.json"]["outbounds"]
+        .as_array()
+        .expect("array");
+    assert_eq!(outbounds[0]["tag"], "direct");
+}
+
+#[test]
+fn rename_outbound_tag_fingerprint_mismatch() {
+    use super::modify::{RenameOutboundTagRequest, rename_outbound_tag};
+
+    let mut config = single_file_editable(
+        r#"{
+            "outbounds":[{"tag":"direct","protocol":"freedom"}]
+        }"#,
+    );
+    let err = rename_outbound_tag(
+        &mut config,
+        RenameOutboundTagRequest {
+            outbound_index: 0,
+            expected_fingerprint: Some("stale".to_owned()),
+            new_tag: "direct-2".to_owned(),
+        },
+    )
+    .expect_err("mismatch");
+    assert_eq!(err.kind(), ConfigModifyErrorKind::FingerprintMismatch);
+    let outbounds = config.file_roots()["/etc/xray/config.json"]["outbounds"]
+        .as_array()
+        .expect("array");
+    assert_eq!(outbounds[0]["tag"], "direct");
+}
+
+#[test]
 fn tunnel_from_wire_only_not_dokodemo_door() {
     assert_eq!(
         InboundClientProtocol::from_wire("tunnel"),
@@ -3424,4 +3594,115 @@ fn sockopt_shell_save_edits_field_and_preserves_unknown_field() {
     assert_eq!(sockopt["tproxy"], "redirect");
     assert_eq!(sockopt["acceptProxyProtocol"], true);
     assert_eq!(sockopt["futureField"], "keep-me");
+}
+
+#[test]
+fn add_confdir_file_creates_empty_file_alongside_existing() {
+    use super::modify::{AddConfdirFileRequest, add_confdir_file};
+
+    let mut config = single_file_editable(r#"{"policy":{"levels":{}}}"#);
+    let outcome = add_confdir_file(
+        &mut config,
+        AddConfdirFileRequest {
+            filename: "10-custom.json".to_owned(),
+        },
+    )
+    .expect("add confdir file");
+    assert_eq!(outcome.source_file, "/etc/xray/10-custom.json");
+    assert!(config.file_roots().contains_key("/etc/xray/10-custom.json"));
+    assert_eq!(
+        config.file_roots()["/etc/xray/10-custom.json"],
+        serde_json::json!({})
+    );
+    assert!(config.sections().is_file_empty("/etc/xray/10-custom.json"));
+}
+
+#[test]
+fn add_confdir_file_rejects_duplicate_name() {
+    use super::modify::{AddConfdirFileRequest, add_confdir_file};
+
+    let mut config = single_file_editable(r#"{}"#);
+    let err = add_confdir_file(
+        &mut config,
+        AddConfdirFileRequest {
+            filename: "config.json".to_owned(),
+        },
+    )
+    .expect_err("duplicate");
+    assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
+    assert_eq!(config.file_roots().len(), 1);
+}
+
+#[test]
+fn add_confdir_file_rejects_invalid_filenames() {
+    use super::modify::{AddConfdirFileRequest, add_confdir_file};
+
+    for bad in ["", "sub/dir.json", "no-extension", "back\\slash.json"] {
+        let mut config = single_file_editable(r#"{}"#);
+        let err = add_confdir_file(
+            &mut config,
+            AddConfdirFileRequest {
+                filename: bad.to_owned(),
+            },
+        )
+        .expect_err(bad);
+        assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
+        assert_eq!(config.file_roots().len(), 1);
+    }
+}
+
+#[test]
+fn remove_confdir_file_succeeds_when_empty() {
+    use super::modify::{
+        AddConfdirFileRequest, RemoveConfdirFileRequest, add_confdir_file, remove_confdir_file,
+    };
+
+    let mut config = single_file_editable(r#"{}"#);
+    add_confdir_file(
+        &mut config,
+        AddConfdirFileRequest {
+            filename: "10-custom.json".to_owned(),
+        },
+    )
+    .expect("add");
+    remove_confdir_file(
+        &mut config,
+        RemoveConfdirFileRequest {
+            path: "/etc/xray/10-custom.json".to_owned(),
+        },
+    )
+    .expect("remove");
+    assert!(!config.file_roots().contains_key("/etc/xray/10-custom.json"));
+}
+
+#[test]
+fn remove_confdir_file_blocked_when_non_empty() {
+    use super::modify::{RemoveConfdirFileRequest, remove_confdir_file};
+
+    let mut config = single_file_editable(r#"{"policy":{"levels":{"0":{"handshake":4}}}}"#);
+    let err = remove_confdir_file(
+        &mut config,
+        RemoveConfdirFileRequest {
+            path: "/etc/xray/config.json".to_owned(),
+        },
+    )
+    .expect_err("blocked");
+    assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
+    assert!(err.message().contains("policy"));
+    assert!(config.file_roots().contains_key("/etc/xray/config.json"));
+}
+
+#[test]
+fn remove_confdir_file_errors_when_missing() {
+    use super::modify::{RemoveConfdirFileRequest, remove_confdir_file};
+
+    let mut config = single_file_editable(r#"{}"#);
+    let err = remove_confdir_file(
+        &mut config,
+        RemoveConfdirFileRequest {
+            path: "/etc/xray/missing.json".to_owned(),
+        },
+    )
+    .expect_err("missing");
+    assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
 }

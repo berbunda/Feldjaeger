@@ -80,6 +80,14 @@ pub enum CurrentOperation {
     UpdatingOutboundShell,
     /// Deleting an outbound.
     DeletingOutbound,
+    /// Duplicating a shell-editable outbound (Roadmap §2.4:98).
+    DuplicatingOutbound,
+    /// Renaming an outbound's tag (Roadmap §2.4:99).
+    RenamingOutboundTag,
+    /// Adding a new confdir file (Roadmap §2.5:107).
+    AddingConfdirFile,
+    /// Removing an empty confdir file (Roadmap §2.5:107).
+    RemovingConfdirFile,
     /// Generating x25519 key pair for Reality.
     GeneratingX25519,
     /// Generating mldsa65 seed/verify for Reality.
@@ -140,6 +148,10 @@ impl CurrentOperation {
             Self::AddingOutbound => "Adding outbound...".to_owned(),
             Self::UpdatingOutboundShell => "Saving outbound...".to_owned(),
             Self::DeletingOutbound => "Deleting outbound...".to_owned(),
+            Self::DuplicatingOutbound => "Duplicating outbound...".to_owned(),
+            Self::RenamingOutboundTag => "Renaming outbound tag...".to_owned(),
+            Self::AddingConfdirFile => "Adding confdir file...".to_owned(),
+            Self::RemovingConfdirFile => "Removing confdir file...".to_owned(),
             Self::GeneratingX25519 => "Generating x25519 key pair...".to_owned(),
             Self::GeneratingMldsa65 => "Generating mldsa65 key pair...".to_owned(),
             Self::GeneratingVlessEnc => "Generating VLESS encryption...".to_owned(),
@@ -170,6 +182,10 @@ impl CurrentOperation {
             | Self::AddingOutbound
             | Self::UpdatingOutboundShell
             | Self::DeletingOutbound
+            | Self::DuplicatingOutbound
+            | Self::RenamingOutboundTag
+            | Self::AddingConfdirFile
+            | Self::RemovingConfdirFile
             | Self::GeneratingX25519
             | Self::GeneratingMldsa65
             | Self::GeneratingVlessEnc
