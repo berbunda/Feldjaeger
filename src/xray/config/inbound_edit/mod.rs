@@ -10,7 +10,10 @@ mod sniffing;
 use crate::xray::config::editable::InboundLocation;
 use crate::xray::config::inbound_clients::InboundClientProtocol;
 
-pub use general::{InboundGeneral, apply_inbound_general, parse_inbound_general, port_is_shell_editable};
+pub use general::{
+    InboundGeneral, apply_inbound_general, first_hop_port, parse_inbound_general, port_hop_syntax,
+    port_is_shell_editable, raw_port_display,
+};
 pub use listen::validate_listen_address;
 pub use sniffing::{
     KNOWN_DEST_OVERRIDE, SniffingSettings, SniffingWriteOutcome, apply_inbound_sniffing,

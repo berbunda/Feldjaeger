@@ -40,6 +40,14 @@ pub struct InboundShareMaterial {
         rename = "mldsa65Verify"
     )]
     pub mldsa65_verify: Option<String>,
+    /// SHA-256 pin of the leaf TLS certificate from last "Fetch cert pin" (Hysteria2
+    /// `pinSHA256`; Roadmap §3:121).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "certPinSha256"
+    )]
+    pub cert_pin_sha256: Option<String>,
 }
 
 /// On-disk / remote sidecar document.
@@ -102,6 +110,20 @@ impl ShareMaterialStore {
         }
         if let Some(verify) = mldsa65_verify.filter(|s| !s.trim().is_empty()) {
             entry.mldsa65_verify = Some(verify);
+        }
+    }
+
+    /// Merges a cert-pin SHA-256 fingerprint (Hysteria2 `pinSHA256`) into the store entry.
+    pub fn merge_cert_pin(
+        &mut self,
+        tag: Option<&str>,
+        inbound_index: usize,
+        cert_pin_sha256: Option<String>,
+    ) {
+        let key = Self::key(tag, inbound_index);
+        let entry = self.by_key.entry(key).or_default();
+        if let Some(pin) = cert_pin_sha256.filter(|s| !s.trim().is_empty()) {
+            entry.cert_pin_sha256 = Some(pin);
         }
     }
 
@@ -182,6 +204,21 @@ mod tests {
     }
 
     #[test]
+    fn merge_cert_pin_stores_and_ignores_blank() {
+        let mut store = ShareMaterialStore::new();
+        store.merge_cert_pin(Some("hy"), 0, Some("deadbeef".to_owned()));
+        assert_eq!(
+            store.get(Some("hy"), 0).and_then(|m| m.cert_pin_sha256.as_deref()),
+            Some("deadbeef")
+        );
+        store.merge_cert_pin(Some("hy"), 0, Some("   ".to_owned()));
+        assert_eq!(
+            store.get(Some("hy"), 0).and_then(|m| m.cert_pin_sha256.as_deref()),
+            Some("deadbeef")
+        );
+    }
+
+    #[test]
     fn retains_mldsa65_verify() {
         let mut store = ShareMaterialStore::new();
         store.merge(
@@ -216,6 +253,7 @@ mod tests {
             Some("enc".to_owned()),
             Some("pqv".to_owned()),
         );
+        store.merge_cert_pin(Some("vless-in"), 0, Some("deadbeef".to_owned()));
         let bytes = store.to_json_bytes().expect("serialize");
         let loaded = ShareMaterialStore::from_json_bytes(&bytes).expect("parse");
         assert_eq!(loaded, store);
@@ -223,6 +261,7 @@ mod tests {
         assert!(text.contains("\"publicKey\""));
         assert!(text.contains("\"encryption\""));
         assert!(text.contains("\"mldsa65Verify\""));
+        assert!(text.contains("\"certPinSha256\""));
     }
 
     #[test]

@@ -39,8 +39,9 @@ use super::warp::{
     InboundEditorSession, InboundMutationKind, InboundMutationOutcome, InboundMutationSuccess,
     InboundShellDrafts, InboundShellMutationKind, InboundShellMutationOutcome, Mldsa65Result,
     X25519Result, VlessEncResult, run_add_inbound, run_delete_inbound, run_duplicate_inbound,
-    run_generate_mldsa65, run_generate_vlessenc, run_generate_x25519,
-    run_update_inbound_general, run_update_inbound_shell, run_update_inbound_sniffing,
+    run_fetch_cert_pin, run_generate_mldsa65, run_generate_vlessenc, run_generate_x25519,
+    run_replace_inbound_raw_json, run_update_inbound_general, run_update_inbound_shell,
+    run_update_inbound_sniffing,
 };
 use super::inbounds::{
     InboundsPageModel, InboundsSort, InboundsSortColumn, LoadedConfigSnapshot,
@@ -87,7 +88,7 @@ use crate::xray::{
     XrayLogLineLimit, XrayLogService, XrayLogSourceKind, add_inbound, is_shell_editable_protocol,
     parse_inbound_general, parse_inbound_protocol, parse_inbound_security, parse_inbound_stream,
     parse_outbound_general, parse_outbound_settings, parse_sniffing_settings,
-    port_is_shell_editable, update_inbound_shell, validate_log_settings,
+    port_is_shell_editable, raw_port_display, update_inbound_shell, validate_log_settings,
 };
 
 /// How long a transient Status Bar message remains visible.
@@ -1105,6 +1106,9 @@ impl ApplicationService {
             return Err("Connection host is empty.".to_owned());
         }
 
+        // Non-scalar `port` (range/array) has no summary-level scalar (Roadmap §3:118); Hysteria2
+        // "port hopping" syntax lets the hy2 share link use it directly (Roadmap §3:121).
+        let port_hop = crate::xray::port_hop_syntax(inbound_value);
         let port = self
             .loaded_config
             .inbounds()
@@ -1116,6 +1120,7 @@ impl ApplicationService {
                     .filter(|s| !s.is_add && s.inbound_index == inbound_index)
                     .and_then(|s| s.general.port)
             })
+            .or_else(|| port_hop.as_deref().and_then(crate::xray::first_hop_port))
             .ok_or_else(|| "Inbound port is missing.".to_owned())?;
 
         let remark = client
@@ -1174,6 +1179,9 @@ impl ApplicationService {
             .filter(|s| !s.trim().is_empty());
         let mldsa65_verify = session_pqv
             .or_else(|| stored.and_then(|m| m.mldsa65_verify.clone()))
+            .filter(|s| !s.trim().is_empty());
+        let pin_sha256 = stored
+            .and_then(|m| m.cert_pin_sha256.clone())
             .filter(|s| !s.trim().is_empty());
 
         if public_key.is_none() {
@@ -1249,9 +1257,14 @@ impl ApplicationService {
                         Some(name.to_owned())
                     }
                 });
+                let alpn = security_draft
+                    .as_ref()
+                    .map(|s| s.tls.alpn.clone())
+                    .unwrap_or_default();
                 ShareSecurity::Tls {
                     server_name,
                     insecure: false,
+                    alpn,
                 }
             }
             InboundSecurityMode::None => {
@@ -1365,6 +1378,8 @@ impl ApplicationService {
             _ => "none".to_owned(),
         };
 
+        let obfs_salamander_password = crate::xray::hysteria_salamander_obfs_password(inbound_value);
+
         let request = ShareUriRequest {
             protocol: share_protocol,
             user_id,
@@ -1375,6 +1390,9 @@ impl ApplicationService {
             encryption,
             security,
             transport,
+            port_hop,
+            obfs_salamander_password,
+            pin_sha256,
         };
         build_share_uri(&request).map_err(|e| e.detail().to_owned())
     }
@@ -1567,6 +1585,25 @@ impl ApplicationService {
             let _ = tx.send(outcome);
         });
         Ok(())
+    }
+
+    /// Returns human-readable routing references to an inbound's current tag, without mutating
+    /// anything. Used to warn the user before they confirm Delete (Roadmap §3:117); the actual
+    /// hard-block still lives server-side in [`crate::xray::config::modify::delete_inbound`].
+    pub fn inbound_tag_reference_preview(&self, inbound_index: usize) -> Vec<String> {
+        let Some(editable) = self.loaded_config.editable() else {
+            return Vec::new();
+        };
+        let Some(tag) = editable
+            .sections()
+            .inbounds()
+            .get(inbound_index)
+            .and_then(|inbound| inbound.value().get("tag"))
+            .and_then(|value| value.as_str())
+        else {
+            return Vec::new();
+        };
+        crate::xray::inbound_tag_references(editable.sections(), tag)
     }
 
     /// Deletes an inbound by merged index (any protocol; fingerprint + routing refs).
@@ -1824,6 +1861,84 @@ impl ApplicationService {
                 .build()
                 .expect("tokio runtime");
             let outcome = runtime.block_on(super::outbound_ops::run_rename_outbound_tag(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
+    /// Pretty-printed current outbound JSON + fingerprint, for the raw JSON escape hatch tab
+    /// (Roadmap §3:125). Works for **any** protocol, including ones with no structured editor.
+    pub fn outbound_raw_json_view(&self, outbound_index: usize) -> Option<(String, String)> {
+        let editable = self.loaded_config.editable()?;
+        let outbound = editable.sections().outbounds().get(outbound_index)?;
+        let pretty = serde_json::to_string_pretty(outbound.value()).ok()?;
+        let fingerprint = editable.outbound_object_fingerprint(outbound_index).ok()?;
+        Some((pretty, fingerprint))
+    }
+
+    /// Parses `raw_text`, validates it's a JSON object, and starts a remote replace of the
+    /// outbound's entire JSON object (Roadmap §3:125 escape hatch — any protocol).
+    pub fn start_replace_outbound_raw_json(
+        &mut self,
+        outbound_index: usize,
+        raw_text: &str,
+        expected_fingerprint: String,
+    ) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        let new_value: serde_json::Value =
+            serde_json::from_str(raw_text).map_err(|error| format!("Invalid JSON: {error}"))?;
+        if !new_value.is_object() {
+            return Err("Outbound must be a JSON object.".to_owned());
+        }
+        let editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = crate::xray::ReplaceOutboundRawJsonRequest {
+            outbound_index,
+            expected_fingerprint: Some(expected_fingerprint),
+            new_value,
+        };
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(p) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    p
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+        let (tx, rx) = mpsc::channel();
+        self.outbound_mutation_rx = Some(rx);
+        self.status_message_until = None;
+        self.operation = CurrentOperation::ReplacingOutboundRawJson;
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let validate_hint = self.config_validate_hint();
+        info!(target: "app", outbound_index, "starting outbound raw json replace");
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            let outcome = runtime.block_on(super::outbound_ops::run_replace_outbound_raw_json(
                 &client,
                 &profile,
                 &secrets,
@@ -2465,6 +2580,62 @@ impl ApplicationService {
         Ok(())
     }
 
+    /// Fetches the active editor session's first TLS `certificateFile` over SFTP and hashes it
+    /// into a Hysteria2 `pinSHA256` fingerprint (Roadmap §3:121). Result is cached in
+    /// `share_materials`, same as x25519/mldsa65/vlessenc Generate.
+    pub fn start_fetch_cert_pin(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        let session = self
+            .inbound_editor_session
+            .as_ref()
+            .ok_or_else(|| "Not editing an inbound.".to_owned())?;
+        let certificate_path = session
+            .security
+            .as_ref()
+            .and_then(|s| s.tls.certificates.first())
+            .map(|cert| cert.certificate_file.trim().to_owned())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "No TLS certificate file configured.".to_owned())?;
+
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(p) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    p
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+        let (tx, rx) = mpsc::channel();
+        self.inbound_mutation_rx = Some(rx);
+        self.status_message_until = None;
+        self.operation = CurrentOperation::FetchingCertPin;
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        info!(target: "app", "starting cert pin fetch");
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            let outcome = runtime.block_on(run_fetch_cert_pin(
+                &client,
+                &profile,
+                &secrets,
+                certificate_path,
+            ));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
     /// Polls for a completed IB-L1 mutation (Shell / Add / GenerateX25519 / Mldsa65 / VlessEnc).
     pub fn poll_inbound_mutation(&mut self) {
         let Some(rx) = &self.inbound_mutation_rx else {
@@ -2475,17 +2646,26 @@ impl ApplicationService {
                 self.inbound_mutation_rx = None;
                 self.operation = CurrentOperation::Ready;
                 match outcome.result {
-                    Ok(InboundMutationSuccess::Shell { editable, wrote_remote }) => {
+                    Ok(InboundMutationSuccess::Shell {
+                        editable,
+                        wrote_remote,
+                        stale_references,
+                    }) => {
                         self.retain_share_material_from_session();
                         self.schedule_share_material_persist();
                         self.replace_loaded_editable(editable);
                         self.inbound_editor_session = None;
-                        if wrote_remote {
+                        if !wrote_remote {
+                            self.show_status_message("Inbound saved (no remote change required).");
+                        } else if stale_references.is_empty() {
                             self.show_status_message(
                                 "Inbound saved. Configuration updated. Xray restart required.",
                             );
                         } else {
-                            self.show_status_message("Inbound saved (no remote change required).");
+                            self.show_status_message(format!(
+                                "Inbound saved. Configuration updated. Xray restart required. Tag renamed — still referenced in routing (update manually): {}",
+                                stale_references.join("; ")
+                            ));
                         }
                     }
                     Ok(InboundMutationSuccess::Add { editable }) => {
@@ -2658,6 +2838,32 @@ impl ApplicationService {
                             self.schedule_share_material_persist();
                         }
                     }
+                    Ok(InboundMutationSuccess::CertPin(pin)) => {
+                        let mut retain: Option<(Option<String>, usize)> = None;
+                        if let Some(session) = &mut self.inbound_editor_session
+                            && !session.is_add
+                        {
+                            retain = Some((session.general.tag.clone(), session.inbound_index));
+                        }
+                        let merged_to_store = retain.is_some();
+                        if let Some((tag, index)) = retain {
+                            self.share_materials
+                                .merge_cert_pin(tag.as_deref(), index, Some(pin));
+                        }
+                        self.show_status_message("Certificate pin fetched.");
+                        if merged_to_store {
+                            self.schedule_share_material_persist();
+                        }
+                    }
+                    Ok(InboundMutationSuccess::RawJson { editable }) => {
+                        self.retain_share_material_from_session();
+                        self.schedule_share_material_persist();
+                        self.replace_loaded_editable(editable);
+                        self.inbound_editor_session = None;
+                        self.show_status_message(
+                            "Inbound saved (raw JSON). Configuration updated. Xray restart required.",
+                        );
+                    }
                     Err(error) => {
                         let technical =
                             crate::logging::redact::sanitize_detail(error.message().as_str());
@@ -2758,6 +2964,13 @@ impl ApplicationService {
                             ));
                         }
                     }
+                    Ok(super::outbound_ops::OutboundMutationSuccess::RawJson { editable }) => {
+                        self.replace_loaded_editable(editable);
+                        self.outbound_editor_session = None;
+                        self.show_status_message(
+                            "Outbound saved (raw JSON). Configuration updated. Xray restart required.",
+                        );
+                    }
                     Err(error) => {
                         let user_message = if error.message().is_empty() {
                             crate::logging::redact::user_message_see_log(
@@ -2807,6 +3020,7 @@ impl ApplicationService {
                     | CurrentOperation::GeneratingX25519
                     | CurrentOperation::GeneratingMldsa65
                     | CurrentOperation::GeneratingVlessEnc
+                    | CurrentOperation::FetchingCertPin
             )
     }
 
@@ -2817,6 +3031,7 @@ impl ApplicationService {
             CurrentOperation::GeneratingX25519
                 | CurrentOperation::GeneratingMldsa65
                 | CurrentOperation::GeneratingVlessEnc
+                | CurrentOperation::FetchingCertPin
         )
             || self
                 .inbound_mutation_rx
@@ -2827,6 +3042,7 @@ impl ApplicationService {
                         CurrentOperation::GeneratingX25519
                             | CurrentOperation::GeneratingMldsa65
                             | CurrentOperation::GeneratingVlessEnc
+                            | CurrentOperation::FetchingCertPin
                     )
                 })
     }
@@ -2852,6 +3068,15 @@ impl ApplicationService {
         port_is_shell_editable(inbound.value())
     }
 
+    /// Display text for a non-scalar `port` (range string / array / mixed list); `None` when the
+    /// port is absent or scalar. Used by the General tab so a range/list port doesn't read as
+    /// "not set" — the value is preserved as-is on Save, never coerced (Roadmap §3:118).
+    pub fn inbound_port_raw_display(&self, inbound_index: usize) -> Option<String> {
+        let editable = self.loaded_config.editable()?;
+        let inbound = editable.sections().inbounds().get(inbound_index)?;
+        raw_port_display(inbound.value())
+    }
+
     /// Parsed General view values from the loaded config (not drafts).
     pub fn inbound_general_view(&self, inbound_index: usize) -> Option<InboundGeneral> {
         let editable = self.loaded_config.editable()?;
@@ -2864,6 +3089,84 @@ impl ApplicationService {
         let editable = self.loaded_config.editable()?;
         let inbound = editable.sections().inbounds().get(inbound_index)?;
         Some(parse_sniffing_settings(inbound.value()))
+    }
+
+    /// Pretty-printed current inbound JSON + fingerprint, for the raw JSON escape hatch tab
+    /// (Roadmap §3:125). Works for **any** protocol, including ones with no structured editor.
+    pub fn inbound_raw_json_view(&self, inbound_index: usize) -> Option<(String, String)> {
+        let editable = self.loaded_config.editable()?;
+        let inbound = editable.sections().inbounds().get(inbound_index)?;
+        let pretty = serde_json::to_string_pretty(inbound.value()).ok()?;
+        let fingerprint = editable.inbound_object_fingerprint(inbound_index).ok()?;
+        Some((pretty, fingerprint))
+    }
+
+    /// Parses `raw_text`, validates it's a JSON object, and starts a remote replace of the
+    /// inbound's entire JSON object (Roadmap §3:125 escape hatch — any protocol).
+    pub fn start_replace_inbound_raw_json(
+        &mut self,
+        inbound_index: usize,
+        raw_text: &str,
+        expected_fingerprint: String,
+    ) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        let new_value: serde_json::Value =
+            serde_json::from_str(raw_text).map_err(|error| format!("Invalid JSON: {error}"))?;
+        if !new_value.is_object() {
+            return Err("Inbound must be a JSON object.".to_owned());
+        }
+        let editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = crate::xray::ReplaceInboundRawJsonRequest {
+            inbound_index,
+            expected_fingerprint: Some(expected_fingerprint),
+            new_value,
+        };
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(p) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    p
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+        let (tx, rx) = mpsc::channel();
+        self.inbound_mutation_rx = Some(rx);
+        self.status_message_until = None;
+        self.operation = CurrentOperation::ReplacingInboundRawJson;
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let validate_hint = self.config_validate_hint();
+        info!(target: "app", inbound_index, "starting inbound raw json replace");
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            let outcome = runtime.block_on(run_replace_inbound_raw_json(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
     }
 
     fn ensure_shell_session(&mut self, inbound_index: usize) -> Result<(), String> {
@@ -5153,6 +5456,46 @@ impl ApplicationService {
         }
     }
 
+    /// Dry-runs an Add-client mutation (VLESS / Trojan / Hysteria) and returns a redacted JSON
+    /// diff preview, without mutating the loaded config or touching the remote (Users tab
+    /// follow-up to IB-L5; Roadmap §3:120).
+    pub fn preview_add_user_diff(
+        &self,
+        request: crate::xray::AddInboundClientRequest,
+    ) -> Result<Vec<crate::xray::JsonDiffEntry>, String> {
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let outcome =
+            crate::xray::add_inbound_client(&mut editable, request).map_err(|e| e.message())?;
+        Ok(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ))
+    }
+
+    /// Dry-runs an Update-client mutation (VLESS / Trojan / Hysteria) and returns a redacted
+    /// JSON diff preview, without mutating the loaded config or touching the remote (Users tab
+    /// follow-up to IB-L5; Roadmap §3:120).
+    pub fn preview_update_user_diff(
+        &self,
+        request: crate::xray::UpdateInboundClientRequest,
+    ) -> Result<Vec<crate::xray::JsonDiffEntry>, String> {
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let outcome = crate::xray::update_inbound_client(&mut editable, request)
+            .map_err(|e| e.message())?;
+        Ok(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ))
+    }
+
     /// Application action: AddUser.
     pub fn start_add_user(&mut self, request: AddUserRequest) -> Result<(), String> {
         self.start_user_mutation(UserMutationKind::Add, UserMutationRequest::Add(request))
@@ -6216,7 +6559,10 @@ impl ApplicationService {
             | CurrentOperation::RemovingConfdirFile
             | CurrentOperation::GeneratingX25519
             | CurrentOperation::GeneratingMldsa65
-            | CurrentOperation::GeneratingVlessEnc => {}
+            | CurrentOperation::GeneratingVlessEnc
+            | CurrentOperation::FetchingCertPin
+            | CurrentOperation::ReplacingInboundRawJson
+            | CurrentOperation::ReplacingOutboundRawJson => {}
         }
     }
 
@@ -7086,5 +7432,110 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(service.config.path().parent().unwrap());
+    }
+
+    fn loaded_service_from_json(name: &str, json: &str) -> ApplicationService {
+        use crate::xray::XrayConfigParser;
+
+        let mut service = service_with_temp_config(name);
+        let parser = XrayConfigParser::new();
+        let outcome = parser.parse_single_file("/etc/xray/config.json", json);
+        assert!(outcome.is_success(), "{:?}", outcome.errors());
+        let root: serde_json::Value = serde_json::from_str(json).expect("json");
+        let editable =
+            EditableXrayConfig::from_single_file("/etc/xray/config.json", root, outcome.into_sections());
+        let inbounds = editable.inbound_summaries();
+        service.loaded_config = LoadedConfigSnapshot::Loaded {
+            inbounds,
+            outbounds: Vec::new(),
+            dns: None,
+            fakedns: None,
+            observatory: None,
+            burst_observatory: None,
+            routing: None,
+            policy: None,
+            vless_clients: editable.vless_clients(),
+            warnings: Vec::new(),
+            editable: Some(editable),
+        };
+        service
+    }
+
+    #[test]
+    fn preview_add_user_diff_redacts_and_does_not_mutate() {
+        // Roadmap §3:120: Users tab "Preview changes" must be a pure dry-run — it redacts
+        // secrets and never touches the loaded config (only Save does).
+        let service = loaded_service_from_json(
+            "preview-add-user",
+            r#"{
+                "inbounds":[{
+                    "tag":"vless-in",
+                    "protocol":"vless",
+                    "port":443,
+                    "settings":{"clients":[],"decryption":"none"}
+                }]
+            }"#,
+        );
+
+        let entries = service
+            .preview_add_user_diff(crate::xray::AddInboundClientRequest::Vless(AddUserRequest {
+                inbound_index: 0,
+                email: "new@example.com".to_owned(),
+                id: Some("11111111-1111-1111-1111-111111111111".to_owned()),
+                flow: None,
+                level: 0,
+            }))
+            .expect("preview add");
+
+        let joined = format!("{entries:?}");
+        assert!(joined.contains("new@example.com"));
+        assert!(!joined.contains("11111111-1111-1111-1111-111111111111"));
+        assert!(joined.contains("[REDACTED]"));
+
+        // Dry-run: the loaded config still has zero clients.
+        let inbounds = service.loaded_config.inbounds();
+        assert_eq!(inbounds[0].clients_count, Some(0));
+    }
+
+    #[test]
+    fn preview_update_user_diff_shows_email_change_without_mutating() {
+        let service = loaded_service_from_json(
+            "preview-update-user",
+            r#"{
+                "inbounds":[{
+                    "tag":"vless-in",
+                    "protocol":"vless",
+                    "port":443,
+                    "settings":{
+                        "clients":[{"id":"11111111-1111-1111-1111-111111111111","email":"old@example.com"}],
+                        "decryption":"none"
+                    }
+                }]
+            }"#,
+        );
+
+        let entries = service
+            .preview_update_user_diff(crate::xray::UpdateInboundClientRequest::Vless(
+                UpdateUserRequest {
+                    inbound_index: 0,
+                    client_index: 0,
+                    email: "new@example.com".to_owned(),
+                    flow: None,
+                    level: 0,
+                    expected_fingerprint: None,
+                },
+            ))
+            .expect("preview update");
+
+        let email_entry = entries
+            .iter()
+            .find(|e| e.path.ends_with("email"))
+            .expect("email change entry");
+        assert_eq!(email_entry.before.as_deref(), Some("\"old@example.com\""));
+        assert_eq!(email_entry.after.as_deref(), Some("\"new@example.com\""));
+
+        // Dry-run: the loaded config's client email is untouched.
+        let clients = service.loaded_config.vless_clients();
+        assert_eq!(clients[0].email.as_deref(), Some("old@example.com"));
     }
 }

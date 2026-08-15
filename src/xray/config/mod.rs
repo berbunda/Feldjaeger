@@ -46,8 +46,9 @@ pub use inbound_clients::{
 };
 pub use inbound_edit::{
     InboundGeneral, InboundRef, KNOWN_DEST_OVERRIDE, SniffingSettings, SniffingWriteOutcome,
-    apply_inbound_general, apply_inbound_sniffing, parse_inbound_general, parse_sniffing_settings,
-    port_is_shell_editable, sniffing_is_absent_defaults, validate_listen_address,
+    apply_inbound_general, apply_inbound_sniffing, first_hop_port, parse_inbound_general,
+    parse_sniffing_settings, port_hop_syntax, port_is_shell_editable, raw_port_display,
+    sniffing_is_absent_defaults, validate_listen_address,
 };
 pub use inbound_fallbacks::{
     FallbackDest, FallbackDestKind, FallbackObject, apply_fallbacks, fallbacks_compatible_on_inbound,
@@ -78,9 +79,9 @@ pub use inbound_stream::{
     XHTTP_PATH_DEFAULT, XHTTP_PLACEMENTS, XHTTP_SESSION_ID_TABLES, XHTTP_UPLINK_METHODS,
     WsStreamSettings, XhttpCoreSettings, XhttpDownloadDraft, XhttpRange, XhttpStreamSettings,
     XmuxDraft, apply_inbound_stream, apply_tunnel_sockopt, finalmask_layers_to_value, join_ws_path_and_ed,
-    parse_finalmask_layers, parse_inbound_stream, parse_sockopt, sockopt_to_value,
-    split_ws_path_and_ed, validate_finalmask_layers, validate_kcp_settings, validate_sockopt,
-    validate_xhttp_settings, xhttp_extra_json, xhttp_extra_object, xhttp_to_object,
+    hysteria_salamander_obfs_password, parse_finalmask_layers, parse_inbound_stream, parse_sockopt,
+    sockopt_to_value, split_ws_path_and_ed, validate_finalmask_layers, validate_kcp_settings,
+    validate_sockopt, validate_xhttp_settings, xhttp_extra_json, xhttp_extra_object, xhttp_to_object,
 };
 pub use json_diff::{JsonDiffEntry, JsonDiffKind, redacted_json_diff, redacted_json_diff_bytes};
 pub use log_settings::{
@@ -93,14 +94,16 @@ pub use modify::{
     AddOutboundShellRequest, AddUserRequest, DeleteInboundClientRequest, DeleteInboundRequest,
     DeleteOutboundRequest, DeleteUserRequest, DuplicateInboundRequest, DuplicateOutboundRequest,
     ModifyConfigOutcome, ModifyUserOutcome, RemoveConfdirFileRequest, RemoveOutboundRequest,
-    RenameOutboundOutcome, RenameOutboundTagRequest, ReplaceOutboundRequest,
+    RenameOutboundOutcome, RenameOutboundTagRequest, ReplaceInboundRawJsonRequest,
+    ReplaceOutboundRawJsonRequest, ReplaceOutboundRequest,
     UpdateInboundClientRequest, UpdateInboundGeneralRequest, UpdateInboundShellRequest,
     UpdateInboundSniffingRequest, UpdateLogSettingsRequest, UpdateOutboundShellRequest,
     UpdateUserRequest, add_confdir_file, add_inbound, add_inbound_client, add_outbound,
     add_outbound_shell, add_user, delete_inbound, delete_inbound_client, delete_outbound,
     delete_user, duplicate_inbound, duplicate_outbound, generate_client_auth,
     generate_client_uuid, remove_confdir_file, remove_outbound, rename_outbound_tag,
-    replace_outbound, update_inbound_client, update_inbound_general, update_inbound_shell,
+    replace_inbound_raw_json, replace_outbound, replace_outbound_raw_json, update_inbound_client,
+    update_inbound_general, update_inbound_shell,
     update_inbound_sniffing, update_log_settings, update_outbound_shell, update_user,
 };
 pub use modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};

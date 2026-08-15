@@ -28,6 +28,365 @@ use crate::xray::{
     fallbacks_transport_compatible, parse_inbound_protocol, validate_port_map_target,
 };
 
+// ─── Field help text (Roadmap §3:124) ────────────────────────────────────────
+//
+// Condensed from the official Xray-core config docs (https://xtls.github.io/config/). Each
+// constant backs one `super::field_label(...)` / `super::help_button(...)` call — see
+// `gui::pages::help_button` for the pop-up mechanism.
+
+// General tab.
+const HELP_GENERAL_TAG: &str =
+    "The identifier of this inbound connection, used to locate it in other parts of the \
+     configuration — most importantly, routing rules reference it via `inboundTag`. Must be \
+     unique across the whole config.";
+const HELP_GENERAL_LISTEN: &str =
+    "The listening address: an IP address or a Unix domain socket. Default is `0.0.0.0` (all \
+     IPv4 interfaces); use `::` for all IPv6 interfaces, or a specific address to restrict \
+     which interface accepts connections.";
+const HELP_GENERAL_PORT: &str =
+    "Port this inbound listens on. Accepts a single number, or — for protocols that support \
+     port hopping/multiplexing (e.g. Hysteria2) — a range string (\"5000-6000\") or a \
+     comma-separated list (\"443,5000-6000\"). Non-scalar shapes are preserved as-is and are \
+     not editable from this shell (Roadmap §3:118); use the raw config file to change them.";
+
+// Sniffing tab.
+const HELP_SNIFFING_ENABLED: &str = "Whether to enable traffic sniffing.";
+const HELP_SNIFFING_DEST_OVERRIDE: &str =
+    "When sniffed traffic matches one of the checked types (http / tls / quic / fakedns / \
+     fakedns+others), the connection's destination is reset to the domain name found inside \
+     the traffic itself, instead of the original IP it was dialed to.";
+const HELP_SNIFFING_METADATA_ONLY: &str =
+    "When enabled, only connection metadata (e.g. SNI, HTTP Host header) is used to sniff the \
+     destination address — Xray does not need to buffer/inspect payload bytes.";
+const HELP_SNIFFING_ROUTE_ONLY: &str =
+    "Use the sniffed domain only for routing decisions; the actual proxy destination address \
+     stays the original IP instead of being replaced by the sniffed domain.";
+
+// Protocol tab — VLESS.
+const HELP_VLESS_DECRYPTION: &str =
+    "VLESS Encryption settings (server-side \"decryption\"). Cannot be left empty; set to \
+     \"none\" to disable it. Non-\"none\" values are generated with the remote `xray vlessenc` \
+     command below.";
+const HELP_VLESS_ENCRYPTION: &str =
+    "The client-side half of VLESS Encryption produced by the last \"Generate vlessenc\" run — \
+     shown here for copying into the client's config; never written into the inbound JSON \
+     itself (only `decryption` is).";
+const HELP_VLESSENC_AUTH: &str =
+    "Key-exchange algorithm used by the remote `xray vlessenc` command when generating the \
+     decryption/encryption pair: X25519 (classic) or ML-KEM-768 (post-quantum). Feldjäger UI \
+     choice, not a field written to the config.";
+
+// Protocol tab — fallbacks (VLESS / Trojan, TCP + TLS/Reality only).
+const HELP_FALLBACK_NAME: &str =
+    "Attempts to match TLS SNI (Server Name Indication) of the incoming connection. Empty \
+     means any.";
+const HELP_FALLBACK_ALPN: &str =
+    "Attempts to match the negotiated TLS ALPN result of the incoming connection. Empty means \
+     any.";
+const HELP_FALLBACK_PATH: &str =
+    "Attempts to match the HTTP PATH of the first packet. Empty means any; when set it must \
+     start with `/` (h2c is not supported).";
+const HELP_FALLBACK_DEST_KIND: &str =
+    "Address type for where non-matching traffic is forwarded after TLS decryption: a local \
+     port, a TCP host:port, or a Unix domain socket path.";
+const HELP_FALLBACK_DEST: &str =
+    "Destination for the fallback traffic after TLS decryption. Mandatory — Xray refuses to \
+     start without it.";
+const HELP_FALLBACK_XVER: &str =
+    "Sends the PROXY protocol (v1 or v2) to the fallback destination so it can see the real \
+     source IP/port. 0 (default) sends nothing; 1 and 2 behave identically, differing only in \
+     wire format (text vs binary).";
+
+// Protocol tab — Hysteria.
+const HELP_HYSTERIA_VERSION: &str =
+    "Hysteria transport version. Xray-core only implements Hysteria 2, so this is fixed and \
+     not editable.";
+
+// Protocol tab — Tunnel (successor to legacy dokodemo-door).
+const HELP_TUNNEL_ALLOWED_NETWORK: &str =
+    "Accepted network protocol types for this transparent-proxy inbound — e.g. \"tcp\" accepts \
+     only TCP traffic. Default is \"tcp\".";
+const HELP_TUNNEL_REWRITE_ADDRESS: &str =
+    "Forwards traffic to this address — an IP (\"1.2.3.4\") or a domain name (\"xray.com\").";
+const HELP_TUNNEL_REWRITE_PORT: &str =
+    "Forwards traffic to this port on the rewrite address. If omitted or 0, the inbound's own \
+     listening port is used instead.";
+const HELP_TUNNEL_FOLLOW_REDIRECT: &str =
+    "When enabled, Tunnel recognizes traffic redirected by iptables and forwards it to the \
+     address it was originally destined for — an Xray-level alternative to OS-level tproxy.";
+const HELP_TUNNEL_USER_LEVEL: &str =
+    "User level for this inbound; connections use the Local Policy configured for this level \
+     (defaults to 0).";
+const HELP_TUNNEL_PORT_MAP: &str =
+    "Maps a local port to a specific remote address/port, overriding rewriteAddress/rewritePort \
+     for that one port. Ports not listed here fall back to the rewriteAddress/rewritePort above.";
+const HELP_SOCKOPT_TPROXY: &str =
+    "Enables OS-level transparent proxying via iptables (Linux only): \"redirect\" or \"tproxy\" \
+     mode, or off. An alternative to Xray-level followRedirect — usually only one is needed.";
+
+// Stream tab — method selector + TCP.
+const HELP_STREAM_METHOD: &str =
+    "Transport carrying the proxy protocol on the wire (tcp/raw, WebSocket, mKCP, gRPC, XHTTP, \
+     or the protocol-locked Hysteria transport). Which methods are selectable here depends on \
+     the inbound's protocol and — for VLESS — whether Vision flow is in use.";
+const HELP_TCP_ACCEPT_PROXY_PROTOCOL: &str =
+    "Inbound-only. When enabled, the peer must send a PROXY protocol v1/v2 header immediately \
+     after the TCP connection is established, so Xray can see the real source IP/port (e.g. \
+     behind a load balancer).";
+
+// Stream tab — XHTTP (basic fields; advanced knobs get section-level help further below).
+const HELP_XHTTP_HOST: &str =
+    "Host header the server checks (or the client sends). Empty means the value is not \
+     verified server-side.";
+const HELP_XHTTP_PATH: &str = "Request path for the XHTTP endpoint. Default is \"/\".";
+const HELP_XHTTP_MODE: &str =
+    "Framing mode: \"auto\" negotiates automatically, \"packet-up\" uses chunked POST requests \
+     for uplink, \"stream-one\"/\"stream-up\" keep the uplink as a long-lived stream. Affects \
+     latency/compatibility trade-offs, especially behind CDNs.";
+const HELP_XHTTP_HEADERS_SECTION: &str =
+    "Extra HTTP request headers sent with every XHTTP request — useful for CDN routing rules or \
+     custom Host-like headers beyond the dedicated `host` field.";
+const HELP_XHTTP_PADDING_SECTION: &str =
+    "Padding, SSE, and gRPC-Content-Type knobs: `xPaddingBytes` adds random-length padding to \
+     header requests (harder to fingerprint by size); `noSSEHeader`/`noGRPCHeader` drop the \
+     Content-Type Xray would otherwise send for download/upload framing, useful when a CDN \
+     mishandles those content types.";
+const HELP_XHTTP_SC_SECTION: &str =
+    "Packet-mode (\"packet-up\") tuning: max bytes per POST, minimum interval between POSTs, \
+     how many POSTs the server buffers, and how long a stream-up connection is kept padded \
+     before the server closes it. Mostly relevant when CDNs impose per-request limits.";
+const HELP_XHTTP_PLACEMENT_SECTION: &str =
+    "Where session id / sequence number / uplink data / padding are placed on the wire (query, \
+     header, or cookie) and under what key names — plus the advanced padding obfuscation mode. \
+     Used to blend XHTTP traffic in with ordinary HTTP requests.";
+const HELP_XHTTP_XMUX_SECTION: &str =
+    "Connection-pool / multiplexing limits for the client side of XHTTP (max concurrent \
+     streams, max connections, connection reuse/lifetime caps, keep-alive period). Written into \
+     the inbound only so it can be embedded in the generated client Share URI's `extra=` field \
+     — Xray itself does not read xmux from inbound JSON.";
+const HELP_XHTTP_DOWNLOAD_SECTION: &str =
+    "Optional separate downlink connection (`downloadSettings`): dials out to a different \
+     address/port — potentially a different XHTTP-capable node — instead of reusing the same \
+     connection for both directions. Leave disabled unless you specifically split up/down \
+     traffic.";
+
+// Stream tab — gRPC.
+const HELP_GRPC_SERVICE_NAME: &str =
+    "gRPC service name, functioning similarly to a Path in HTTP/2 — the client uses this name \
+     to open the stream, and the server verifies it matches.";
+const HELP_GRPC_MULTI_MODE: &str =
+    "Experimental client-side multiplexing mode that can improve throughput (~20% in Xray's own \
+     benchmarks). Server just needs to accept it; the real effect depends on the client.";
+
+// Stream tab — WebSocket.
+const HELP_WS_PATH: &str =
+    "HTTP path used by the WebSocket upgrade request. Default is \"/\". A client path containing \
+     an `ed` query parameter (e.g. `/mypath?ed=2560`) enables Early Data to shave off a round trip.";
+const HELP_WS_HOST: &str =
+    "Host header expected in the WebSocket upgrade request. Empty means the server does not \
+     verify whatever Host the client sends.";
+const HELP_WS_ACCEPT_PROXY_PROTOCOL: &str =
+    "Inbound-only. When enabled, the peer must send a PROXY protocol v1/v2 header immediately \
+     after the TCP connection is established.";
+const HELP_WS_ED: &str =
+    "Early Data threshold appended to `path` as `?ed=N` — the first-packet length (in bytes) \
+     that may be carried inside the WebSocket upgrade's `Sec-WebSocket-Protocol` header, saving \
+     a round trip. Leave empty to disable.";
+
+// Stream tab — mKCP.
+const HELP_MKCP_MTU: &str = "Maximum Transmission Unit, in the 576–1460 range. Default 1350.";
+const HELP_MKCP_TTI: &str =
+    "Transmission Time Interval in milliseconds — how often mKCP sends data. Range 10–100 ms, \
+     default 50 ms; smaller values lower latency at the cost of more overhead.";
+const HELP_MKCP_UPLINK: &str =
+    "Maximum uplink bandwidth this host will use, in MB/s. Default 5; 0 means unlimited.";
+const HELP_MKCP_DOWNLINK: &str =
+    "Maximum downlink bandwidth this host will use, in MB/s. Default 20; 0 means unlimited.";
+const HELP_MKCP_CONGESTION: &str =
+    "Enables congestion control: Xray monitors network quality and adjusts throughput \
+     accordingly. Default false.";
+const HELP_MKCP_READ_BUFFER: &str = "Per-connection read buffer size, in MB. Default 2.";
+const HELP_MKCP_WRITE_BUFFER: &str = "Per-connection write buffer size, in MB. Default 2.";
+
+// Stream tab — Hysteria (finalmask.quicParams; transport itself is protocol-locked).
+const HELP_HY_QUIC_CONGESTION: &str =
+    "QUIC congestion-control algorithm for the Hysteria transport: reno, bbr, brutal, or \
+     force-brutal. Brutal variants target a fixed throughput instead of reacting to loss.";
+const HELP_HY_QUIC_BRUTAL_UP: &str =
+    "Target uplink rate for brutal/force-brutal congestion control (e.g. \"100 mbps\"). Ignored \
+     by reno/bbr.";
+const HELP_HY_QUIC_BRUTAL_DOWN: &str =
+    "Target downlink rate for brutal/force-brutal congestion control (e.g. \"100 mbps\"). \
+     Ignored by reno/bbr.";
+
+// Stream tab — FinalMask (streamSettings.finalmask; VLESS/Trojan only — Hysteria owns quicParams).
+const HELP_FINALMASK_SECTION: &str =
+    "The final layer of traffic camouflage, applied after transport-layer encryption (TLS/\
+     REALITY) has already been processed. `tcp[]` and `udp[]` are ordered chains of masking \
+     layers — the first entry is the innermost. `salamander` (udp) is the same obfuscation \
+     algorithm as Hysteria2's `obfs=salamander`.";
+
+// Stream tab — Sockopt (streamSettings.sockopt; method-independent).
+const HELP_SOCKOPT_TCP_FAST_OPEN: &str =
+    "Enables TCP Fast Open. `true`/`false`, or a positive integer to also set the accept queue \
+     length. Availability depends on OS support.";
+const HELP_SOCKOPT_ACCEPT_PROXY_PROTOCOL: &str =
+    "Inbound-only. When enabled, the peer must send a PROXY protocol v1/v2 header immediately \
+     after the TCP connection is established, so Xray can see the real source IP/port.";
+const HELP_SOCKOPT_V6ONLY: &str =
+    "Linux only. When enabled, a listener bound to `::` accepts IPv6 connections only (no \
+     IPv4-mapped addresses).";
+const HELP_SOCKOPT_TCP_MAX_SEG: &str = "Sets the maximum segment size (MSS) of TCP packets.";
+const HELP_SOCKOPT_TCP_KEEP_ALIVE_IDLE: &str =
+    "Seconds a TCP connection must be idle before Keep-Alive probes start.";
+const HELP_SOCKOPT_TCP_KEEP_ALIVE_INTERVAL: &str =
+    "Seconds between Keep-Alive probes once a TCP connection has entered the Keep-Alive state.";
+const HELP_SOCKOPT_TCP_USER_TIMEOUT: &str =
+    "TCP user timeout in milliseconds (RFC 5482) — how long unacknowledged data may sit before \
+     the connection is force-closed.";
+const HELP_SOCKOPT_TCP_WINDOW_CLAMP: &str =
+    "Caps the advertised TCP receive window size. The kernel uses the larger of this value and \
+     its own minimum.";
+const HELP_SOCKOPT_TRUSTED_X_FORWARDED_FOR: &str =
+    "For HTTP-based transports: source IP ranges allowed to set a trusted X-Forwarded-For \
+     header (e.g. a reverse proxy in front of Xray). One CIDR/IP per line.";
+const HELP_SOCKOPT_CUSTOM_SOCKOPT: &str =
+    "Escape hatch for socket options not exposed as dedicated fields above — a raw JSON array, \
+     platform-specific (Linux/Windows/Darwin). Advanced use only.";
+
+// Security tab — mode selector.
+const HELP_SECURITY_MODE: &str =
+    "Transport security applied on top of the chosen Stream method: none (plaintext), tls \
+     (standard TLS with your own certificate), or reality (camouflages the handshake as a real \
+     site's TLS, no certificate of your own needed). Which modes are selectable depends on the \
+     protocol and transport.";
+
+// Security tab — TLS.
+const HELP_TLS_ALPN: &str =
+    "ALPN values offered during the TLS handshake. Default is [\"h2\", \"http/1.1\"]. Required \
+     to be non-empty when fallbacks are configured on the Protocol tab.";
+const HELP_TLS_SERVER_NAME: &str =
+    "Server name Xray presents/expects for SNI. The server certificate's SAN must cover this \
+     value.";
+const HELP_TLS_VERIFY_PEER_CERT_BY_NAME: &str =
+    "Overrides the name used to verify the peer certificate, independent of the SNI/serverName \
+     sent on the wire. Advanced use only — leave empty unless you specifically need this split.";
+const HELP_TLS_REJECT_UNKNOWN_SNI: &str =
+    "When enabled, the server rejects the TLS handshake if the client's SNI doesn't match any \
+     configured certificate domain. Default false.";
+const HELP_TLS_ALLOW_INSECURE: &str =
+    "Skips TLS certificate verification. Only meaningful client-side; on a server inbound this \
+     essentially never has any effect and should stay off.";
+const HELP_TLS_MIN_VERSION: &str = "Minimum TLS version Xray will accept during the handshake.";
+const HELP_TLS_MAX_VERSION: &str = "Maximum TLS version Xray will accept during the handshake.";
+const HELP_TLS_CIPHER_SUITES: &str =
+    "Colon-separated list of allowed cipher suites. Not normally needed — only for locking down \
+     or working around a specific client/middlebox.";
+const HELP_TLS_DISABLE_SYSTEM_ROOT: &str =
+    "When enabled, Xray does not trust the OS's root CA store for outgoing verification — \
+     irrelevant for a plain inbound listener, kept here since it lives on the same TLSObject.";
+const HELP_TLS_ENABLE_SESSION_RESUMPTION: &str =
+    "Enables TLS session resumption (session tickets), letting repeat clients skip a full \
+     handshake.";
+const HELP_TLS_FINGERPRINT: &str =
+    "Client TLS fingerprint to emulate (e.g. chrome, firefox, safari) — a client-side setting \
+     kept here for convenience when building Share URIs; the server itself does not use it.";
+const HELP_TLS_PINNED_PEER_CERT_SHA256: &str =
+    "Pins the expected peer certificate's SHA-256 fingerprint. Rarely used on a server inbound \
+     (that's a client-side anti-MITM setting) — kept here since it's part of TLSObject.";
+const HELP_TLS_CURVE_PREFERENCES: &str =
+    "Preferred elliptic curves for the TLS key exchange, in priority order. Leave empty for \
+     Xray's defaults; only override for compatibility with a specific client stack.";
+const HELP_TLS_MASTER_KEY_LOG: &str =
+    "Path to write the TLS master secret log for debugging with tools like Wireshark. Leave \
+     empty in production — this weakens confidentiality of the traffic.";
+const HELP_TLS_ENABLE_ECH: &str =
+    "Enables Encrypted Client Hello (ECH), which hides the SNI from network observers. Requires \
+     echServerKeys/echConfigList below.";
+const HELP_TLS_ECH_SERVER_KEYS: &str =
+    "Server-side ECH keys (matching the published echConfigList) used to decrypt the encrypted \
+     ClientHello.";
+const HELP_TLS_ECH_CONFIG_LIST: &str =
+    "The ECHConfigList published for clients to use when constructing an encrypted ClientHello \
+     for this server.";
+const HELP_TLS_ECH_SOCKOPT: &str =
+    "Advanced socket options specific to the ECH DNS/config-fetch path — raw JSON object. \
+     Leave empty unless you need to tune this specifically.";
+
+// Security tab — TLS certificate entries.
+const HELP_CERT_CERTIFICATE_FILE: &str =
+    "Path to the certificate file (e.g. a .crt). Takes precedence over the inline PEM \
+     `certificate` field below when both are set.";
+const HELP_CERT_KEY_FILE: &str =
+    "Path to the private-key file (e.g. a .key). Password-protected keys are not supported. \
+     Takes precedence over the inline PEM `key` field below when both are set.";
+const HELP_CERT_CERTIFICATE_PEM: &str =
+    "Certificate contents inline, as PEM text, instead of a file path. Ignored when \
+     certificateFile is set. A full chain is recommended.";
+const HELP_CERT_KEY_PEM: &str =
+    "Private key contents inline, as PEM text, instead of a file path. Ignored when keyFile is \
+     set.";
+const HELP_CERT_USAGE: &str =
+    "What this certificate is used for: \"encipherment\" (default; normal TLS termination), \
+     \"verify\" (verify remote client certs — key optional), or \"issue\"/\"verifyClient\" for \
+     the more advanced dynamic-issuance workflows.";
+const HELP_CERT_BUILD_CHAIN: &str =
+    "When usage is \"issue\", builds a full certificate chain automatically instead of using \
+     only the leaf certificate as configured.";
+const HELP_CERT_ONE_TIME_LOADING: &str =
+    "Loads the certificate/key once at startup instead of watching the files for changes and \
+     reloading — use when the files are static and you want to avoid the extra file-watch \
+     overhead.";
+const HELP_CERT_OCSP_STAPLING: &str =
+    "Refresh interval, in seconds, for OCSP stapling. Leave empty to disable OCSP stapling for \
+     this certificate.";
+
+// Security tab — REALITY.
+const HELP_REALITY_DEST: &str =
+    "Required. The real TLS server REALITY connects to and camouflages as — same format as a \
+     VLESS fallback `dest` (host:port). Should normally match one of `serverNames`.";
+const HELP_REALITY_SHOW: &str = "When enabled, prints REALITY debug information to the log.";
+const HELP_REALITY_XVER: &str =
+    "Sends the PROXY protocol (v1 or v2) to the camouflaged destination on the fallback path — \
+     same semantics as a VLESS fallback `xver`. 0 (default) sends nothing.";
+const HELP_REALITY_SERVER_NAMES: &str =
+    "Required. The SNI values REALITY accepts from clients (no wildcards). Should normally stay \
+     consistent with `dest`.";
+const HELP_REALITY_ALPN: &str =
+    "ALPN values REALITY advertises to the camouflaged destination during the real TLS \
+     handshake. Rarely needs to be set explicitly.";
+const HELP_REALITY_PRIVATE_KEY: &str =
+    "Required. Server private key for REALITY's key exchange — generate with the \"Generate \
+     x25519\" button (runs the remote `xray x25519`).";
+const HELP_REALITY_PUBLIC_KEY: &str =
+    "The client-side public key (`pbk`) derived from the private key above — copy this into \
+     client configs / Share URIs. Never written into the inbound JSON itself.";
+const HELP_REALITY_SHORT_IDS: &str =
+    "Required. The `shortId` values clients may present, used to distinguish different clients \
+     — each up to 16 hex characters (8 bytes).";
+const HELP_REALITY_MLDSA65_SEED: &str =
+    "Optional post-quantum signature seed (ML-DSA-65) added to the certificate REALITY presents \
+     to clients — generate with the \"Generate mldsa65\" button.";
+const HELP_REALITY_MLDSA65_VERIFY: &str =
+    "The client-side verify string matching the seed above — copy into client configs. Never \
+     written into the inbound JSON itself.";
+const HELP_REALITY_MIN_CLIENT_VER: &str =
+    "Optional minimum Xray client version (x.y.z) REALITY will accept.";
+const HELP_REALITY_MAX_CLIENT_VER: &str =
+    "Optional maximum Xray client version (x.y.z) REALITY will accept.";
+const HELP_REALITY_MAX_TIME_DIFF: &str =
+    "Optional maximum allowed clock difference between client and server, in milliseconds, \
+     before REALITY rejects the connection.";
+const HELP_REALITY_LIMIT_FALLBACK: &str =
+    "Rate-limits connections that fail REALITY verification and get routed to the fallback \
+     destination, using a token-bucket: an initial allowance (afterBytes), a sustained rate \
+     (bytesPerSec), and a burst rate (burstBytesPerSec). Leave disabled unless you're seeing \
+     fallback traffic used as an amplification/probing vector.";
+const HELP_REALITY_LIMIT_AFTER_BYTES: &str =
+    "Byte count after which rate limiting kicks in for this fallback direction.";
+const HELP_REALITY_LIMIT_BYTES_PER_SEC: &str = "Sustained rate limit, in bytes/second.";
+const HELP_REALITY_LIMIT_BURST_BYTES_PER_SEC: &str = "Burst rate limit, in bytes/second.";
+
 // ─── Tab enum ────────────────────────────────────────────────────────────────
 
 /// Detail pane tab under a selected inbound.
@@ -41,6 +400,8 @@ enum InboundDetailTab {
     Security,
     Sniffing,
     Users,
+    /// Raw JSON escape hatch — any protocol, incl. unsupported ones (Roadmap §3:125).
+    RawJson,
 }
 
 // ─── Protocol picker for Add mode ────────────────────────────────────────────
@@ -60,6 +421,32 @@ fn protocol_picker(ui: &Ui) -> InboundClientProtocol {
 
 fn set_protocol_picker(ui: &Ui, protocol: InboundClientProtocol) {
     ui.ctx().data_mut(|d| d.insert_temp(protocol_picker_id(), protocol));
+}
+
+/// One-click "guided preset" (Roadmap §3:123): picks a protocol and its recommended security
+/// mode, then kicks off remote key generation for modes that need it (Reality). Every field of
+/// the resulting Add session remains freely editable afterward — this only saves the first few
+/// clicks of the manual flow (protocol → Security tab → change mode → Generate x25519).
+fn apply_inbound_preset(ui: &Ui, service: &mut ApplicationService, protocol: InboundClientProtocol) {
+    set_protocol_picker(ui, protocol);
+    if service.begin_add_inbound(protocol).is_err() {
+        return;
+    }
+    if protocol == InboundClientProtocol::Vless {
+        // begin_add_inbound defaults VLESS to security `none`; this preset wants Reality
+        // (Trojan/Hysteria already default to Reality/TLS respectively — nothing to override).
+        if let Some(session) = service.inbound_editor_session_mut()
+            && let Some(security) = &mut session.security
+        {
+            security.mode = InboundSecurityMode::Reality;
+        }
+    }
+    if matches!(
+        protocol,
+        InboundClientProtocol::Vless | InboundClientProtocol::Trojan
+    ) {
+        let _ = service.start_generate_x25519();
+    }
 }
 
 // ─── Page entry point ────────────────────────────────────────────────────────
@@ -133,6 +520,7 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     }
 
     show_delete_inbound_dialog(ui, service);
+    super::show_help_dialog(ui);
 }
 
 fn show_state_message(ui: &mut Ui, state: InboundsPageState) {
@@ -199,6 +587,34 @@ fn show_add_pane(ui: &mut Ui, service: &mut ApplicationService) {
     ui.strong("Add New Inbound");
     ui.add_space(4.0);
 
+    // Guided presets (Roadmap §3:123): one click for protocol + recommended security mode +
+    // key generation where needed. Everything below remains a normal, freely-editable Add form.
+    ui.horizontal(|ui| {
+        ui.label("Presets:");
+        if ui
+            .button("VLESS + Reality")
+            .on_hover_text("VLESS with Reality security; generates an x25519 key pair immediately")
+            .clicked()
+        {
+            apply_inbound_preset(ui, service, InboundClientProtocol::Vless);
+        }
+        if ui
+            .button("Trojan + Reality")
+            .on_hover_text("Trojan with Reality security; generates an x25519 key pair immediately")
+            .clicked()
+        {
+            apply_inbound_preset(ui, service, InboundClientProtocol::Trojan);
+        }
+        if ui
+            .button("Hysteria2 (TLS)")
+            .on_hover_text("Hysteria (protocol version 2) with TLS security")
+            .clicked()
+        {
+            apply_inbound_preset(ui, service, InboundClientProtocol::Hysteria);
+        }
+    });
+    ui.add_space(6.0);
+
     // Protocol picker at the top.
     let mut picker = protocol_picker(ui);
     ui.horizontal(|ui| {
@@ -258,7 +674,10 @@ fn show_add_pane(ui: &mut Ui, service: &mut ApplicationService) {
             }
             crate::app::InboundProtocolDraft::Hysteria { version } => {
                 ui.strong("Protocol");
-                ui.label(format!("Hysteria version: {version} (fixed)"));
+                ui.horizontal(|ui| {
+                    super::help_button(ui, "Hysteria version", HELP_HYSTERIA_VERSION);
+                    ui.label(format!("Hysteria version: {version} (fixed)"));
+                });
                 ui.add_space(6.0);
             }
             crate::app::InboundProtocolDraft::Tunnel { .. } => {
@@ -283,7 +702,8 @@ fn show_add_pane(ui: &mut Ui, service: &mut ApplicationService) {
     {
         ui.strong("Security");
         ui.horizontal(|ui| {
-            show_security_keygen_actions(ui, service, busy);
+            // Add flow: no remote certificate exists yet, so "Fetch cert pin" never applies.
+            show_security_keygen_actions(ui, service, busy, None);
         });
         show_security_edit(ui, service);
         ui.add_space(6.0);
@@ -332,19 +752,19 @@ fn show_add_general(ui: &mut Ui, service: &mut ApplicationService) {
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            ui.label("Tag (required)");
+            super::field_label(ui, "Tag (required)", HELP_GENERAL_TAG);
             if ui.text_edit_singleline(&mut tag).changed() {
                 general.tag = if tag.trim().is_empty() { None } else { Some(tag) };
                 session.dirty = true;
             }
             ui.end_row();
-            ui.label("Listen");
+            super::field_label(ui, "Listen", HELP_GENERAL_LISTEN);
             if ui.text_edit_singleline(&mut listen).changed() {
                 general.listen = if listen.trim().is_empty() { None } else { Some(listen) };
                 session.dirty = true;
             }
             ui.end_row();
-            ui.label("Port");
+            super::field_label(ui, "Port", HELP_GENERAL_PORT);
             if ui.text_edit_singleline(&mut port_text).changed() {
                 if port_text.trim().is_empty() {
                     general.port = None;
@@ -446,6 +866,7 @@ fn show_detail_pane(ui: &mut Ui, service: &mut ApplicationService, rows: &[Inbou
         }
 
         ui.selectable_value(&mut tab, InboundDetailTab::Sniffing, "Sniffing");
+        ui.selectable_value(&mut tab, InboundDetailTab::RawJson, "Raw JSON");
         if ui
             .add_enabled(
                 users_ok,
@@ -472,6 +893,7 @@ fn show_detail_pane(ui: &mut Ui, service: &mut ApplicationService, rows: &[Inbou
         InboundDetailTab::Stream => show_stream_tab(ui, service, row),
         InboundDetailTab::Security => show_security_tab(ui, service, row),
         InboundDetailTab::Sniffing => show_sniffing_tab(ui, service, row),
+        InboundDetailTab::RawJson => show_inbound_raw_json_tab(ui, service, row),
         InboundDetailTab::Users => {
             if let Some(reason) = service.users_blocked_by_dirty_shell() {
                 ui.label(
@@ -592,12 +1014,19 @@ fn show_general_readonly(
             ui.label(general.listen.as_deref().unwrap_or(MISSING_FIELD));
             ui.end_row();
             ui.label("Port");
-            ui.label(
-                general
-                    .port
-                    .map(|p| p.to_string())
-                    .unwrap_or_else(|| MISSING_FIELD.to_owned()),
-            );
+            match general.port {
+                Some(port) => {
+                    ui.label(port.to_string());
+                }
+                None => match service.inbound_port_raw_display(row.index) {
+                    Some(raw) => {
+                        ui.label(raw);
+                    }
+                    None => {
+                        ui.label(MISSING_FIELD);
+                    }
+                },
+            }
             ui.end_row();
             ui.label("Clients");
             ui.label(&display.clients);
@@ -615,6 +1044,9 @@ fn show_general_edit_session(
     protocol: &str,
 ) {
     let port_ok = service.inbound_port_shell_editable(row.index);
+    let raw_port = service.inbound_port_raw_display(row.index);
+    let tag_references = service.inbound_tag_reference_preview(row.index);
+    let original_tag = row.tag.clone().unwrap_or_default();
     let Some(session) = service.inbound_editor_session_mut() else {
         return;
     };
@@ -628,9 +1060,13 @@ fn show_general_edit_session(
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            ui.label("Tag");
+            super::field_label(ui, "Tag", HELP_GENERAL_TAG);
             if ui.text_edit_singleline(&mut tag).changed() {
-                general.tag = if tag.trim().is_empty() { None } else { Some(tag) };
+                general.tag = if tag.trim().is_empty() {
+                    None
+                } else {
+                    Some(tag.clone())
+                };
                 session.dirty = true;
             }
             ui.end_row();
@@ -639,14 +1075,14 @@ fn show_general_edit_session(
             ui.label(protocol);
             ui.end_row();
 
-            ui.label("Listen");
+            super::field_label(ui, "Listen", HELP_GENERAL_LISTEN);
             if ui.text_edit_singleline(&mut listen).changed() {
                 general.listen = if listen.trim().is_empty() { None } else { Some(listen) };
                 session.dirty = true;
             }
             ui.end_row();
 
-            ui.label("Port");
+            super::field_label(ui, "Port", HELP_GENERAL_PORT);
             if port_ok {
                 if ui.text_edit_singleline(&mut port_text).changed() {
                     if port_text.trim().is_empty() {
@@ -657,10 +1093,13 @@ fn show_general_edit_session(
                     session.dirty = true;
                 }
             } else {
-                ui.label(
-                    RichText::new("Port shape is not editable (scalar only)")
-                        .color(Color32::from_rgb(210, 170, 40)),
-                );
+                let note = match &raw_port {
+                    Some(raw) => format!(
+                        "{raw} — range/list port shape is preserved as-is; not editable in the shell"
+                    ),
+                    None => "Port shape is not editable (scalar only)".to_owned(),
+                };
+                ui.label(RichText::new(note).color(Color32::from_rgb(210, 170, 40)));
             }
             ui.end_row();
 
@@ -668,6 +1107,19 @@ fn show_general_edit_session(
             ui.label(row.source_file.as_str());
             ui.end_row();
         });
+
+    let tag_changed = !tag.trim().is_empty() && tag.trim() != original_tag.trim();
+    if tag_changed && !tag_references.is_empty() {
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(format!(
+                "Renaming will not update routing — still referenced by: {}",
+                tag_references.join("; ")
+            ))
+            .size(13.0)
+            .color(Color32::from_rgb(210, 170, 40)),
+        );
+    }
 }
 
 // ─── Protocol tab ────────────────────────────────────────────────────────────
@@ -990,19 +1442,19 @@ fn show_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
                 .num_columns(2)
                 .spacing([16.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label("decryption");
+                    super::field_label(ui, "decryption", HELP_VLESS_DECRYPTION);
                     if ui.text_edit_singleline(&mut dec).changed() {
                         *decryption = dec;
                         session.dirty = true;
                     }
                     ui.end_row();
 
-                    ui.label("encryption");
+                    super::field_label(ui, "encryption", HELP_VLESS_ENCRYPTION);
                     let encryption = session.ephemeral_client_encryption.clone();
                     show_client_field_value(ui, encryption, "vlessenc");
                     ui.end_row();
 
-                    ui.label("vlessenc auth");
+                    super::field_label(ui, "vlessenc auth", HELP_VLESSENC_AUTH);
                     ui.horizontal(|ui| {
                         if ui
                             .selectable_value(
@@ -1052,7 +1504,10 @@ fn show_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
                     _ => None,
                 })
                 .unwrap_or(2);
-            ui.label(format!("Hysteria version: {version} (fixed)"));
+            ui.horizontal(|ui| {
+                super::help_button(ui, "Hysteria version", HELP_HYSTERIA_VERSION);
+                ui.label(format!("Hysteria version: {version} (fixed)"));
+            });
         }
         3 => {
             let _ = busy;
@@ -1119,19 +1574,19 @@ fn show_fallbacks_edit(ui: &mut Ui, service: &mut ApplicationService, busy: bool
                     .num_columns(2)
                     .spacing([16.0, 4.0])
                     .show(ui, |ui| {
-                        ui.label("name (SNI)");
+                        super::field_label(ui, "name (SNI)", HELP_FALLBACK_NAME);
                         if ui.text_edit_singleline(&mut entry.name).changed() {
                             dirty = true;
                         }
                         ui.end_row();
 
-                        ui.label("alpn");
+                        super::field_label(ui, "alpn", HELP_FALLBACK_ALPN);
                         if ui.text_edit_singleline(&mut entry.alpn).changed() {
                             dirty = true;
                         }
                         ui.end_row();
 
-                        ui.label("path");
+                        super::field_label(ui, "path", HELP_FALLBACK_PATH);
                         if ui
                             .text_edit_singleline(&mut entry.path)
                             .on_hover_text("Empty or must start with /")
@@ -1141,7 +1596,7 @@ fn show_fallbacks_edit(ui: &mut Ui, service: &mut ApplicationService, busy: bool
                         }
                         ui.end_row();
 
-                        ui.label("dest type");
+                        super::field_label(ui, "dest type", HELP_FALLBACK_DEST_KIND);
                         let mut kind = entry.dest.kind();
                         ComboBox::from_id_salt(format!("fallback_dest_kind_{idx}"))
                             .selected_text(kind.label())
@@ -1164,7 +1619,7 @@ fn show_fallbacks_edit(ui: &mut Ui, service: &mut ApplicationService, busy: bool
                             });
                         ui.end_row();
 
-                        ui.label("dest");
+                        super::field_label(ui, "dest", HELP_FALLBACK_DEST);
                         match &mut entry.dest {
                             FallbackDest::Port(port) => {
                                 let mut value = i64::from(*port);
@@ -1197,7 +1652,7 @@ fn show_fallbacks_edit(ui: &mut Ui, service: &mut ApplicationService, busy: bool
                         }
                         ui.end_row();
 
-                        ui.label("xver");
+                        super::field_label(ui, "xver", HELP_FALLBACK_XVER);
                         let mut xver = entry.xver as i64;
                         ComboBox::from_id_salt(format!("fallback_xver_{idx}"))
                             .selected_text(xver.to_string())
@@ -1279,7 +1734,7 @@ fn show_tunnel_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
             .num_columns(2)
             .spacing([16.0, 6.0])
             .show(ui, |ui| {
-                ui.label("allowedNetwork");
+                super::field_label(ui, "allowedNetwork", HELP_TUNNEL_ALLOWED_NETWORK);
                 ComboBox::from_id_salt("tunnel_allowed_network")
                     .selected_text(&network)
                     .show_ui(ui, |ui| {
@@ -1291,13 +1746,13 @@ fn show_tunnel_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
                     });
                 ui.end_row();
 
-                ui.label("rewriteAddress");
+                super::field_label(ui, "rewriteAddress", HELP_TUNNEL_REWRITE_ADDRESS);
                 if ui.text_edit_singleline(&mut address).changed() {
                     dirty = true;
                 }
                 ui.end_row();
 
-                ui.label("rewritePort");
+                super::field_label(ui, "rewritePort", HELP_TUNNEL_REWRITE_PORT);
                 if ui
                     .text_edit_singleline(&mut port_text)
                     .on_hover_text("Empty or 0 = use listen port")
@@ -1307,7 +1762,7 @@ fn show_tunnel_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
                 }
                 ui.end_row();
 
-                ui.label("followRedirect");
+                super::field_label(ui, "followRedirect", HELP_TUNNEL_FOLLOW_REDIRECT);
                 if ui.checkbox(&mut follow, "")
                     .on_hover_text("Xray-level fallback forwarding")
                     .changed()
@@ -1316,13 +1771,13 @@ fn show_tunnel_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
                 }
                 ui.end_row();
 
-                ui.label("sockopt.tproxy");
+                super::field_label(ui, "sockopt.tproxy", HELP_SOCKOPT_TPROXY);
                 if tproxy_combo_field(ui, "tunnel_sockopt_tproxy", &mut tproxy) {
                     dirty = true;
                 }
                 ui.end_row();
 
-                ui.label("userLevel");
+                super::field_label(ui, "userLevel", HELP_TUNNEL_USER_LEVEL);
                 if ui
                     .add(egui::DragValue::new(&mut level).range(0..=u32::MAX as i64))
                     .changed()
@@ -1352,7 +1807,10 @@ fn show_tunnel_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
         );
 
         ui.add_space(8.0);
-        ui.strong("portMap");
+        ui.horizontal(|ui| {
+            super::help_button(ui, "portMap", HELP_TUNNEL_PORT_MAP);
+            ui.strong("portMap");
+        });
         ui.label(
             RichText::new("Target forms: host:port, :port, or host:")
                 .size(12.0)
@@ -1704,6 +2162,7 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
 
     let mut selected_method: Option<StreamMethod> = None;
     ui.horizontal(|ui| {
+        super::help_button(ui, "method", HELP_STREAM_METHOD);
         ui.label("method");
         for &method in &allowed {
             let mut selected = display;
@@ -1739,13 +2198,16 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
     match session.stream.method.unwrap_or(StreamMethod::Tcp) {
         StreamMethod::Tcp => {
             let mut accept = session.stream.tcp.accept_proxy_protocol;
-            if ui
-                .checkbox(&mut accept, "acceptProxyProtocol")
-                .changed()
-            {
-                session.stream.tcp.accept_proxy_protocol = accept;
-                session.dirty = true;
-            }
+            ui.horizontal(|ui| {
+                super::help_button(ui, "acceptProxyProtocol", HELP_TCP_ACCEPT_PROXY_PROTOCOL);
+                if ui
+                    .checkbox(&mut accept, "acceptProxyProtocol")
+                    .changed()
+                {
+                    session.stream.tcp.accept_proxy_protocol = accept;
+                    session.dirty = true;
+                }
+            });
         }
         StreamMethod::Xhttp => {
             let mut dirty = false;
@@ -1760,10 +2222,19 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                             dirty |= xhttp_edit_core_basic(ui, &mut session.stream.xhttp.core, "main");
                         });
                     ui.add_space(8.0);
-                    ui.heading("Headers");
+                    ui.horizontal(|ui| {
+                        super::help_button(ui, "Headers", HELP_XHTTP_HEADERS_SECTION);
+                        ui.heading("Headers");
+                    });
                     dirty |= xhttp_edit_headers(ui, &mut session.stream.xhttp.core.headers, "main");
                     ui.add_space(8.0);
-                    if xhttp_spoiler_header(ui, "padding", "Padding / SSE / gRPC", false) {
+                    if xhttp_spoiler_header(
+                        ui,
+                        "padding",
+                        "Padding / SSE / gRPC",
+                        HELP_XHTTP_PADDING_SECTION,
+                        false,
+                    ) {
                         egui::Grid::new("stream_xhttp_padding_grid")
                             .num_columns(2)
                             .spacing([16.0, 6.0])
@@ -1772,7 +2243,13 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                             });
                     }
                     ui.add_space(8.0);
-                    if xhttp_spoiler_header(ui, "sc", "Packet / stream knobs", false) {
+                    if xhttp_spoiler_header(
+                        ui,
+                        "sc",
+                        "Packet / stream knobs",
+                        HELP_XHTTP_SC_SECTION,
+                        false,
+                    ) {
                         egui::Grid::new("stream_xhttp_sc_grid")
                             .num_columns(2)
                             .spacing([16.0, 6.0])
@@ -1781,7 +2258,13 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                             });
                     }
                     ui.add_space(8.0);
-                    if xhttp_spoiler_header(ui, "placement", "Placement / obfuscation", false) {
+                    if xhttp_spoiler_header(
+                        ui,
+                        "placement",
+                        "Placement / obfuscation",
+                        HELP_XHTTP_PLACEMENT_SECTION,
+                        false,
+                    ) {
                         egui::Grid::new("stream_xhttp_place_grid")
                             .num_columns(2)
                             .spacing([16.0, 6.0])
@@ -1790,7 +2273,7 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                             });
                     }
                     ui.add_space(8.0);
-                    if xhttp_spoiler_header(ui, "xmux", "XMUX", false) {
+                    if xhttp_spoiler_header(ui, "xmux", "XMUX", HELP_XHTTP_XMUX_SECTION, false) {
                         egui::Grid::new("stream_xhttp_xmux_grid")
                             .num_columns(2)
                             .spacing([16.0, 6.0])
@@ -1799,7 +2282,10 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                             });
                     }
                     ui.add_space(8.0);
-                    ui.heading("downloadSettings");
+                    ui.horizontal(|ui| {
+                        super::help_button(ui, "downloadSettings", HELP_XHTTP_DOWNLOAD_SECTION);
+                        ui.heading("downloadSettings");
+                    });
                     let mut enabled = session.stream.xhttp.download.is_some();
                     if ui.checkbox(&mut enabled, "Enable downloadSettings").changed() {
                         dirty = true;
@@ -1841,13 +2327,13 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                 .num_columns(2)
                 .spacing([16.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label("serviceName");
+                    super::field_label(ui, "serviceName", HELP_GRPC_SERVICE_NAME);
                     if ui.text_edit_singleline(&mut service_name).changed() {
                         session.stream.grpc.service_name = service_name;
                         session.dirty = true;
                     }
                     ui.end_row();
-                    ui.label("multiMode");
+                    super::field_label(ui, "multiMode", HELP_GRPC_MULTI_MODE);
                     if ui.checkbox(&mut multi, "").changed() {
                         session.stream.grpc.multi_mode = multi;
                         session.dirty = true;
@@ -1869,25 +2355,25 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                 .num_columns(2)
                 .spacing([16.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label("path");
+                    super::field_label(ui, "path", HELP_WS_PATH);
                     if ui.text_edit_singleline(&mut path).changed() {
                         session.stream.ws.path = path;
                         session.dirty = true;
                     }
                     ui.end_row();
-                    ui.label("host");
+                    super::field_label(ui, "host", HELP_WS_HOST);
                     if ui.text_edit_singleline(&mut host).changed() {
                         session.stream.ws.host = host;
                         session.dirty = true;
                     }
                     ui.end_row();
-                    ui.label("acceptProxyProtocol");
+                    super::field_label(ui, "acceptProxyProtocol", HELP_WS_ACCEPT_PROXY_PROTOCOL);
                     if ui.checkbox(&mut accept, "").changed() {
                         session.stream.ws.accept_proxy_protocol = accept;
                         session.dirty = true;
                     }
                     ui.end_row();
-                    ui.label("ed");
+                    super::field_label(ui, "ed", HELP_WS_ED);
                     if ui.text_edit_singleline(&mut ed_text).changed() {
                         let trimmed = ed_text.trim();
                         session.stream.ws.ed = if trimmed.is_empty() {
@@ -1920,7 +2406,7 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                 .num_columns(2)
                 .spacing([16.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label("mtu");
+                    super::field_label(ui, "mtu", HELP_MKCP_MTU);
                     if ui.text_edit_singleline(&mut mtu).changed() {
                         if let Ok(v) = mtu.trim().parse::<u64>() {
                             session.stream.kcp.mtu = v;
@@ -1928,7 +2414,7 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                         }
                     }
                     ui.end_row();
-                    ui.label("tti (ms)");
+                    super::field_label(ui, "tti (ms)", HELP_MKCP_TTI);
                     if ui.text_edit_singleline(&mut tti).changed() {
                         if let Ok(v) = tti.trim().parse::<u64>() {
                             session.stream.kcp.tti = v;
@@ -1936,7 +2422,7 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                         }
                     }
                     ui.end_row();
-                    ui.label("uplinkCapacity (MB/s)");
+                    super::field_label(ui, "uplinkCapacity (MB/s)", HELP_MKCP_UPLINK);
                     if ui.text_edit_singleline(&mut uplink).changed() {
                         if let Ok(v) = uplink.trim().parse::<u64>() {
                             session.stream.kcp.uplink_capacity = v;
@@ -1944,7 +2430,7 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                         }
                     }
                     ui.end_row();
-                    ui.label("downlinkCapacity (MB/s)");
+                    super::field_label(ui, "downlinkCapacity (MB/s)", HELP_MKCP_DOWNLINK);
                     if ui.text_edit_singleline(&mut downlink).changed() {
                         if let Ok(v) = downlink.trim().parse::<u64>() {
                             session.stream.kcp.downlink_capacity = v;
@@ -1952,7 +2438,7 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                         }
                     }
                     ui.end_row();
-                    ui.label("congestion");
+                    super::field_label(ui, "congestion", HELP_MKCP_CONGESTION);
                     ComboBox::from_id_salt("stream_mkcp_congestion")
                         .selected_text(if congestion { "true" } else { "false" })
                         .width(120.0)
@@ -1967,7 +2453,7 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                             }
                         });
                     ui.end_row();
-                    ui.label("readBufferSize (MB)");
+                    super::field_label(ui, "readBufferSize (MB)", HELP_MKCP_READ_BUFFER);
                     if ui.text_edit_singleline(&mut read_buf).changed() {
                         if let Ok(v) = read_buf.trim().parse::<u64>() {
                             session.stream.kcp.read_buffer_size = v;
@@ -1975,7 +2461,7 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                         }
                     }
                     ui.end_row();
-                    ui.label("writeBufferSize (MB)");
+                    super::field_label(ui, "writeBufferSize (MB)", HELP_MKCP_WRITE_BUFFER);
                     if ui.text_edit_singleline(&mut write_buf).changed() {
                         if let Ok(v) = write_buf.trim().parse::<u64>() {
                             session.stream.kcp.write_buffer_size = v;
@@ -1998,21 +2484,21 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                 .num_columns(2)
                 .spacing([16.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label("congestion");
+                    super::field_label(ui, "congestion", HELP_HY_QUIC_CONGESTION);
                     if ui.text_edit_singleline(&mut congestion).changed() {
                         session.stream.quic_params.congestion = congestion;
                         session.stream.write_quic_params = true;
                         session.dirty = true;
                     }
                     ui.end_row();
-                    ui.label("brutalUp");
+                    super::field_label(ui, "brutalUp", HELP_HY_QUIC_BRUTAL_UP);
                     if ui.text_edit_singleline(&mut up).changed() {
                         session.stream.quic_params.brutal_up = up;
                         session.stream.write_quic_params = true;
                         session.dirty = true;
                     }
                     ui.end_row();
-                    ui.label("brutalDown");
+                    super::field_label(ui, "brutalDown", HELP_HY_QUIC_BRUTAL_DOWN);
                     if ui.text_edit_singleline(&mut down).changed() {
                         session.stream.quic_params.brutal_down = down;
                         session.stream.write_quic_params = true;
@@ -2028,7 +2514,10 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(4.0);
-        ui.strong("FinalMask");
+        ui.horizontal(|ui| {
+            super::help_button(ui, "FinalMask", HELP_FINALMASK_SECTION);
+            ui.strong("FinalMask");
+        });
         ui.label(
             RichText::new(
                 "Advanced streamSettings.finalmask masking layers. Order matters — the first entry is the innermost layer.",
@@ -2241,19 +2730,19 @@ fn show_sockopt_edit(ui: &mut Ui, sockopt: &mut SockoptDraft) -> bool {
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            ui.label("tproxy");
+            super::field_label(ui, "tproxy", HELP_SOCKOPT_TPROXY);
             if tproxy_combo_field(ui, "sockopt_tproxy", &mut sockopt.tproxy) {
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("tcpFastOpen");
+            super::field_label(ui, "tcpFastOpen", HELP_SOCKOPT_TCP_FAST_OPEN);
             if show_tcp_fast_open_edit(ui, &mut sockopt.tcp_fast_open) {
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("acceptProxyProtocol");
+            super::field_label(ui, "acceptProxyProtocol", HELP_SOCKOPT_ACCEPT_PROXY_PROTOCOL);
             let mut accept_proxy_protocol = sockopt.accept_proxy_protocol;
             if ui.checkbox(&mut accept_proxy_protocol, "").changed() {
                 sockopt.accept_proxy_protocol = accept_proxy_protocol;
@@ -2261,7 +2750,7 @@ fn show_sockopt_edit(ui: &mut Ui, sockopt: &mut SockoptDraft) -> bool {
             }
             ui.end_row();
 
-            ui.label("V6Only");
+            super::field_label(ui, "V6Only", HELP_SOCKOPT_V6ONLY);
             let mut v6_only = sockopt.v6_only;
             if ui.checkbox(&mut v6_only, "").changed() {
                 sockopt.v6_only = v6_only;
@@ -2269,7 +2758,7 @@ fn show_sockopt_edit(ui: &mut Ui, sockopt: &mut SockoptDraft) -> bool {
             }
             ui.end_row();
 
-            ui.label("tcpMaxSeg");
+            super::field_label(ui, "tcpMaxSeg", HELP_SOCKOPT_TCP_MAX_SEG);
             if ui
                 .add(egui::TextEdit::singleline(&mut tcp_max_seg).hint_text("optional; integer"))
                 .changed()
@@ -2285,7 +2774,7 @@ fn show_sockopt_edit(ui: &mut Ui, sockopt: &mut SockoptDraft) -> bool {
             }
             ui.end_row();
 
-            ui.label("tcpKeepAliveIdle (s)");
+            super::field_label(ui, "tcpKeepAliveIdle (s)", HELP_SOCKOPT_TCP_KEEP_ALIVE_IDLE);
             if ui
                 .add(
                     egui::TextEdit::singleline(&mut tcp_keep_alive_idle)
@@ -2304,7 +2793,7 @@ fn show_sockopt_edit(ui: &mut Ui, sockopt: &mut SockoptDraft) -> bool {
             }
             ui.end_row();
 
-            ui.label("tcpKeepAliveInterval (s)");
+            super::field_label(ui, "tcpKeepAliveInterval (s)", HELP_SOCKOPT_TCP_KEEP_ALIVE_INTERVAL);
             if ui
                 .add(
                     egui::TextEdit::singleline(&mut tcp_keep_alive_interval)
@@ -2323,7 +2812,7 @@ fn show_sockopt_edit(ui: &mut Ui, sockopt: &mut SockoptDraft) -> bool {
             }
             ui.end_row();
 
-            ui.label("tcpUserTimeout (ms)");
+            super::field_label(ui, "tcpUserTimeout (ms)", HELP_SOCKOPT_TCP_USER_TIMEOUT);
             if ui
                 .add(
                     egui::TextEdit::singleline(&mut tcp_user_timeout)
@@ -2342,7 +2831,7 @@ fn show_sockopt_edit(ui: &mut Ui, sockopt: &mut SockoptDraft) -> bool {
             }
             ui.end_row();
 
-            ui.label("tcpWindowClamp");
+            super::field_label(ui, "tcpWindowClamp", HELP_SOCKOPT_TCP_WINDOW_CLAMP);
             if ui
                 .add(
                     egui::TextEdit::singleline(&mut tcp_window_clamp)
@@ -2361,7 +2850,11 @@ fn show_sockopt_edit(ui: &mut Ui, sockopt: &mut SockoptDraft) -> bool {
             }
             ui.end_row();
 
-            ui.label("trustedXForwardedFor (one per line)");
+            super::field_label(
+                ui,
+                "trustedXForwardedFor (one per line)",
+                HELP_SOCKOPT_TRUSTED_X_FORWARDED_FOR,
+            );
             if ui
                 .add(egui::TextEdit::multiline(&mut trusted_x_forwarded_for).desired_rows(2))
                 .changed()
@@ -2373,11 +2866,14 @@ fn show_sockopt_edit(ui: &mut Ui, sockopt: &mut SockoptDraft) -> bool {
         });
 
     ui.add_space(4.0);
-    ui.label(
-        RichText::new("customSockopt (JSON array; advanced)")
-            .size(12.0)
-            .color(Color32::from_rgb(140, 140, 140)),
-    );
+    ui.horizontal(|ui| {
+        super::help_button(ui, "customSockopt", HELP_SOCKOPT_CUSTOM_SOCKOPT);
+        ui.label(
+            RichText::new("customSockopt (JSON array; advanced)")
+                .size(12.0)
+                .color(Color32::from_rgb(140, 140, 140)),
+        );
+    });
     if resizable_multiline(ui, &mut custom_sockopt_text, 3, "sockopt_custom_sockopt").changed() {
         let trimmed = custom_sockopt_text.trim();
         if trimmed.is_empty() {
@@ -2569,8 +3065,9 @@ fn show_security_tab(ui: &mut Ui, service: &mut ApplicationService, row: &Inboun
         return;
     }
 
+    let protocol = row.protocol.as_deref().and_then(InboundClientProtocol::from_wire);
     let is_security_proto = matches!(
-        row.protocol.as_deref().and_then(InboundClientProtocol::from_wire),
+        protocol,
         Some(
             InboundClientProtocol::Vless
                 | InboundClientProtocol::Trojan
@@ -2610,7 +3107,7 @@ fn show_security_tab(ui: &mut Ui, service: &mut ApplicationService, row: &Inboun
                 service.cancel_inbound_editor_session();
             }
             ui.add_space(8.0);
-            show_security_keygen_actions(ui, service, busy);
+            show_security_keygen_actions(ui, service, busy, protocol);
         } else if ui
             .add_enabled(!busy, egui::Button::new("Edit"))
             .clicked()
@@ -2635,25 +3132,60 @@ fn security_mode_is_reality(service: &ApplicationService) -> bool {
         .is_some_and(|sec| matches!(sec.mode, InboundSecurityMode::Reality))
 }
 
-fn show_security_keygen_actions(ui: &mut Ui, service: &mut ApplicationService, busy: bool) {
-    if !security_mode_is_reality(service) {
-        return;
+fn security_mode_is_tls(service: &ApplicationService) -> bool {
+    service
+        .inbound_editor_session()
+        .and_then(|s| s.security.as_ref())
+        .is_some_and(|sec| matches!(sec.mode, InboundSecurityMode::Tls))
+}
+
+fn show_security_keygen_actions(
+    ui: &mut Ui,
+    service: &mut ApplicationService,
+    busy: bool,
+    protocol: Option<InboundClientProtocol>,
+) {
+    if security_mode_is_reality(service) {
+        if ui
+            .add_enabled(!busy, egui::Button::new("Generate x25519"))
+            .on_hover_text("Run `xray x25519` on the remote host to generate a key pair")
+            .clicked()
+            && let Err(e) = service.start_generate_x25519()
+        {
+            service.show_status_message(e);
+        }
+        if ui
+            .add_enabled(!busy, egui::Button::new("Generate mldsa65"))
+            .on_hover_text("Run `xray mldsa65` on the remote host to generate a seed/verify pair")
+            .clicked()
+            && let Err(e) = service.start_generate_mldsa65()
+        {
+            service.show_status_message(e);
+        }
     }
-    if ui
-        .add_enabled(!busy, egui::Button::new("Generate x25519"))
-        .on_hover_text("Run `xray x25519` on the remote host to generate a key pair")
-        .clicked()
-        && let Err(e) = service.start_generate_x25519()
-    {
-        service.show_status_message(e);
-    }
-    if ui
-        .add_enabled(!busy, egui::Button::new("Generate mldsa65"))
-        .on_hover_text("Run `xray mldsa65` on the remote host to generate a seed/verify pair")
-        .clicked()
-        && let Err(e) = service.start_generate_mldsa65()
-    {
-        service.show_status_message(e);
+
+    // hy2 `pinSHA256` (Roadmap §3:121): only meaningful for Hysteria + TLS with a cert path set.
+    if matches!(protocol, Some(InboundClientProtocol::Hysteria)) && security_mode_is_tls(service) {
+        let has_cert = service
+            .inbound_editor_session()
+            .and_then(|s| s.security.as_ref())
+            .and_then(|sec| sec.tls.certificates.first())
+            .is_some_and(|cert| !cert.certificate_file.trim().is_empty());
+        if ui
+            .add_enabled(!busy && has_cert, egui::Button::new("Fetch cert pin"))
+            .on_hover_text(
+                "Read the TLS certificate over SFTP and compute its SHA-256 pin for the hy2 share link",
+            )
+            .on_disabled_hover_text(if has_cert {
+                ""
+            } else {
+                "Set a TLS certificateFile first"
+            })
+            .clicked()
+            && let Err(e) = service.start_fetch_cert_pin()
+        {
+            service.show_status_message(e);
+        }
     }
 }
 
@@ -2952,7 +3484,7 @@ fn show_security_edit(ui: &mut Ui, service: &mut ApplicationService) {
         } else {
             let mut dirty = false;
             ui.horizontal(|ui| {
-                ui.label("security");
+                super::field_label(ui, "security", HELP_SECURITY_MODE);
                 let mut mode = security.mode;
                 if !allowed_modes.contains(&mode) {
                     if let Some(first) = allowed_modes.first() {
@@ -3090,39 +3622,39 @@ fn show_tls_settings_edit(ui: &mut Ui, tls: &mut TlsSettingsDraft) -> bool {
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            ui.label("alpn");
+            super::field_label(ui, "alpn", HELP_TLS_ALPN);
             if string_tag_multi_select(ui, "tls_alpn", &mut tls.alpn, ALPN_PRESETS) {
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("serverName");
+            super::field_label(ui, "serverName", HELP_TLS_SERVER_NAME);
             if ui.text_edit_singleline(&mut server_name).changed() {
                 tls.server_name = server_name.clone();
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("verifyPeerCertByName");
+            super::field_label(ui, "verifyPeerCertByName", HELP_TLS_VERIFY_PEER_CERT_BY_NAME);
             if ui.text_edit_singleline(&mut verify_by_name).changed() {
                 tls.verify_peer_cert_by_name = verify_by_name.clone();
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("rejectUnknownSni");
+            super::field_label(ui, "rejectUnknownSni", HELP_TLS_REJECT_UNKNOWN_SNI);
             if ui.checkbox(&mut tls.reject_unknown_sni, "").changed() {
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("allowInsecure");
+            super::field_label(ui, "allowInsecure", HELP_TLS_ALLOW_INSECURE);
             if ui.checkbox(&mut tls.allow_insecure, "").changed() {
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("minVersion");
+            super::field_label(ui, "minVersion", HELP_TLS_MIN_VERSION);
             {
                 let before = min_version.clone();
                 optional_string_combo(ui, "tls_min_ver", &mut min_version, TLS_VERSION_PRESETS);
@@ -3133,7 +3665,7 @@ fn show_tls_settings_edit(ui: &mut Ui, tls: &mut TlsSettingsDraft) -> bool {
             }
             ui.end_row();
 
-            ui.label("maxVersion");
+            super::field_label(ui, "maxVersion", HELP_TLS_MAX_VERSION);
             {
                 let before = max_version.clone();
                 optional_string_combo(ui, "tls_max_ver", &mut max_version, TLS_VERSION_PRESETS);
@@ -3144,20 +3676,24 @@ fn show_tls_settings_edit(ui: &mut Ui, tls: &mut TlsSettingsDraft) -> bool {
             }
             ui.end_row();
 
-            ui.label("cipherSuites");
+            super::field_label(ui, "cipherSuites", HELP_TLS_CIPHER_SUITES);
             if resizable_multiline(ui, &mut cipher_suites, 2, "tls_ciphers").changed() {
                 tls.cipher_suites = cipher_suites.clone();
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("disableSystemRoot");
+            super::field_label(ui, "disableSystemRoot", HELP_TLS_DISABLE_SYSTEM_ROOT);
             if ui.checkbox(&mut tls.disable_system_root, "").changed() {
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("enableSessionResumption");
+            super::field_label(
+                ui,
+                "enableSessionResumption",
+                HELP_TLS_ENABLE_SESSION_RESUMPTION,
+            );
             if ui
                 .checkbox(&mut tls.enable_session_resumption, "")
                 .changed()
@@ -3166,7 +3702,7 @@ fn show_tls_settings_edit(ui: &mut Ui, tls: &mut TlsSettingsDraft) -> bool {
             }
             ui.end_row();
 
-            ui.label("fingerprint");
+            super::field_label(ui, "fingerprint", HELP_TLS_FINGERPRINT);
             {
                 let before = fingerprint.clone();
                 optional_string_combo(ui, "tls_fp", &mut fingerprint, FINGERPRINT_PRESETS);
@@ -3177,28 +3713,28 @@ fn show_tls_settings_edit(ui: &mut Ui, tls: &mut TlsSettingsDraft) -> bool {
             }
             ui.end_row();
 
-            ui.label("pinnedPeerCertSha256");
+            super::field_label(ui, "pinnedPeerCertSha256", HELP_TLS_PINNED_PEER_CERT_SHA256);
             if ui.text_edit_singleline(&mut pinned).changed() {
                 tls.pinned_peer_cert_sha256 = pinned.clone();
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("curvePreferences");
+            super::field_label(ui, "curvePreferences", HELP_TLS_CURVE_PREFERENCES);
             if string_tag_multi_select(ui, "tls_curves", &mut tls.curve_preferences, CURVE_PRESETS)
             {
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("masterKeyLog");
+            super::field_label(ui, "masterKeyLog", HELP_TLS_MASTER_KEY_LOG);
             if resizable_multiline(ui, &mut master_key_log, 2, "tls_master_log").changed() {
                 tls.master_key_log = master_key_log.clone();
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("Enable ECH");
+            super::field_label(ui, "Enable ECH", HELP_TLS_ENABLE_ECH);
             if ui.checkbox(&mut tls.enable_ech, "").changed() {
                 if !tls.enable_ech {
                     tls.ech_server_keys.clear();
@@ -3221,7 +3757,7 @@ fn show_tls_settings_edit(ui: &mut Ui, tls: &mut TlsSettingsDraft) -> bool {
                     .num_columns(2)
                     .spacing([16.0, 6.0])
                     .show(ui, |ui| {
-                        ui.label("echServerKeys");
+                        super::field_label(ui, "echServerKeys", HELP_TLS_ECH_SERVER_KEYS);
                         if resizable_multiline(ui, &mut ech_server_keys, 4, "tls_ech_server")
                             .changed()
                         {
@@ -3230,7 +3766,7 @@ fn show_tls_settings_edit(ui: &mut Ui, tls: &mut TlsSettingsDraft) -> bool {
                         }
                         ui.end_row();
 
-                        ui.label("echConfigList");
+                        super::field_label(ui, "echConfigList", HELP_TLS_ECH_CONFIG_LIST);
                         if resizable_multiline(ui, &mut ech_config_list, 4, "tls_ech_config")
                             .changed()
                         {
@@ -3239,7 +3775,7 @@ fn show_tls_settings_edit(ui: &mut Ui, tls: &mut TlsSettingsDraft) -> bool {
                         }
                         ui.end_row();
 
-                        ui.label("echSockopt (JSON object)");
+                        super::field_label(ui, "echSockopt (JSON object)", HELP_TLS_ECH_SOCKOPT);
                         if resizable_multiline(ui, &mut ech_sockopt_text, 5, "tls_ech_sockopt")
                             .changed()
                         {
@@ -3287,21 +3823,21 @@ fn show_certificate_draft_edit(
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            ui.label("certificateFile");
+            super::field_label(ui, "certificateFile", HELP_CERT_CERTIFICATE_FILE);
             if ui.text_edit_singleline(&mut cert_file).changed() {
                 cert.certificate_file = cert_file.clone();
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("keyFile");
+            super::field_label(ui, "keyFile", HELP_CERT_KEY_FILE);
             if ui.text_edit_singleline(&mut key_file).changed() {
                 cert.key_file = key_file.clone();
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("certificate (PEM)");
+            super::field_label(ui, "certificate (PEM)", HELP_CERT_CERTIFICATE_PEM);
             if resizable_multiline(
                 ui,
                 &mut cert_pem,
@@ -3315,7 +3851,7 @@ fn show_certificate_draft_edit(
             }
             ui.end_row();
 
-            ui.label("key (PEM)");
+            super::field_label(ui, "key (PEM)", HELP_CERT_KEY_PEM);
             if resizable_multiline(ui, &mut key_pem, 6, &format!("tls_key_pem_{idx}")).changed()
             {
                 cert.key = lines_to_vec(&key_pem);
@@ -3323,7 +3859,7 @@ fn show_certificate_draft_edit(
             }
             ui.end_row();
 
-            ui.label("usage");
+            super::field_label(ui, "usage", HELP_CERT_USAGE);
             {
                 let before = usage.clone();
                 egui::ComboBox::from_id_salt(format!("tls_cert_usage_{idx}"))
@@ -3344,20 +3880,20 @@ fn show_certificate_draft_edit(
             ui.end_row();
 
             if usage == "issue" {
-                ui.label("buildChain");
+                super::field_label(ui, "buildChain", HELP_CERT_BUILD_CHAIN);
                 if ui.checkbox(&mut cert.build_chain, "").changed() {
                     dirty = true;
                 }
                 ui.end_row();
             }
 
-            ui.label("oneTimeLoading");
+            super::field_label(ui, "oneTimeLoading", HELP_CERT_ONE_TIME_LOADING);
             if ui.checkbox(&mut cert.one_time_loading, "").changed() {
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("ocspStapling (seconds)");
+            super::field_label(ui, "ocspStapling (seconds)", HELP_CERT_OCSP_STAPLING);
             if ui.text_edit_singleline(&mut ocsp_text).changed() {
                 cert.ocsp_stapling = ocsp_text.trim().parse().ok().filter(|&v| v != 0);
                 dirty = true;
@@ -3391,20 +3927,20 @@ fn show_reality_settings_edit(
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            ui.label("destination (host:port)");
+            super::field_label(ui, "destination (host:port)", HELP_REALITY_DEST);
             if ui.text_edit_singleline(&mut dest).changed() {
                 reality.destination = dest.clone();
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("show");
+            super::field_label(ui, "show", HELP_REALITY_SHOW);
             if ui.checkbox(&mut reality.show, "").changed() {
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("xver");
+            super::field_label(ui, "xver", HELP_REALITY_XVER);
             let mut xver = reality.xver.unwrap_or(0);
             egui::ComboBox::from_id_salt("reality_xver")
                 .selected_text(xver.to_string())
@@ -3419,7 +3955,7 @@ fn show_reality_settings_edit(
             }
             ui.end_row();
 
-            ui.label("serverNames (one per line)");
+            super::field_label(ui, "serverNames (one per line)", HELP_REALITY_SERVER_NAMES);
             if ui
                 .add(egui::TextEdit::multiline(&mut server_names).desired_rows(3))
                 .changed()
@@ -3429,13 +3965,13 @@ fn show_reality_settings_edit(
             }
             ui.end_row();
 
-            ui.label("alpn");
+            super::field_label(ui, "alpn", HELP_REALITY_ALPN);
             if string_tag_multi_select(ui, "reality_alpn", &mut reality.alpn, ALPN_PRESETS) {
                 dirty = true;
             }
             ui.end_row();
 
-            ui.label("privateKey");
+            super::field_label(ui, "privateKey", HELP_REALITY_PRIVATE_KEY);
             if ui
                 .add(
                     egui::TextEdit::singleline(&mut private_key)
@@ -3449,11 +3985,11 @@ fn show_reality_settings_edit(
             }
             ui.end_row();
 
-            ui.label("publicKey");
+            super::field_label(ui, "publicKey", HELP_REALITY_PUBLIC_KEY);
             show_client_field_value(ui, public_key.map(str::to_owned), "x25519");
             ui.end_row();
 
-            ui.label("shortIds (one per line)");
+            super::field_label(ui, "shortIds (one per line)", HELP_REALITY_SHORT_IDS);
             if ui
                 .add(egui::TextEdit::multiline(&mut short_ids).desired_rows(3))
                 .changed()
@@ -3463,7 +3999,7 @@ fn show_reality_settings_edit(
             }
             ui.end_row();
 
-            ui.label("mldsa65Seed");
+            super::field_label(ui, "mldsa65Seed", HELP_REALITY_MLDSA65_SEED);
             if ui
                 .add(
                     egui::TextEdit::singleline(&mut mldsa65_seed)
@@ -3487,12 +4023,12 @@ fn show_reality_settings_edit(
                 .is_some_and(|s| !s.trim().is_empty())
                 || mldsa65_verify.is_some_and(|s| !s.trim().is_empty());
             if show_mldsa65_verify {
-                ui.label("mldsa65Verify");
+                super::field_label(ui, "mldsa65Verify", HELP_REALITY_MLDSA65_VERIFY);
                 show_client_field_value(ui, mldsa65_verify.map(str::to_owned), "mldsa65");
                 ui.end_row();
             }
 
-            ui.label("minClientVer");
+            super::field_label(ui, "minClientVer", HELP_REALITY_MIN_CLIENT_VER);
             if ui
                 .add(
                     egui::TextEdit::singleline(&mut min_client_ver)
@@ -3505,7 +4041,7 @@ fn show_reality_settings_edit(
             }
             ui.end_row();
 
-            ui.label("maxClientVer");
+            super::field_label(ui, "maxClientVer", HELP_REALITY_MAX_CLIENT_VER);
             if ui
                 .add(
                     egui::TextEdit::singleline(&mut max_client_ver)
@@ -3518,7 +4054,7 @@ fn show_reality_settings_edit(
             }
             ui.end_row();
 
-            ui.label("maxTimeDiff (ms)");
+            super::field_label(ui, "maxTimeDiff (ms)", HELP_REALITY_MAX_TIME_DIFF);
             if ui
                 .add(
                     egui::TextEdit::singleline(&mut max_time_diff)
@@ -3558,6 +4094,7 @@ fn show_reality_limit_fallback_edit(
     let mut dirty = false;
     let mut enabled = limit.is_some();
     ui.horizontal(|ui| {
+        super::help_button(ui, "limitFallback", HELP_REALITY_LIMIT_FALLBACK);
         if ui
             .checkbox(&mut enabled, format!("Limit fallback {label}"))
             .changed()
@@ -3586,21 +4123,21 @@ fn show_reality_limit_fallback_edit(
             .num_columns(2)
             .spacing([16.0, 6.0])
             .show(ui, |ui| {
-                ui.label("afterBytes");
+                super::field_label(ui, "afterBytes", HELP_REALITY_LIMIT_AFTER_BYTES);
                 if ui.text_edit_singleline(&mut after_bytes).changed() {
                     limit.after_bytes = after_bytes.trim().parse::<u64>().ok();
                     dirty = true;
                 }
                 ui.end_row();
 
-                ui.label("bytesPerSec");
+                super::field_label(ui, "bytesPerSec", HELP_REALITY_LIMIT_BYTES_PER_SEC);
                 if ui.text_edit_singleline(&mut bytes_per_sec).changed() {
                     limit.bytes_per_sec = bytes_per_sec.trim().parse::<u64>().ok();
                     dirty = true;
                 }
                 ui.end_row();
 
-                ui.label("burstBytesPerSec");
+                super::field_label(ui, "burstBytesPerSec", HELP_REALITY_LIMIT_BURST_BYTES_PER_SEC);
                 if ui.text_edit_singleline(&mut burst_bytes_per_sec).changed() {
                     limit.burst_bytes_per_sec = burst_bytes_per_sec.trim().parse::<u64>().ok();
                     dirty = true;
@@ -3798,6 +4335,133 @@ fn show_sniffing_tab(ui: &mut Ui, service: &mut ApplicationService, row: &Inboun
     }
 }
 
+// ─── Raw JSON escape hatch (Roadmap §3:125) ──────────────────────────────────
+
+/// Local edit state for the Raw JSON tab — deliberately kept out of `InboundEditorSession`
+/// (which is protocol-typed); this tab is a standalone action available for **any** protocol,
+/// including ones with no structured editor at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawJsonEditState {
+    inbound_index: usize,
+    text: String,
+    expected_fingerprint: String,
+    error: Option<String>,
+}
+
+fn raw_json_edit_id() -> egui::Id {
+    egui::Id::new("inbound_raw_json_edit")
+}
+
+fn raw_json_edit_state(ui: &Ui) -> Option<RawJsonEditState> {
+    ui.ctx()
+        .data(|d| d.get_temp::<RawJsonEditState>(raw_json_edit_id()))
+}
+
+fn set_raw_json_edit_state(ui: &Ui, state: RawJsonEditState) {
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(raw_json_edit_id(), state));
+}
+
+fn clear_raw_json_edit_state(ui: &Ui) {
+    ui.ctx()
+        .data_mut(|d| d.remove::<RawJsonEditState>(raw_json_edit_id()));
+}
+
+fn show_inbound_raw_json_tab(ui: &mut Ui, service: &mut ApplicationService, row: &InboundSummary) {
+    let busy = service.is_inbound_shell_mutation_busy();
+    let editing = raw_json_edit_state(ui).is_some_and(|s| s.inbound_index == row.index);
+
+    ui.label(
+        RichText::new(
+            "Escape hatch: edits the entire inbound object as raw JSON — for fields the \
+             structured tabs don't cover, or for protocols Feldjäger has no structured editor \
+             for at all. Save replaces the whole object; invalid JSON or a stale fingerprint \
+             (config changed underneath) is rejected before anything is written.",
+        )
+        .size(12.0)
+        .color(Color32::from_rgb(140, 140, 140)),
+    );
+    ui.add_space(6.0);
+
+    ui.horizontal(|ui| {
+        if editing {
+            if ui.add_enabled(!busy, egui::Button::new("Save")).clicked()
+                && let Some(state) = raw_json_edit_state(ui)
+            {
+                match service.start_replace_inbound_raw_json(
+                    state.inbound_index,
+                    &state.text,
+                    state.expected_fingerprint.clone(),
+                ) {
+                    Ok(()) => clear_raw_json_edit_state(ui),
+                    Err(message) => set_raw_json_edit_state(
+                        ui,
+                        RawJsonEditState {
+                            error: Some(message),
+                            ..state
+                        },
+                    ),
+                }
+            }
+            if ui
+                .add_enabled(!busy, egui::Button::new("Cancel"))
+                .clicked()
+            {
+                clear_raw_json_edit_state(ui);
+            }
+        } else if ui.add_enabled(!busy, egui::Button::new("Edit")).clicked()
+            && let Some((text, expected_fingerprint)) = service.inbound_raw_json_view(row.index)
+        {
+            set_raw_json_edit_state(
+                ui,
+                RawJsonEditState {
+                    inbound_index: row.index,
+                    text,
+                    expected_fingerprint,
+                    error: None,
+                },
+            );
+        }
+    });
+    ui.add_space(6.0);
+
+    if editing {
+        let mut state = raw_json_edit_state(ui).expect("checked above");
+        if let Some(error) = &state.error {
+            ui.label(
+                RichText::new(error.clone())
+                    .size(13.0)
+                    .color(Color32::from_rgb(200, 60, 60)),
+            );
+            ui.add_space(4.0);
+        }
+        egui::ScrollArea::vertical()
+            .max_height(480.0)
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut state.text)
+                        .desired_rows(24)
+                        .desired_width(f32::INFINITY)
+                        .code_editor(),
+                );
+            });
+        set_raw_json_edit_state(ui, state);
+    } else if let Some((text, _)) = service.inbound_raw_json_view(row.index) {
+        let mut text = text;
+        egui::ScrollArea::vertical()
+            .max_height(480.0)
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut text)
+                        .desired_rows(24)
+                        .desired_width(f32::INFINITY)
+                        .code_editor()
+                        .interactive(false),
+                );
+            });
+    }
+}
+
 fn show_sniffing_readonly(ui: &mut Ui, settings: &SniffingSettings) {
     egui::Grid::new("inbound_sniffing_view_grid")
         .num_columns(2)
@@ -3849,12 +4513,15 @@ fn show_sniffing_edit_session(ui: &mut Ui, service: &mut ApplicationService) {
     let mut metadata_only = settings.metadata_only.unwrap_or(false);
     let mut route_only = settings.route_only.unwrap_or(false);
 
-    if ui.checkbox(&mut enabled, "enabled").changed() {
-        settings.enabled = Some(enabled);
-        session.dirty = true;
-    }
+    ui.horizontal(|ui| {
+        super::help_button(ui, "enabled", HELP_SNIFFING_ENABLED);
+        if ui.checkbox(&mut enabled, "enabled").changed() {
+            settings.enabled = Some(enabled);
+            session.dirty = true;
+        }
+    });
 
-    ui.label("destOverride");
+    super::field_label(ui, "destOverride", HELP_SNIFFING_DEST_OVERRIDE);
     ui.horizontal(|ui| {
         for token in KNOWN_DEST_OVERRIDE {
             let mut checked = settings.dest_override.iter().any(|t| t == *token);
@@ -3881,14 +4548,20 @@ fn show_sniffing_edit_session(ui: &mut Ui, service: &mut ApplicationService) {
         );
     }
 
-    if ui.checkbox(&mut metadata_only, "metadataOnly").changed() {
-        settings.metadata_only = Some(metadata_only);
-        session.dirty = true;
-    }
-    if ui.checkbox(&mut route_only, "routeOnly").changed() {
-        settings.route_only = Some(route_only);
-        session.dirty = true;
-    }
+    ui.horizontal(|ui| {
+        super::help_button(ui, "metadataOnly", HELP_SNIFFING_METADATA_ONLY);
+        if ui.checkbox(&mut metadata_only, "metadataOnly").changed() {
+            settings.metadata_only = Some(metadata_only);
+            session.dirty = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        super::help_button(ui, "routeOnly", HELP_SNIFFING_ROUTE_ONLY);
+        if ui.checkbox(&mut route_only, "routeOnly").changed() {
+            settings.route_only = Some(route_only);
+            session.dirty = true;
+        }
+    });
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -3984,63 +4657,7 @@ fn show_json_diff_preview(ui: &mut Ui, service: &ApplicationService) {
     else {
         return;
     };
-
-    let title = if entries.is_empty() {
-        "JSON changes (none)".to_owned()
-    } else {
-        format!("JSON changes ({})", entries.len())
-    };
-    egui::CollapsingHeader::new(title)
-        .default_open(true)
-        .show(ui, |ui| {
-            if entries.is_empty() {
-                ui.label(
-                    RichText::new("No differences vs the loaded file.")
-                        .size(13.0)
-                        .color(Color32::from_rgb(140, 140, 140)),
-                );
-                return;
-            }
-            egui::ScrollArea::vertical()
-                .max_height(200.0)
-                .show(ui, |ui| {
-                    for entry in &entries {
-                        let color = match entry.kind {
-                            crate::xray::JsonDiffKind::Added => Color32::from_rgb(40, 160, 80),
-                            crate::xray::JsonDiffKind::Removed => Color32::from_rgb(200, 60, 60),
-                            crate::xray::JsonDiffKind::Changed => Color32::from_rgb(210, 170, 40),
-                        };
-                        let detail = match entry.kind {
-                            crate::xray::JsonDiffKind::Added => {
-                                format!(
-                                    "{} {} = {}",
-                                    entry.kind.label(),
-                                    entry.path,
-                                    entry.after.as_deref().unwrap_or("?")
-                                )
-                            }
-                            crate::xray::JsonDiffKind::Removed => {
-                                format!(
-                                    "{} {} (was {})",
-                                    entry.kind.label(),
-                                    entry.path,
-                                    entry.before.as_deref().unwrap_or("?")
-                                )
-                            }
-                            crate::xray::JsonDiffKind::Changed => {
-                                format!(
-                                    "{} {} : {} → {}",
-                                    entry.kind.label(),
-                                    entry.path,
-                                    entry.before.as_deref().unwrap_or("?"),
-                                    entry.after.as_deref().unwrap_or("?")
-                                )
-                            }
-                        };
-                        ui.label(RichText::new(detail).size(12.0).color(color).monospace());
-                    }
-                });
-        });
+    super::json_diff_preview(ui, &entries);
 }
 
 fn show_inbound_context_menu(
@@ -4099,6 +4716,7 @@ fn show_inbound_context_menu(
                     index: row.index,
                     tag: row.tag.clone().unwrap_or_else(|| MISSING_FIELD.to_owned()),
                     unsupported: !shell_ok,
+                    references: service.inbound_tag_reference_preview(row.index),
                     error: None,
                 },
             );
@@ -4125,6 +4743,9 @@ struct PendingInboundDelete {
     tag: String,
     /// Protocol is not shell-editable (stronger confirm copy).
     unsupported: bool,
+    /// Routing `inboundTag` rules referencing this tag (Roadmap §3:117); non-empty means the
+    /// server-side hard-block in `delete_inbound` will refuse the delete until they are removed.
+    references: Vec<String>,
     error: Option<String>,
 }
 
@@ -4175,6 +4796,17 @@ fn show_delete_inbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                     .color(Color32::from_rgb(160, 120, 40)),
                 );
             }
+            if !pending.references.is_empty() {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(format!(
+                        "Still referenced in routing — remove these first: {}",
+                        pending.references.join("; ")
+                    ))
+                    .size(13.0)
+                    .color(Color32::from_rgb(210, 170, 40)),
+                );
+            }
             if let Some(error) = &pending.error {
                 ui.add_space(8.0);
                 ui.label(
@@ -4186,8 +4818,14 @@ fn show_delete_inbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 let busy = service.is_inbound_shell_mutation_busy();
+                let can_submit = !busy && pending.references.is_empty();
                 if ui
-                    .add_enabled(!busy, egui::Button::new("Delete"))
+                    .add_enabled(can_submit, egui::Button::new("Delete"))
+                    .on_disabled_hover_text(if pending.references.is_empty() {
+                        "Delete requires an idle connection"
+                    } else {
+                        "Remove the routing references above first"
+                    })
                     .clicked()
                 {
                     match service.start_delete_inbound(pending.index) {
@@ -4218,13 +4856,20 @@ fn show_delete_inbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
 
 /// Section heading with a spoiler-style disclosure arrow on the right of the title.
 /// Returns whether the body should currently be drawn (open state).
-fn xhttp_spoiler_header(ui: &mut Ui, id_salt: &str, title: &str, default_open: bool) -> bool {
+fn xhttp_spoiler_header(
+    ui: &mut Ui,
+    id_salt: &str,
+    title: &'static str,
+    help_text: &'static str,
+    default_open: bool,
+) -> bool {
     let id = ui.make_persistent_id(("xhttp_spoiler", id_salt));
     let mut state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, default_open);
     let openness = state.openness(ui.ctx());
 
     ui.horizontal(|ui| {
+        super::help_button(ui, title, help_text);
         ui.heading(title);
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let size = egui::Vec2::splat(ui.spacing().icon_width);
@@ -4255,7 +4900,7 @@ fn format_xhttp_range(range: XhttpRange) -> String {
 
 fn xhttp_edit_core_basic(ui: &mut Ui, core: &mut XhttpCoreSettings, salt: &str) -> bool {
     let mut dirty = false;
-    ui.label("host");
+    super::field_label(ui, "host", HELP_XHTTP_HOST);
     let mut host = core.host.clone();
     if ui.text_edit_singleline(&mut host).changed() {
         core.host = host;
@@ -4263,7 +4908,7 @@ fn xhttp_edit_core_basic(ui: &mut Ui, core: &mut XhttpCoreSettings, salt: &str) 
     }
     ui.end_row();
 
-    ui.label("path");
+    super::field_label(ui, "path", HELP_XHTTP_PATH);
     let mut path = core.path.clone();
     if ui.text_edit_singleline(&mut path).changed() {
         core.path = if path.trim().is_empty() {
@@ -4275,7 +4920,7 @@ fn xhttp_edit_core_basic(ui: &mut Ui, core: &mut XhttpCoreSettings, salt: &str) 
     }
     ui.end_row();
 
-    ui.label("mode");
+    super::field_label(ui, "mode", HELP_XHTTP_MODE);
     dirty |= xhttp_string_combo(
         ui,
         &format!("stream_xhttp_mode_{salt}"),

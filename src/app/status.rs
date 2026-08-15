@@ -94,6 +94,12 @@ pub enum CurrentOperation {
     GeneratingMldsa65,
     /// Generating VLESS decryption/encryption via `xray vlessenc`.
     GeneratingVlessEnc,
+    /// Fetching a TLS certificate's SHA-256 pin for Hysteria2 `pinSHA256` (Roadmap §3:121).
+    FetchingCertPin,
+    /// Replacing an inbound's entire JSON object (raw JSON escape hatch, Roadmap §3:125).
+    ReplacingInboundRawJson,
+    /// Replacing an outbound's entire JSON object (raw JSON escape hatch, Roadmap §3:125).
+    ReplacingOutboundRawJson,
     /// Managing the remote Xray systemd service (start/stop/…).
     ManagingXrayService {
         /// Status Bar text for the in-flight operation.
@@ -155,6 +161,9 @@ impl CurrentOperation {
             Self::GeneratingX25519 => "Generating x25519 key pair...".to_owned(),
             Self::GeneratingMldsa65 => "Generating mldsa65 key pair...".to_owned(),
             Self::GeneratingVlessEnc => "Generating VLESS encryption...".to_owned(),
+            Self::FetchingCertPin => "Fetching certificate pin...".to_owned(),
+            Self::ReplacingInboundRawJson => "Saving inbound raw JSON...".to_owned(),
+            Self::ReplacingOutboundRawJson => "Saving outbound raw JSON...".to_owned(),
             Self::ManagingXrayService { text } => text.clone(),
             Self::ManagingXrayLifecycle { text } => text.clone(),
             Self::ManagingGeoData { text } => text.clone(),
@@ -189,6 +198,9 @@ impl CurrentOperation {
             | Self::GeneratingX25519
             | Self::GeneratingMldsa65
             | Self::GeneratingVlessEnc
+            | Self::FetchingCertPin
+            | Self::ReplacingInboundRawJson
+            | Self::ReplacingOutboundRawJson
             | Self::ManagingXrayService { .. }
             | Self::ManagingXrayLifecycle { .. }
             | Self::ManagingGeoData { .. }

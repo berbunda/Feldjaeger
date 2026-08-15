@@ -1851,30 +1851,37 @@ fn shell_general_coerces_decimal_string_port_to_number() {
 }
 
 #[test]
-fn shell_general_rejects_non_scalar_port() {
+fn shell_general_preserves_non_scalar_port() {
+    // Range / array / mixed-list `port` shapes are preserved byte-for-byte, never coerced into
+    // a scalar (Roadmap §3:118): General Save must still succeed for tag/listen even though the
+    // draft's `port` field cannot represent the on-disk shape.
     let mut config = single_file_editable(
         r#"{
             "inbounds":[{
+                "tag":"old",
                 "protocol":"vless",
-                "port":[443,8443],
+                "port":[443,8443,"9000-9010"],
                 "settings":{"clients":[],"decryption":"none"}
             }]
         }"#,
     );
     let inbound_ref = shell_ref(&config, 0);
-    let error = update_inbound_general(
+    update_inbound_general(
         &mut config,
         UpdateInboundGeneralRequest {
             inbound_ref,
             general: InboundGeneral {
-                tag: None,
-                listen: None,
-                port: Some(443),
+                tag: Some("renamed".to_owned()),
+                listen: Some("127.0.0.1".to_owned()),
+                port: None,
             },
         },
     )
-    .expect_err("non-scalar");
-    assert_eq!(error.kind(), ConfigModifyErrorKind::ValidationFailed);
+    .expect("general update preserves non-scalar port");
+    let inbound = &config.file_roots()["/etc/xray/config.json"]["inbounds"][0];
+    assert_eq!(inbound["tag"], "renamed");
+    assert_eq!(inbound["listen"], "127.0.0.1");
+    assert_eq!(inbound["port"], serde_json::json!([443, 8443, "9000-9010"]));
 }
 
 #[test]
@@ -3168,6 +3175,166 @@ fn delete_inbound_fingerprint_mismatch() {
 }
 
 #[test]
+fn replace_inbound_raw_json_replaces_whole_object() {
+    use super::modify::{ReplaceInboundRawJsonRequest, replace_inbound_raw_json};
+
+    let mut config = single_file_editable(
+        r#"{
+            "inbounds":[
+                {"tag":"keep-me","protocol":"vless","port":1, "settings":{"clients":[],"decryption":"none"}},
+                {"tag":"ss-in","protocol":"shadowsocks","port":8388,"settings":{"method":"aes-256-gcm","password":"old"}}
+            ]
+        }"#,
+    );
+    let new_value = serde_json::json!({
+        "tag": "ss-in-renamed",
+        "protocol": "shadowsocks",
+        "port": 9999,
+        "settings": {"method": "aes-256-gcm", "password": "new", "network": "tcp,udp"}
+    });
+    let outcome = replace_inbound_raw_json(
+        &mut config,
+        ReplaceInboundRawJsonRequest {
+            inbound_index: 1,
+            expected_fingerprint: None,
+            new_value: new_value.clone(),
+        },
+    )
+    .expect("replace");
+    assert!(!outcome.serialized.is_empty());
+
+    let inbounds = config.sections().inbounds();
+    assert_eq!(inbounds.len(), 2);
+    assert_eq!(inbounds[0].value()["tag"], "keep-me");
+    assert_eq!(*inbounds[1].value(), new_value);
+    let root_inbound = &config.file_roots()["/etc/xray/config.json"]["inbounds"][1];
+    assert_eq!(*root_inbound, new_value);
+}
+
+#[test]
+fn replace_inbound_raw_json_works_for_unsupported_protocol() {
+    // The whole point of the raw JSON escape hatch: protocols with no structured Shell editor
+    // (Shadowsocks here) can still be edited, unlike `update_inbound_shell`.
+    use super::modify::{ReplaceInboundRawJsonRequest, replace_inbound_raw_json};
+
+    let mut config = single_file_editable(
+        r#"{"inbounds":[{"tag":"ss","protocol":"shadowsocks","port":1,"settings":{}}]}"#,
+    );
+    let result = replace_inbound_raw_json(
+        &mut config,
+        ReplaceInboundRawJsonRequest {
+            inbound_index: 0,
+            expected_fingerprint: None,
+            new_value: serde_json::json!({"tag": "ss", "protocol": "shadowsocks", "port": 2, "settings": {}}),
+        },
+    );
+    assert!(result.is_ok());
+    assert_eq!(config.sections().inbounds()[0].value()["port"], 2);
+}
+
+#[test]
+fn replace_inbound_raw_json_fingerprint_mismatch() {
+    use super::modify::{ReplaceInboundRawJsonRequest, replace_inbound_raw_json};
+
+    let mut config = single_file_editable(
+        r#"{"inbounds":[{"tag":"in","protocol":"vless","port":443,"settings":{"clients":[],"decryption":"none"}}]}"#,
+    );
+    let err = replace_inbound_raw_json(
+        &mut config,
+        ReplaceInboundRawJsonRequest {
+            inbound_index: 0,
+            expected_fingerprint: Some("stale".to_owned()),
+            new_value: serde_json::json!({"tag": "in", "protocol": "vless", "port": 444}),
+        },
+    )
+    .expect_err("mismatch");
+    assert_eq!(err.kind(), ConfigModifyErrorKind::FingerprintMismatch);
+    assert_eq!(config.sections().inbounds()[0].value()["port"], 443);
+}
+
+#[test]
+fn replace_inbound_raw_json_rejects_non_object() {
+    use super::modify::{ReplaceInboundRawJsonRequest, replace_inbound_raw_json};
+
+    let mut config = single_file_editable(
+        r#"{"inbounds":[{"tag":"in","protocol":"vless","port":443,"settings":{"clients":[],"decryption":"none"}}]}"#,
+    );
+    let err = replace_inbound_raw_json(
+        &mut config,
+        ReplaceInboundRawJsonRequest {
+            inbound_index: 0,
+            expected_fingerprint: None,
+            new_value: serde_json::json!([1, 2, 3]),
+        },
+    )
+    .expect_err("non-object");
+    assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
+}
+
+#[test]
+fn replace_inbound_raw_json_rejects_duplicate_tag() {
+    use super::modify::{ReplaceInboundRawJsonRequest, replace_inbound_raw_json};
+
+    let mut config = single_file_editable(
+        r#"{
+            "inbounds":[
+                {"tag":"a","protocol":"vless","port":1,"settings":{"clients":[],"decryption":"none"}},
+                {"tag":"b","protocol":"vless","port":2,"settings":{"clients":[],"decryption":"none"}}
+            ]
+        }"#,
+    );
+    let err = replace_inbound_raw_json(
+        &mut config,
+        ReplaceInboundRawJsonRequest {
+            inbound_index: 1,
+            expected_fingerprint: None,
+            new_value: serde_json::json!({"tag": "a", "protocol": "vless", "port": 2}),
+        },
+    )
+    .expect_err("duplicate tag");
+    assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
+}
+
+#[test]
+fn replace_outbound_raw_json_replaces_whole_object() {
+    use super::modify::{ReplaceOutboundRawJsonRequest, replace_outbound_raw_json};
+
+    let mut config = single_file_editable(
+        r#"{"outbounds":[{"tag":"direct","protocol":"freedom"},{"tag":"vmess-out","protocol":"vmess","settings":{}}]}"#,
+    );
+    let new_value = serde_json::json!({"tag": "vmess-out", "protocol": "vmess", "settings": {"vnext": []}});
+    replace_outbound_raw_json(
+        &mut config,
+        ReplaceOutboundRawJsonRequest {
+            outbound_index: 1,
+            expected_fingerprint: None,
+            new_value: new_value.clone(),
+        },
+    )
+    .expect("replace");
+    assert_eq!(*config.sections().outbounds()[1].value(), new_value);
+}
+
+#[test]
+fn replace_outbound_raw_json_fingerprint_mismatch() {
+    use super::modify::{ReplaceOutboundRawJsonRequest, replace_outbound_raw_json};
+
+    let mut config =
+        single_file_editable(r#"{"outbounds":[{"tag":"direct","protocol":"freedom"}]}"#);
+    let err = replace_outbound_raw_json(
+        &mut config,
+        ReplaceOutboundRawJsonRequest {
+            outbound_index: 0,
+            expected_fingerprint: Some("stale".to_owned()),
+            new_value: serde_json::json!({"tag": "direct2", "protocol": "freedom"}),
+        },
+    )
+    .expect_err("mismatch");
+    assert_eq!(err.kind(), ConfigModifyErrorKind::FingerprintMismatch);
+    assert_eq!(config.sections().outbounds()[0].value()["tag"], "direct");
+}
+
+#[test]
 fn duplicate_inbound_appends_unique_tag_copy() {
     use super::modify::{DuplicateInboundRequest, duplicate_inbound};
 
@@ -3473,6 +3640,60 @@ fn tunnel_shell_save_preserves_stream_and_unknown_settings() {
     assert_eq!(inbound["settings"]["portMap"]["5555"], ":8888");
     assert_eq!(inbound["settings"]["futureField"], "keep");
     assert_eq!(inbound["streamSettings"]["sockopt"]["tproxy"], "redirect");
+}
+
+#[test]
+fn tunnel_shell_save_preserves_non_scalar_port() {
+    // Tunnel inbounds commonly bind a port range for transparent proxying (tproxy); the
+    // composed Shell Save must not block on it nor coerce it to scalar (Roadmap §3:118).
+    use super::inbound_protocol::InboundProtocolDraft;
+    use super::inbound_stream::InboundStreamDraft;
+    use super::modify::{UpdateInboundShellRequest, update_inbound_shell};
+
+    let mut config = single_file_editable(
+        r#"{
+            "inbounds":[{
+                "tag":"tun-in",
+                "protocol":"tunnel",
+                "port":"20000-20010",
+                "listen":"127.0.0.1",
+                "settings":{
+                    "allowedNetwork":"tcp",
+                    "followRedirect":false,
+                    "userLevel":0
+                },
+                "streamSettings":{"network":"tcp","security":"none","sockopt":{"tproxy":"tproxy"}}
+            }]
+        }"#,
+    );
+    let inbound_ref = shell_ref(&config, 0);
+    update_inbound_shell(
+        &mut config,
+        UpdateInboundShellRequest {
+            inbound_ref,
+            general: InboundGeneral {
+                tag: Some("tun-in-renamed".to_owned()),
+                listen: Some("127.0.0.1".to_owned()),
+                port: None,
+            },
+            protocol: InboundProtocolDraft::Tunnel {
+                allowed_network: "tcp,udp".to_owned(),
+                rewrite_address: "127.0.0.1".to_owned(),
+                rewrite_port: None,
+                port_map: Vec::new(),
+                follow_redirect: true,
+                user_level: 0,
+            },
+            stream: InboundStreamDraft::default(),
+            sniffing: SniffingSettings::default(),
+            security: None,
+        },
+    )
+    .expect("shell save preserves non-scalar port");
+    let inbound = &config.file_roots()["/etc/xray/config.json"]["inbounds"][0];
+    assert_eq!(inbound["tag"], "tun-in-renamed");
+    assert_eq!(inbound["port"], "20000-20010");
+    assert_eq!(inbound["settings"]["allowedNetwork"], "tcp,udp");
 }
 
 #[test]

@@ -15,7 +15,7 @@ mod xhttp;
 
 pub use finalmask::{
     FinalMaskLayerDraft, TCP_FINALMASK_TYPES, UDP_FINALMASK_TYPES, finalmask_layers_to_value,
-    parse_finalmask_layers, validate_finalmask_layers,
+    hysteria_salamander_obfs_password, parse_finalmask_layers, validate_finalmask_layers,
 };
 pub use sockopt::{
     ADDRESS_PORT_STRATEGIES, DOMAIN_STRATEGIES, HappyEyeballsDraft, SockoptDraft,

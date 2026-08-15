@@ -48,6 +48,8 @@ pub enum OutboundMutationKind {
     Duplicate,
     /// Rename an outbound's tag (any protocol).
     Rename,
+    /// Replace an outbound's entire JSON object (raw JSON escape hatch, Roadmap §3:125).
+    ReplaceRawJson,
 }
 
 /// Successful outbound mutation payload.
@@ -88,6 +90,11 @@ pub enum OutboundMutationSuccess {
         new_tag: String,
         /// Routing/balancer references still pointing at `old_tag` (not auto-updated).
         stale_references: Vec<String>,
+    },
+    /// Outbound entirely replaced via raw JSON (Roadmap §3:125 escape hatch).
+    RawJson {
+        /// Editable config after the replace.
+        editable: EditableXrayConfig,
     },
 }
 
@@ -445,6 +452,74 @@ where
         },
         Err(error) => OutboundMutationOutcome {
             kind: OutboundMutationKind::Rename,
+            result: Err(error),
+        },
+    }
+}
+
+/// Replaces an outbound's entire JSON object wholesale — any protocol (Roadmap §3:125 raw JSON
+/// escape hatch).
+pub async fn run_replace_outbound_raw_json<B>(
+    backend: &B,
+    profile: &StoredConnectionProfile,
+    secrets: &ConnectionSecrets,
+    remote: &RemoteAdmin,
+    mut editable: EditableXrayConfig,
+    request: crate::xray::ReplaceOutboundRawJsonRequest,
+    validate_hint: RemoteConfigValidateHint,
+) -> OutboundMutationOutcome
+where
+    B: SshBackend,
+    B::Session: Sync,
+{
+    let outcome = match crate::xray::replace_outbound_raw_json(&mut editable, request) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return OutboundMutationOutcome {
+                kind: OutboundMutationKind::ReplaceRawJson,
+                result: Err(error),
+            };
+        }
+    };
+
+    let request_conn = build_connect_request(profile, secrets);
+    info!(
+        target: "app",
+        host = %request_conn.profile.host,
+        path = %outcome.source_file,
+        "replace outbound raw json connect"
+    );
+
+    let session = match backend.connect(&request_conn).await {
+        Ok(s) => s,
+        Err(error) => {
+            return OutboundMutationOutcome {
+                kind: OutboundMutationKind::ReplaceRawJson,
+                result: Err(ConfigModifyError::new(
+                    ConfigModifyErrorKind::ConnectionLost,
+                    sanitize_detail(error.message()),
+                )),
+            };
+        }
+    };
+
+    let write_result = write_modified_file(remote, &session, &outcome, &validate_hint).await;
+
+    if let Err(error) = session.disconnect().await {
+        warn!(
+            target: "app",
+            detail = %sanitize_detail(error.message()),
+            "replace outbound raw json disconnect warning"
+        );
+    }
+
+    match write_result {
+        Ok(()) => OutboundMutationOutcome {
+            kind: OutboundMutationKind::ReplaceRawJson,
+            result: Ok(OutboundMutationSuccess::RawJson { editable }),
+        },
+        Err(error) => OutboundMutationOutcome {
+            kind: OutboundMutationKind::ReplaceRawJson,
             result: Err(error),
         },
     }

@@ -16,8 +16,8 @@ use crate::xray::{
     DuplicateInboundRequest, EditableXrayConfig, InboundGeneral, InboundProtocolDraft, InboundRef,
     InboundSecurityDraft, ModifyConfigOutcome, SniffingSettings, SniffingWriteOutcome,
     UpdateInboundGeneralRequest, UpdateInboundShellRequest, UpdateInboundSniffingRequest,
-    add_inbound, delete_inbound, duplicate_inbound, effective_security, update_inbound_general,
-    update_inbound_shell, update_inbound_sniffing,
+    add_inbound, cert_pin_sha256, delete_inbound, duplicate_inbound, effective_security,
+    update_inbound_general, update_inbound_shell, update_inbound_sniffing,
 };
 
 /// Timeout for remote `xray x25519` keygen.
@@ -103,6 +103,10 @@ pub enum InboundMutationKind {
     GenerateMldsa65,
     /// Generate VLESS decryption/encryption via `xray vlessenc`.
     GenerateVlessEnc,
+    /// Fetch a TLS certificate's SHA-256 pin for Hysteria2 `pinSHA256` (Roadmap §3:121).
+    FetchCertPin,
+    /// Replace an inbound's entire JSON object (raw JSON escape hatch, Roadmap §3:125).
+    ReplaceRawJson,
 }
 
 impl InboundMutationKind {
@@ -116,6 +120,8 @@ impl InboundMutationKind {
             Self::GenerateX25519 => "Generating x25519 key pair...",
             Self::GenerateMldsa65 => "Generating mldsa65 key pair...",
             Self::GenerateVlessEnc => "Generating VLESS encryption...",
+            Self::FetchCertPin => "Fetching certificate pin...",
+            Self::ReplaceRawJson => "Saving raw JSON...",
         }
     }
 }
@@ -167,6 +173,9 @@ pub enum InboundMutationSuccess {
         editable: EditableXrayConfig,
         /// Whether the remote file was rewritten.
         wrote_remote: bool,
+        /// Routing `inboundTag` rules still pointing at the pre-rename tag, when the tag
+        /// changed (Roadmap §3:119). Never blocks the Save; surfaced as a warning only.
+        stale_references: Vec<String>,
     },
     /// Add Inbound completed.
     Add {
@@ -193,6 +202,14 @@ pub enum InboundMutationSuccess {
     Mldsa65(Mldsa65Result),
     /// vlessenc completed for the chosen auth block.
     VlessEnc(VlessEncResult),
+    /// Certificate pin fetch completed (Roadmap §3:121): lowercase-hex SHA-256 of the leaf
+    /// certificate's DER bytes, for Hysteria2 `pinSHA256`.
+    CertPin(String),
+    /// Raw JSON replace completed (Roadmap §3:125 escape hatch).
+    RawJson {
+        /// Updated in-memory config after the replace.
+        editable: EditableXrayConfig,
+    },
 }
 
 /// IB-L1 unified inbound editor session.
@@ -402,6 +419,13 @@ where
     B::Session: Sync,
 {
     let inbound_index = request.inbound_ref.location.inbound_index;
+    let old_tag = editable
+        .sections()
+        .inbounds()
+        .get(inbound_index)
+        .and_then(|inbound| inbound.value().get("tag"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
     let mutate_result = update_inbound_shell(&mut editable, request);
 
     let (outcome, sniff_write) = match mutate_result {
@@ -468,18 +492,45 @@ where
     }
 
     match write_result {
-        Ok(()) => InboundMutationOutcome {
-            kind: InboundMutationKind::Shell,
-            result: Ok(InboundMutationSuccess::Shell {
-                editable,
-                wrote_remote: true,
-            }),
-        },
+        Ok(()) => {
+            let stale_references = inbound_stale_tag_references(&editable, inbound_index, old_tag.as_deref());
+            InboundMutationOutcome {
+                kind: InboundMutationKind::Shell,
+                result: Ok(InboundMutationSuccess::Shell {
+                    editable,
+                    wrote_remote: true,
+                    stale_references,
+                }),
+            }
+        }
         Err(error) => InboundMutationOutcome {
             kind: InboundMutationKind::Shell,
             result: Err(error),
         },
     }
+}
+
+/// Routing `inboundTag` rules still pointing at the pre-Save tag, when the tag changed during a
+/// Shell Save (Roadmap §3:119; v1 — warn only, never blocks). Empty when the tag didn't change,
+/// was absent before, or has no routing references.
+fn inbound_stale_tag_references(
+    editable: &EditableXrayConfig,
+    inbound_index: usize,
+    old_tag: Option<&str>,
+) -> Vec<String> {
+    let Some(old_tag) = old_tag else {
+        return Vec::new();
+    };
+    let new_tag = editable
+        .sections()
+        .inbounds()
+        .get(inbound_index)
+        .and_then(|inbound| inbound.value().get("tag"))
+        .and_then(serde_json::Value::as_str);
+    if new_tag.is_some_and(|new_tag| new_tag == old_tag) {
+        return Vec::new();
+    }
+    crate::xray::inbound_tag_references(editable.sections(), old_tag)
 }
 
 /// Add Inbound: appends a new inbound and writes to remote.
@@ -932,6 +983,187 @@ where
     }
 }
 
+/// Fetches a remote TLS `certificateFile` over SFTP and hashes it into a Hysteria2 `pinSHA256`
+/// fingerprint (Roadmap §3:121). Never logs certificate bytes.
+pub async fn run_fetch_cert_pin<B>(
+    backend: &B,
+    profile: &StoredConnectionProfile,
+    secrets: &ConnectionSecrets,
+    certificate_path: String,
+) -> InboundMutationOutcome
+where
+    B: SshBackend,
+    B::Session: Sync,
+{
+    let path = match RemotePath::new(&certificate_path) {
+        Ok(path) => path,
+        Err(error) => {
+            return InboundMutationOutcome {
+                kind: InboundMutationKind::FetchCertPin,
+                result: Err(ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    sanitize_detail(error.message()),
+                )),
+            };
+        }
+    };
+
+    let request_conn = build_connect_request(profile, secrets);
+    info!(
+        target: "app",
+        host = %request_conn.profile.host,
+        "cert pin fetch connect"
+    );
+
+    let session = match backend.connect(&request_conn).await {
+        Ok(s) => s,
+        Err(error) => {
+            return InboundMutationOutcome {
+                kind: InboundMutationKind::FetchCertPin,
+                result: Err(ConfigModifyError::new(
+                    ConfigModifyErrorKind::ConnectionLost,
+                    sanitize_detail(error.message()),
+                )),
+            };
+        }
+    };
+
+    let read_result = timeout(KEYGEN_TIMEOUT, session.read_file(&path)).await;
+
+    if let Err(error) = session.disconnect().await {
+        warn!(
+            target: "app",
+            detail = %crate::logging::redact::sanitize_detail(error.message()),
+            "cert pin fetch disconnect warning"
+        );
+    }
+
+    let bytes = match read_result {
+        Err(_elapsed) => {
+            return InboundMutationOutcome {
+                kind: InboundMutationKind::FetchCertPin,
+                result: Err(ConfigModifyError::new(
+                    ConfigModifyErrorKind::ConnectionLost,
+                    "certificate fetch timed out after 30 seconds".to_owned(),
+                )),
+            };
+        }
+        Ok(Err(error)) => {
+            return InboundMutationOutcome {
+                kind: InboundMutationKind::FetchCertPin,
+                result: Err(ConfigModifyError::new(
+                    ConfigModifyErrorKind::UploadFailed,
+                    format!(
+                        "Failed to read certificate '{certificate_path}': {}",
+                        sanitize_detail(error.message())
+                    ),
+                )),
+            };
+        }
+        Ok(Ok(bytes)) => bytes,
+    };
+
+    match cert_pin_sha256(&bytes) {
+        Ok(pin) => InboundMutationOutcome {
+            kind: InboundMutationKind::FetchCertPin,
+            result: Ok(InboundMutationSuccess::CertPin(pin)),
+        },
+        Err(detail) => InboundMutationOutcome {
+            kind: InboundMutationKind::FetchCertPin,
+            result: Err(ConfigModifyError::new(
+                ConfigModifyErrorKind::ValidationFailed,
+                detail,
+            )),
+        },
+    }
+}
+
+/// Replaces an inbound's entire JSON object wholesale — any protocol, including unsupported
+/// ones (Roadmap §3:125 raw JSON escape hatch).
+pub async fn run_replace_inbound_raw_json<B>(
+    backend: &B,
+    profile: &StoredConnectionProfile,
+    secrets: &ConnectionSecrets,
+    remote: &RemoteAdmin,
+    mut editable: EditableXrayConfig,
+    request: crate::xray::ReplaceInboundRawJsonRequest,
+    validate_hint: RemoteConfigValidateHint,
+) -> InboundMutationOutcome
+where
+    B: SshBackend,
+    B::Session: Sync,
+{
+    let inbound_index = request.inbound_index;
+    let outcome = match crate::xray::replace_inbound_raw_json(&mut editable, request) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return InboundMutationOutcome {
+                kind: InboundMutationKind::ReplaceRawJson,
+                result: Err(error),
+            };
+        }
+    };
+
+    let request_conn = build_connect_request(profile, secrets);
+    info!(
+        target: "app",
+        host = %request_conn.profile.host,
+        path = %outcome.source_file,
+        "replace inbound raw json connect"
+    );
+
+    let session = match backend.connect(&request_conn).await {
+        Ok(s) => s,
+        Err(error) => {
+            return InboundMutationOutcome {
+                kind: InboundMutationKind::ReplaceRawJson,
+                result: Err(ConfigModifyError::new(
+                    ConfigModifyErrorKind::ConnectionLost,
+                    sanitize_detail(error.message()),
+                )),
+            };
+        }
+    };
+
+    if let Some(inbound) = editable.sections().inbounds().get(inbound_index)
+        && let Err(error) = verify_remote_tls_cert_paths(&session, inbound.value()).await
+    {
+        if let Err(disconnect_error) = session.disconnect().await {
+            warn!(
+                target: "app",
+                detail = %crate::logging::redact::sanitize_detail(disconnect_error.message()),
+                "replace inbound raw json disconnect warning"
+            );
+        }
+        return InboundMutationOutcome {
+            kind: InboundMutationKind::ReplaceRawJson,
+            result: Err(error),
+        };
+    }
+
+    let write_result =
+        write_modified_file(remote, &session, &outcome, &validate_hint).await;
+
+    if let Err(error) = session.disconnect().await {
+        warn!(
+            target: "app",
+            detail = %crate::logging::redact::sanitize_detail(error.message()),
+            "replace inbound raw json disconnect warning"
+        );
+    }
+
+    match write_result {
+        Ok(()) => InboundMutationOutcome {
+            kind: InboundMutationKind::ReplaceRawJson,
+            result: Ok(InboundMutationSuccess::RawJson { editable }),
+        },
+        Err(error) => InboundMutationOutcome {
+            kind: InboundMutationKind::ReplaceRawJson,
+            result: Err(error),
+        },
+    }
+}
+
 // ─── Shared SSH helpers ───────────────────────────────────────────────────────
 
 /// After local G12, probes non-empty `certificateFile` / `keyFile` via SFTP.
@@ -1032,4 +1264,53 @@ async fn write_modified_file<S: SshSession + Sync>(
 
 fn sanitize_detail(message: &str) -> String {
     crate::logging::redact::sanitize_detail(message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::xray::XrayConfigParser;
+
+    fn editable_from(json: &str) -> EditableXrayConfig {
+        let parser = XrayConfigParser::new();
+        let outcome = parser.parse_single_file("/etc/xray/config.json", json);
+        assert!(outcome.is_success(), "{:?}", outcome.errors());
+        let root: serde_json::Value = serde_json::from_str(json).expect("json");
+        EditableXrayConfig::from_single_file("/etc/xray/config.json", root, outcome.into_sections())
+    }
+
+    #[test]
+    fn stale_tag_references_empty_when_tag_unchanged() {
+        let editable = editable_from(
+            r#"{
+                "inbounds":[{"tag":"in-1","protocol":"vless","port":443}],
+                "routing":{"rules":[{"inboundTag":["in-1"],"outboundTag":"direct"}]}
+            }"#,
+        );
+        assert!(inbound_stale_tag_references(&editable, 0, Some("in-1")).is_empty());
+    }
+
+    #[test]
+    fn stale_tag_references_empty_when_old_tag_had_no_refs() {
+        let editable = editable_from(
+            r#"{
+                "inbounds":[{"tag":"in-2","protocol":"vless","port":443}],
+                "routing":{"rules":[{"inboundTag":["other"],"outboundTag":"direct"}]}
+            }"#,
+        );
+        assert!(inbound_stale_tag_references(&editable, 0, Some("in-1")).is_empty());
+    }
+
+    #[test]
+    fn stale_tag_references_lists_rules_after_rename() {
+        let editable = editable_from(
+            r#"{
+                "inbounds":[{"tag":"in-2","protocol":"vless","port":443}],
+                "routing":{"rules":[{"inboundTag":["in-1"],"outboundTag":"direct"}]}
+            }"#,
+        );
+        let refs = inbound_stale_tag_references(&editable, 0, Some("in-1"));
+        assert_eq!(refs.len(), 1);
+        assert!(refs[0].contains("inboundTag"));
+    }
 }

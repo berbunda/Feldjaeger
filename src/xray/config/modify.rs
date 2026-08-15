@@ -306,6 +306,18 @@ pub struct DuplicateInboundRequest {
     pub inbound_index: usize,
 }
 
+/// Request to replace an inbound's entire JSON object wholesale (Roadmap §3:125 raw JSON
+/// escape hatch — any protocol, including ones with no structured editor).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceInboundRawJsonRequest {
+    /// Merged inbound index.
+    pub inbound_index: usize,
+    /// Fingerprint from edit intent; when `Some`, must match before replace.
+    pub expected_fingerprint: Option<String>,
+    /// The user-edited JSON, parsed. Must be a JSON object.
+    pub new_value: Value,
+}
+
 /// Result of a successful in-memory modification before remote write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModifyConfigOutcome {
@@ -905,6 +917,35 @@ pub fn delete_inbound(
     finish_modification(config, &location.source_file, &original_by_file)
 }
 
+/// Replaces an inbound's entire JSON object wholesale (Roadmap §3:125 raw JSON escape hatch).
+///
+/// Allowed for **any** protocol, including ones with no structured editor (Shadowsocks, VMess,
+/// HTTP, Socks, WireGuard, TUN, legacy `dokodemo-door`, …) — the structured Shell Save remains
+/// the primary/safer path for supported protocols; this exists for fields Feldjäger doesn't
+/// model, and for protocols it doesn't model at all.
+pub fn replace_inbound_raw_json(
+    config: &mut EditableXrayConfig,
+    request: ReplaceInboundRawJsonRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    let _ = config.locate_inbound(request.inbound_index)?;
+    if let Some(expected) = &request.expected_fingerprint {
+        let actual = config.inbound_object_fingerprint(request.inbound_index)?;
+        if actual != *expected {
+            return Err(ConfigModifyError::new(
+                ConfigModifyErrorKind::FingerprintMismatch,
+                String::new(),
+            ));
+        }
+    }
+
+    let new_tag = request.new_value.get("tag").and_then(Value::as_str);
+    validate_no_duplicate_inbound_tag(config, request.inbound_index, new_tag)?;
+
+    let original_by_file = snapshot_all_roots(config)?;
+    let location = config.replace_inbound_value(request.inbound_index, request.new_value)?;
+    finish_modification(config, &location.source_file, &original_by_file)
+}
+
 /// Request to delete an outbound by merged index (GUI Delete).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeleteOutboundRequest {
@@ -1286,6 +1327,44 @@ pub fn remove_outbound(
 
     let original_by_file = snapshot_all_roots(config)?;
     let location = config.remove_outbound_at(index)?;
+    finish_outbound_modification(config, &location.source_file, &original_by_file)
+}
+
+/// Request to replace an outbound's entire JSON object wholesale (Roadmap §3:125 raw JSON
+/// escape hatch — any protocol, including ones with no structured editor).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceOutboundRawJsonRequest {
+    /// Merged outbound index.
+    pub outbound_index: usize,
+    /// Fingerprint from edit intent; when `Some`, must match before replace.
+    pub expected_fingerprint: Option<String>,
+    /// The user-edited JSON, parsed. Must be a JSON object with a unique `tag`.
+    pub new_value: Value,
+}
+
+/// Replaces an outbound's entire JSON object wholesale (Roadmap §3:125 raw JSON escape hatch).
+///
+/// Allowed for **any** protocol — Outbound Shell (Freedom/Blackhole/DNS) remains the
+/// primary/safer path for supported protocols; this exists for fields Feldjäger doesn't model,
+/// and for protocols it doesn't model at all (VLESS/Trojan/VMess/Shadowsocks/… outbounds).
+/// Tag-uniqueness is enforced by `replace_outbound_value` itself.
+pub fn replace_outbound_raw_json(
+    config: &mut EditableXrayConfig,
+    request: ReplaceOutboundRawJsonRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    let _ = config.locate_outbound(request.outbound_index)?;
+    if let Some(expected) = &request.expected_fingerprint {
+        let actual = config.outbound_object_fingerprint(request.outbound_index)?;
+        if actual != *expected {
+            return Err(ConfigModifyError::new(
+                ConfigModifyErrorKind::FingerprintMismatch,
+                String::new(),
+            ));
+        }
+    }
+
+    let original_by_file = snapshot_all_roots(config)?;
+    let location = config.replace_outbound_value(request.outbound_index, request.new_value)?;
     finish_outbound_modification(config, &location.source_file, &original_by_file)
 }
 

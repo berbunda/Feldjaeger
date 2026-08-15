@@ -436,6 +436,63 @@ impl EditableXrayConfig {
         Ok((location, result))
     }
 
+    /// Replaces the full inbound object at `inbound_index` wholesale, then syncs it into the
+    /// file root — any protocol, including unsupported ones (Roadmap §3:125 raw JSON escape
+    /// hatch). Callers are responsible for fingerprint verification and any tag-uniqueness
+    /// check before calling this (see `modify::replace_inbound_raw_json`).
+    pub fn replace_inbound_value(
+        &mut self,
+        inbound_index: usize,
+        new_value: Value,
+    ) -> ConfigModifyResult<InboundLocation> {
+        if !new_value.is_object() {
+            return Err(ConfigModifyError::new(
+                ConfigModifyErrorKind::ValidationFailed,
+                "inbound must be a JSON object".to_owned(),
+            ));
+        }
+
+        let location = self.locate_inbound(inbound_index)?;
+
+        {
+            let inbound = self
+                .sections
+                .inbounds_mut()
+                .get_mut(location.inbound_index)
+                .ok_or_else(|| {
+                    ConfigModifyError::new(ConfigModifyErrorKind::InboundNotFound, String::new())
+                })?;
+            *inbound.value_mut() = new_value;
+        }
+
+        let merged_inbound = self.sections.inbounds()[location.inbound_index]
+            .value()
+            .clone();
+
+        {
+            let root = self
+                .file_roots
+                .get_mut(&location.source_file)
+                .ok_or_else(|| {
+                    ConfigModifyError::new(
+                        ConfigModifyErrorKind::InboundNotFound,
+                        "source file root missing".to_owned(),
+                    )
+                })?;
+            let file_inbound = root
+                .as_object_mut()
+                .and_then(|object| object.get_mut("inbounds"))
+                .and_then(Value::as_array_mut)
+                .and_then(|inbounds| inbounds.get_mut(location.within_file_index))
+                .ok_or_else(|| {
+                    ConfigModifyError::new(ConfigModifyErrorKind::InboundNotFound, String::new())
+                })?;
+            *file_inbound = merged_inbound;
+        }
+
+        Ok(location)
+    }
+
     /// Ensures the inbound supports shell edit (Tier‑2), independent of client mutate lakes.
     ///
     /// Does **not** check AmbiguousClientsArray or [`InboundClientProtocol::mutate_enabled`].

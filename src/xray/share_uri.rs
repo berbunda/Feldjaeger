@@ -42,12 +42,15 @@ pub enum ShareTransport {
 pub enum ShareSecurity {
     /// `security=none`.
     None,
-    /// `security=tls` (+ optional SNI / allowInsecure).
+    /// `security=tls` (+ optional SNI / allowInsecure / ALPN).
     Tls {
         /// Optional SNI (`sni`).
         server_name: Option<String>,
         /// Optional `allowInsecure` / `insecure`.
         insecure: bool,
+        /// ALPN protocol list from `tlsSettings.alpn` (e.g. `h2`, `http/1.1`); empty omits the
+        /// query (Roadmap §3:121: richer VLESS/Trojan query parity).
+        alpn: Vec<String>,
     },
     /// `security=reality` (+ Reality client params).
     Reality {
@@ -101,6 +104,16 @@ pub struct ShareUriRequest {
     pub security: ShareSecurity,
     /// Stream type.
     pub transport: ShareTransport,
+    /// Hysteria2 "port hopping" syntax (`123,5000-6000`) when the inbound `port` is a
+    /// range/array; overrides `port` in the host:port segment of `hy2://` links only (Roadmap
+    /// §3:121). Ignored for VLESS/Trojan.
+    pub port_hop: Option<String>,
+    /// `salamander` FinalMask UDP layer password, surfaced as hy2 `obfs`/`obfs-password`
+    /// (Roadmap §3:121). Ignored for VLESS/Trojan.
+    pub obfs_salamander_password: Option<String>,
+    /// SHA-256 pin of the leaf TLS certificate, surfaced as hy2 `pinSHA256` (Roadmap §3:121).
+    /// Ignored for VLESS/Trojan.
+    pub pin_sha256: Option<String>,
 }
 
 impl fmt::Debug for ShareUriRequest {
@@ -227,6 +240,7 @@ pub fn build_share_uri(request: &ShareUriRequest) -> Result<String, ShareUriErro
         ShareSecurity::Tls {
             server_name,
             insecure,
+            alpn,
         } => {
             query.push(("security".to_owned(), "tls".to_owned()));
             if let Some(sni) = server_name {
@@ -237,6 +251,10 @@ pub fn build_share_uri(request: &ShareUriRequest) -> Result<String, ShareUriErro
             }
             if *insecure {
                 query.push(("allowInsecure".to_owned(), "1".to_owned()));
+            }
+            let alpn_list = joined_alpn(alpn);
+            if let Some(alpn_list) = alpn_list {
+                query.push(("alpn".to_owned(), alpn_list));
             }
         }
         ShareSecurity::Reality {
@@ -364,17 +382,33 @@ pub fn build_share_uri(request: &ShareUriRequest) -> Result<String, ShareUriErro
 fn build_hy2_uri(request: &ShareUriRequest, auth: &str) -> Result<String, ShareUriError> {
     let address = request.address.trim();
     let host = format_host(address);
+    let port_segment = request
+        .port_hop
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| request.port.to_string());
     let mut uri = format!(
-        "hy2://{user}@{host}:{port}",
+        "hy2://{user}@{host}:{port_segment}",
         user = pct_encode(auth),
-        port = request.port
     );
 
     let mut query: Vec<(String, String)> = Vec::new();
+    if let Some(password) = request
+        .obfs_salamander_password
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        query.push(("obfs".to_owned(), "salamander".to_owned()));
+        query.push(("obfs-password".to_owned(), password.to_owned()));
+    }
     match &request.security {
         ShareSecurity::Tls {
             server_name,
             insecure,
+            ..
         } => {
             if let Some(sni) = server_name {
                 let sni = sni.trim();
@@ -389,6 +423,14 @@ fn build_hy2_uri(request: &ShareUriRequest, auth: &str) -> Result<String, ShareU
         ShareSecurity::None | ShareSecurity::Reality { .. } => {
             // Minimal hy2 assumes TLS; Reality is invalid for Hy.
         }
+    }
+    if let Some(pin) = request
+        .pin_sha256
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        query.push(("pinSHA256".to_owned(), pin.to_owned()));
     }
 
     if !query.is_empty() {
@@ -412,6 +454,20 @@ fn build_hy2_uri(request: &ShareUriRequest, auth: &str) -> Result<String, ShareU
     }
 
     Ok(uri)
+}
+
+/// Joins non-empty, trimmed ALPN entries with `,` for the share query `alpn=` value.
+fn joined_alpn(alpn: &[String]) -> Option<String> {
+    let entries: Vec<&str> = alpn
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if entries.is_empty() {
+        None
+    } else {
+        Some(entries.join(","))
+    }
 }
 
 fn format_host(address: &str) -> String {
@@ -471,6 +527,30 @@ mod tests {
                 mldsa65_verify: None,
             },
             transport: ShareTransport::Tcp,
+            port_hop: None,
+            obfs_salamander_password: None,
+            pin_sha256: None,
+        }
+    }
+
+    fn hy2_base() -> ShareUriRequest {
+        ShareUriRequest {
+            protocol: ShareProtocol::Hysteria,
+            user_id: "secret-auth".to_owned(),
+            address: "203.0.113.10".to_owned(),
+            port: 443,
+            remark: Some("hy".to_owned()),
+            flow: None,
+            encryption: "none".to_owned(),
+            security: ShareSecurity::Tls {
+                server_name: Some("www.example.com".to_owned()),
+                insecure: true,
+                alpn: Vec::new(),
+            },
+            transport: ShareTransport::Tcp,
+            port_hop: None,
+            obfs_salamander_password: None,
+            pin_sha256: None,
         }
     }
 
@@ -526,6 +606,9 @@ mod tests {
                 mldsa65_verify: None,
             },
             transport: ShareTransport::Tcp,
+            port_hop: None,
+            obfs_salamander_password: None,
+            pin_sha256: None,
         };
         let uri = build_share_uri(&req).expect("uri");
         assert!(uri.starts_with("trojan://p%40ss%20word@example.com:8443?"));
@@ -550,6 +633,9 @@ mod tests {
                 mode: Some("auto".to_owned()),
                 extra: Some(r#"{"xPaddingBytes":"100-1000","noSSEHeader":false}"#.to_owned()),
             },
+            port_hop: None,
+            obfs_salamander_password: None,
+            pin_sha256: None,
         };
         let uri = build_share_uri(&req).expect("uri");
         assert!(uri.contains("security=none"));
@@ -574,17 +660,22 @@ mod tests {
             security: ShareSecurity::Tls {
                 server_name: Some("sni.example".to_owned()),
                 insecure: false,
+                alpn: vec!["h2".to_owned(), "http/1.1".to_owned()],
             },
             transport: ShareTransport::Ws {
                 path: "/ray?ed=2048".to_owned(),
                 host: Some("example.com".to_owned()),
             },
+            port_hop: None,
+            obfs_salamander_password: None,
+            pin_sha256: None,
         };
         let uri = build_share_uri(&req).expect("uri");
         assert!(uri.contains("security=tls"));
         assert!(uri.contains("type=ws"));
         assert!(uri.contains("path=%2Fray%3Fed%3D2048") || uri.contains("path=/ray?ed=2048"));
         assert!(uri.contains("host=example.com"));
+        assert!(uri.contains("alpn=h2%2Chttp%2F1.1") || uri.contains("alpn=h2,http/1.1"));
     }
 
     #[test]
@@ -602,6 +693,9 @@ mod tests {
                 path: "/".to_owned(),
                 host: None,
             },
+            port_hop: None,
+            obfs_salamander_password: None,
+            pin_sha256: None,
         };
         let err = build_share_uri(&req).unwrap_err();
         assert!(err.detail().contains("TLS"));
@@ -620,8 +714,12 @@ mod tests {
             security: ShareSecurity::Tls {
                 server_name: Some("sni.example".to_owned()),
                 insecure: false,
+                alpn: Vec::new(),
             },
             transport: ShareTransport::Kcp,
+            port_hop: None,
+            obfs_salamander_password: None,
+            pin_sha256: None,
         };
         let uri = build_share_uri(&req).expect("uri");
         assert!(uri.contains("security=tls"));
@@ -640,6 +738,9 @@ mod tests {
             encryption: "none".to_owned(),
             security: ShareSecurity::None,
             transport: ShareTransport::Kcp,
+            port_hop: None,
+            obfs_salamander_password: None,
+            pin_sha256: None,
         };
         let err = build_share_uri(&req).unwrap_err();
         assert!(err.detail().contains("mKCP"));
@@ -673,25 +774,48 @@ mod tests {
 
     #[test]
     fn builds_hy2_minimal() {
-        let uri = build_share_uri(&ShareUriRequest {
-            protocol: ShareProtocol::Hysteria,
-            user_id: "secret-auth".to_owned(),
-            address: "203.0.113.10".to_owned(),
-            port: 443,
-            remark: Some("hy".to_owned()),
-            flow: None,
-            encryption: "none".to_owned(),
-            security: ShareSecurity::Tls {
-                server_name: Some("www.example.com".to_owned()),
-                insecure: true,
-            },
-            transport: ShareTransport::Tcp,
-        })
-        .expect("hy2");
+        let uri = build_share_uri(&hy2_base()).expect("hy2");
         assert!(uri.starts_with("hy2://secret-auth@203.0.113.10:443?"));
         assert!(uri.contains("sni=www.example.com"));
         assert!(uri.contains("insecure=1"));
         assert!(uri.ends_with("#hy"));
+    }
+
+    #[test]
+    fn builds_hy2_with_port_hop() {
+        let mut req = hy2_base();
+        req.port_hop = Some("443,5000-6000".to_owned());
+        let uri = build_share_uri(&req).expect("hy2 hop");
+        assert!(uri.starts_with("hy2://secret-auth@203.0.113.10:443,5000-6000?"));
+    }
+
+    #[test]
+    fn builds_hy2_with_salamander_obfs() {
+        let mut req = hy2_base();
+        req.obfs_salamander_password = Some("cat".to_owned());
+        let uri = build_share_uri(&req).expect("hy2 obfs");
+        assert!(uri.contains("obfs=salamander"));
+        assert!(uri.contains("obfs-password=cat"));
+    }
+
+    #[test]
+    fn builds_hy2_with_pin_sha256() {
+        let mut req = hy2_base();
+        req.pin_sha256 = Some("deadbeef".to_owned());
+        let uri = build_share_uri(&req).expect("hy2 pin");
+        assert!(uri.contains("pinSHA256=deadbeef"));
+    }
+
+    #[test]
+    fn builds_hy2_ignores_blank_optional_fields() {
+        let mut req = hy2_base();
+        req.port_hop = Some("   ".to_owned());
+        req.obfs_salamander_password = Some(String::new());
+        req.pin_sha256 = Some("  ".to_owned());
+        let uri = build_share_uri(&req).expect("hy2");
+        assert!(uri.starts_with("hy2://secret-auth@203.0.113.10:443?"));
+        assert!(!uri.contains("obfs="));
+        assert!(!uri.contains("pinSHA256="));
     }
 
     #[test]
@@ -707,12 +831,17 @@ mod tests {
             security: ShareSecurity::Tls {
                 server_name: Some("sni.example".to_owned()),
                 insecure: false,
+                alpn: Vec::new(),
             },
             transport: ShareTransport::Tcp,
+            port_hop: None,
+            obfs_salamander_password: None,
+            pin_sha256: None,
         })
         .expect("tls");
         assert!(uri.contains("security=tls"));
         assert!(uri.contains("sni=sni.example"));
         assert!(!uri.contains("allowInsecure"));
+        assert!(!uri.contains("alpn="));
     }
 }

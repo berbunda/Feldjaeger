@@ -13,7 +13,9 @@ use crate::app::{
     hysteria_row_display, selected_users_protocol,
     trojan_row_display, user_row_display,
 };
-use crate::xray::{HysteriaClientSummary, UserSummary};
+use crate::xray::{
+    AddInboundClientRequest, HysteriaClientSummary, UpdateInboundClientRequest, UserSummary,
+};
 
 /// Allowed VLESS `flow` values in Add/Edit dialogs.
 ///
@@ -71,6 +73,8 @@ enum ClientDialogDraft {
         flow: VlessFlowChoice,
         level: u32,
         error: Option<String>,
+        /// Redacted JSON diff from the last "Preview changes" click (Roadmap §3:120).
+        diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
     },
     EditVless {
         inbound_index: usize,
@@ -83,6 +87,8 @@ enum ClientDialogDraft {
         level: u32,
         expected_fingerprint: String,
         error: Option<String>,
+        /// Redacted JSON diff from the last "Preview changes" click (Roadmap §3:120).
+        diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
     },
     DeleteVless {
         inbound_index: usize,
@@ -99,6 +105,8 @@ enum ClientDialogDraft {
         password: String,
         level: u32,
         error: Option<String>,
+        /// Redacted JSON diff from the last "Preview changes" click (Roadmap §3:120).
+        diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
     },
     /// Trojan: Edit client (IB-L1).
     EditTrojan {
@@ -110,6 +118,8 @@ enum ClientDialogDraft {
         level: u32,
         expected_fingerprint: String,
         error: Option<String>,
+        /// Redacted JSON diff from the last "Preview changes" click (Roadmap §3:120).
+        diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
     },
     /// Trojan: Delete client (IB-L1).
     DeleteTrojan {
@@ -126,6 +136,8 @@ enum ClientDialogDraft {
         auth: String,
         level: u32,
         error: Option<String>,
+        /// Redacted JSON diff from the last "Preview changes" click (Roadmap §3:120).
+        diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
     },
     /// Hysteria: Edit user (Wave A).
     EditHysteria {
@@ -136,6 +148,8 @@ enum ClientDialogDraft {
         level: u32,
         expected_fingerprint: String,
         error: Option<String>,
+        /// Redacted JSON diff from the last "Preview changes" click (Roadmap §3:120).
+        diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
     },
     /// Hysteria: Delete user (Wave A).
     DeleteHysteria {
@@ -530,12 +544,18 @@ fn show_trojan_context_menu(
         match service.build_client_share_uri(row.inbound_index, row.client_index) {
             Ok(uri) => {
                 if ui.button("Copy share URI").clicked() {
-                    ui.ctx().copy_text(uri);
+                    ui.ctx().copy_text(uri.clone());
+                    ui.close();
+                }
+                if ui.button("Show QR code").clicked() {
+                    open_qr_dialog(ui, uri);
                     ui.close();
                 }
             }
             Err(reason) => {
                 ui.add_enabled(false, egui::Button::new("Copy share URI"))
+                    .on_disabled_hover_text(reason.clone());
+                ui.add_enabled(false, egui::Button::new("Show QR code"))
                     .on_disabled_hover_text(reason);
             }
         }
@@ -646,12 +666,18 @@ fn show_hysteria_context_menu(
         match service.build_client_share_uri(row.inbound_index, row.client_index) {
             Ok(uri) => {
                 if ui.button("Copy share URI").clicked() {
-                    ui.ctx().copy_text(uri);
+                    ui.ctx().copy_text(uri.clone());
+                    ui.close();
+                }
+                if ui.button("Show QR code").clicked() {
+                    open_qr_dialog(ui, uri);
                     ui.close();
                 }
             }
             Err(reason) => {
                 ui.add_enabled(false, egui::Button::new("Copy share URI"))
+                    .on_disabled_hover_text(reason.clone());
+                ui.add_enabled(false, egui::Button::new("Show QR code"))
                     .on_disabled_hover_text(reason);
             }
         }
@@ -790,12 +816,18 @@ fn show_user_context_menu(
         match service.build_client_share_uri(row.inbound_index, row.client_index) {
             Ok(uri) => {
                 if ui.button("Copy share URI").clicked() {
-                    ui.ctx().copy_text(uri);
+                    ui.ctx().copy_text(uri.clone());
+                    ui.close();
+                }
+                if ui.button("Show QR code").clicked() {
+                    open_qr_dialog(ui, uri);
                     ui.close();
                 }
             }
             Err(reason) => {
                 ui.add_enabled(false, egui::Button::new("Copy share URI"))
+                    .on_disabled_hover_text(reason.clone());
+                ui.add_enabled(false, egui::Button::new("Show QR code"))
                     .on_disabled_hover_text(reason);
             }
         }
@@ -817,10 +849,17 @@ fn dialog_id() -> egui::Id {
     egui::Id::new("inbound_users_client_dialog")
 }
 
+/// Renders a dialog draft's stored "Preview changes" diff, if any (Roadmap §3:120).
+fn show_user_diff_preview(ui: &mut Ui, entries: &Option<Vec<crate::xray::JsonDiffEntry>>) {
+    if let Some(entries) = entries {
+        super::json_diff_preview(ui, entries);
+    }
+}
+
 fn show_add_trojan_dialog(ui: &mut Ui, service: &mut ApplicationService) {
     let busy = service.is_user_mutation_busy();
 
-    let (inbound_index, email, password, level, error) =
+    let (inbound_index, email, password, level, error, diff_preview) =
         with_dialog_draft(ui, |draft| match draft {
             ClientDialogDraft::AddTrojan {
                 inbound_index,
@@ -828,12 +867,14 @@ fn show_add_trojan_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                 password,
                 level,
                 error,
+                diff_preview,
             } => (
                 *inbound_index,
                 email.clone(),
                 password.clone(),
                 *level,
                 error.clone(),
+                diff_preview.clone(),
             ),
             _ => unreachable!(),
         });
@@ -890,7 +931,7 @@ fn show_add_trojan_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         let result = service.start_add_trojan_client(
                             inbound_index,
                             email.clone(),
-                            SecretString::new(password),
+                            SecretString::new(password.clone()),
                             level,
                         );
                         if let Err(msg) = result {
@@ -904,10 +945,31 @@ fn show_add_trojan_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         }
                     }
                 }
+                if ui.button("Preview changes").clicked() {
+                    let request = AddInboundClientRequest::Trojan {
+                        inbound_index,
+                        email: email.clone(),
+                        password: SecretString::new(password.clone()),
+                        level,
+                    };
+                    match service.preview_add_user_diff(request) {
+                        Ok(entries) => with_dialog_draft(ui, |d| {
+                            if let ClientDialogDraft::AddTrojan { diff_preview, .. } = d {
+                                *diff_preview = Some(entries);
+                            }
+                        }),
+                        Err(msg) => with_dialog_draft(ui, |d| {
+                            if let ClientDialogDraft::AddTrojan { error, .. } = d {
+                                *error = Some(msg);
+                            }
+                        }),
+                    }
+                }
                 if ui.button("Cancel").clicked() {
                     with_dialog_draft(ui, |d| *d = ClientDialogDraft::None);
                 }
             });
+            show_user_diff_preview(ui, &diff_preview);
         });
 
     if !open {
@@ -918,27 +980,37 @@ fn show_add_trojan_dialog(ui: &mut Ui, service: &mut ApplicationService) {
 fn show_edit_trojan_dialog(ui: &mut Ui, service: &mut ApplicationService) {
     let busy = service.is_user_mutation_busy();
 
-    let (inbound_index, client_index, email, password_draft, level, expected_fingerprint, error) =
-        with_dialog_draft(ui, |draft| match draft {
-            ClientDialogDraft::EditTrojan {
-                inbound_index,
-                client_index,
-                email,
-                password_draft,
-                level,
-                expected_fingerprint,
-                error,
-            } => (
-                *inbound_index,
-                *client_index,
-                email.clone(),
-                password_draft.clone(),
-                *level,
-                expected_fingerprint.clone(),
-                error.clone(),
-            ),
-            _ => unreachable!(),
-        });
+    let (
+        inbound_index,
+        client_index,
+        email,
+        password_draft,
+        level,
+        expected_fingerprint,
+        error,
+        diff_preview,
+    ) = with_dialog_draft(ui, |draft| match draft {
+        ClientDialogDraft::EditTrojan {
+            inbound_index,
+            client_index,
+            email,
+            password_draft,
+            level,
+            expected_fingerprint,
+            error,
+            diff_preview,
+        } => (
+            *inbound_index,
+            *client_index,
+            email.clone(),
+            password_draft.clone(),
+            *level,
+            expected_fingerprint.clone(),
+            error.clone(),
+            diff_preview.clone(),
+        ),
+        _ => unreachable!(),
+    });
 
     let mut open = true;
     egui::Window::new("Edit Trojan Client")
@@ -987,7 +1059,7 @@ fn show_edit_trojan_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                     let secret_draft = if password_draft.is_empty() {
                         SecretFieldDraft::Preserve
                     } else {
-                        SecretFieldDraft::Replace(SecretString::new(password_draft))
+                        SecretFieldDraft::Replace(SecretString::new(password_draft.clone()))
                     };
                     let result = service.start_update_trojan_client(
                         inbound_index,
@@ -995,7 +1067,7 @@ fn show_edit_trojan_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         email.clone(),
                         secret_draft,
                         level,
-                        Some(expected_fingerprint),
+                        Some(expected_fingerprint.clone()),
                     );
                     if let Err(msg) = result {
                         with_dialog_draft(ui, |d| {
@@ -1007,10 +1079,38 @@ fn show_edit_trojan_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         with_dialog_draft(ui, |d| *d = ClientDialogDraft::None);
                     }
                 }
+                if ui.button("Preview changes").clicked() {
+                    let secret_draft = if password_draft.is_empty() {
+                        SecretFieldDraft::Preserve
+                    } else {
+                        SecretFieldDraft::Replace(SecretString::new(password_draft.clone()))
+                    };
+                    let request = UpdateInboundClientRequest::Trojan {
+                        inbound_index,
+                        client_index,
+                        email: email.clone(),
+                        password: secret_draft,
+                        level,
+                        expected_fingerprint: Some(expected_fingerprint.clone()),
+                    };
+                    match service.preview_update_user_diff(request) {
+                        Ok(entries) => with_dialog_draft(ui, |d| {
+                            if let ClientDialogDraft::EditTrojan { diff_preview, .. } = d {
+                                *diff_preview = Some(entries);
+                            }
+                        }),
+                        Err(msg) => with_dialog_draft(ui, |d| {
+                            if let ClientDialogDraft::EditTrojan { error, .. } = d {
+                                *error = Some(msg);
+                            }
+                        }),
+                    }
+                }
                 if ui.button("Cancel").clicked() {
                     with_dialog_draft(ui, |d| *d = ClientDialogDraft::None);
                 }
             });
+            show_user_diff_preview(ui, &diff_preview);
         });
 
     if !open {
@@ -1088,7 +1188,7 @@ fn show_delete_trojan_dialog(ui: &mut Ui, service: &mut ApplicationService) {
 fn show_add_hysteria_dialog(ui: &mut Ui, service: &mut ApplicationService) {
     let busy = service.is_user_mutation_busy();
 
-    let (inbound_index, email, auth, level, error) =
+    let (inbound_index, email, auth, level, error, diff_preview) =
         with_dialog_draft(ui, |draft| match draft {
             ClientDialogDraft::AddHysteria {
                 inbound_index,
@@ -1096,12 +1196,14 @@ fn show_add_hysteria_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                 auth,
                 level,
                 error,
+                diff_preview,
             } => (
                 *inbound_index,
                 email.clone(),
                 auth.clone(),
                 *level,
                 error.clone(),
+                diff_preview.clone(),
             ),
             _ => unreachable!(),
         });
@@ -1167,7 +1269,7 @@ fn show_add_hysteria_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         let result = service.start_add_hysteria_client(
                             inbound_index,
                             email.clone(),
-                            SecretString::new(auth),
+                            SecretString::new(auth.clone()),
                             level,
                         );
                         if let Err(msg) = result {
@@ -1181,10 +1283,31 @@ fn show_add_hysteria_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         }
                     }
                 }
+                if ui.button("Preview changes").clicked() {
+                    let request = AddInboundClientRequest::Hysteria {
+                        inbound_index,
+                        email: email.clone(),
+                        auth: SecretString::new(auth.clone()),
+                        level,
+                    };
+                    match service.preview_add_user_diff(request) {
+                        Ok(entries) => with_dialog_draft(ui, |d| {
+                            if let ClientDialogDraft::AddHysteria { diff_preview, .. } = d {
+                                *diff_preview = Some(entries);
+                            }
+                        }),
+                        Err(msg) => with_dialog_draft(ui, |d| {
+                            if let ClientDialogDraft::AddHysteria { error, .. } = d {
+                                *error = Some(msg);
+                            }
+                        }),
+                    }
+                }
                 if ui.button("Cancel").clicked() {
                     with_dialog_draft(ui, |d| *d = ClientDialogDraft::None);
                 }
             });
+            show_user_diff_preview(ui, &diff_preview);
         });
 
     if !open {
@@ -1195,27 +1318,37 @@ fn show_add_hysteria_dialog(ui: &mut Ui, service: &mut ApplicationService) {
 fn show_edit_hysteria_dialog(ui: &mut Ui, service: &mut ApplicationService) {
     let busy = service.is_user_mutation_busy();
 
-    let (inbound_index, client_index, email, auth_draft, level, expected_fingerprint, error) =
-        with_dialog_draft(ui, |draft| match draft {
-            ClientDialogDraft::EditHysteria {
-                inbound_index,
-                client_index,
-                email,
-                auth_draft,
-                level,
-                expected_fingerprint,
-                error,
-            } => (
-                *inbound_index,
-                *client_index,
-                email.clone(),
-                auth_draft.clone(),
-                *level,
-                expected_fingerprint.clone(),
-                error.clone(),
-            ),
-            _ => unreachable!(),
-        });
+    let (
+        inbound_index,
+        client_index,
+        email,
+        auth_draft,
+        level,
+        expected_fingerprint,
+        error,
+        diff_preview,
+    ) = with_dialog_draft(ui, |draft| match draft {
+        ClientDialogDraft::EditHysteria {
+            inbound_index,
+            client_index,
+            email,
+            auth_draft,
+            level,
+            expected_fingerprint,
+            error,
+            diff_preview,
+        } => (
+            *inbound_index,
+            *client_index,
+            email.clone(),
+            auth_draft.clone(),
+            *level,
+            expected_fingerprint.clone(),
+            error.clone(),
+            diff_preview.clone(),
+        ),
+        _ => unreachable!(),
+    });
 
     let mut open = true;
     egui::Window::new("Edit Hysteria User")
@@ -1277,7 +1410,7 @@ fn show_edit_hysteria_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                     let secret_draft = if auth_draft.is_empty() {
                         SecretFieldDraft::Preserve
                     } else {
-                        SecretFieldDraft::Replace(SecretString::new(auth_draft))
+                        SecretFieldDraft::Replace(SecretString::new(auth_draft.clone()))
                     };
                     let result = service.start_update_hysteria_client(
                         inbound_index,
@@ -1285,7 +1418,7 @@ fn show_edit_hysteria_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         email.clone(),
                         secret_draft,
                         level,
-                        Some(expected_fingerprint),
+                        Some(expected_fingerprint.clone()),
                     );
                     if let Err(msg) = result {
                         with_dialog_draft(ui, |d| {
@@ -1297,10 +1430,38 @@ fn show_edit_hysteria_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         with_dialog_draft(ui, |d| *d = ClientDialogDraft::None);
                     }
                 }
+                if ui.button("Preview changes").clicked() {
+                    let secret_draft = if auth_draft.is_empty() {
+                        SecretFieldDraft::Preserve
+                    } else {
+                        SecretFieldDraft::Replace(SecretString::new(auth_draft.clone()))
+                    };
+                    let request = UpdateInboundClientRequest::Hysteria {
+                        inbound_index,
+                        client_index,
+                        email: email.clone(),
+                        auth: secret_draft,
+                        level,
+                        expected_fingerprint: Some(expected_fingerprint.clone()),
+                    };
+                    match service.preview_update_user_diff(request) {
+                        Ok(entries) => with_dialog_draft(ui, |d| {
+                            if let ClientDialogDraft::EditHysteria { diff_preview, .. } = d {
+                                *diff_preview = Some(entries);
+                            }
+                        }),
+                        Err(msg) => with_dialog_draft(ui, |d| {
+                            if let ClientDialogDraft::EditHysteria { error, .. } = d {
+                                *error = Some(msg);
+                            }
+                        }),
+                    }
+                }
                 if ui.button("Cancel").clicked() {
                     with_dialog_draft(ui, |d| *d = ClientDialogDraft::None);
                 }
             });
+            show_user_diff_preview(ui, &diff_preview);
         });
 
     if !open {
@@ -1390,6 +1551,7 @@ fn open_add_dialog(ui: &Ui, inbound_index: usize) {
             flow: VlessFlowChoice::None,
             level: 0,
             error: None,
+            diff_preview: None,
         };
     });
 }
@@ -1414,6 +1576,7 @@ fn open_edit_dialog(ui: &Ui, service: &ApplicationService, row: &UserSummary) {
                     level: 0,
                     expected_fingerprint: String::new(),
                     error: Some(message),
+                    diff_preview: None,
                 };
             });
             return;
@@ -1430,6 +1593,7 @@ fn open_edit_dialog(ui: &Ui, service: &ApplicationService, row: &UserSummary) {
             level: 0,
             expected_fingerprint: fingerprint,
             error: None,
+            diff_preview: None,
         };
     });
 }
@@ -1481,6 +1645,7 @@ fn open_add_trojan_dialog(ui: &Ui, inbound_index: usize) {
             password: String::new(),
             level: 0,
             error: None,
+            diff_preview: None,
         };
     });
 }
@@ -1498,6 +1663,7 @@ fn open_edit_trojan_dialog(ui: &Ui, service: &ApplicationService, row: &TrojanCl
                     level: 0,
                     expected_fingerprint: String::new(),
                     error: Some(message),
+                    diff_preview: None,
                 };
             });
             return;
@@ -1512,6 +1678,7 @@ fn open_edit_trojan_dialog(ui: &Ui, service: &ApplicationService, row: &TrojanCl
             level: 0,
             expected_fingerprint: fingerprint,
             error: None,
+            diff_preview: None,
         };
     });
 }
@@ -1555,6 +1722,7 @@ fn open_add_hysteria_dialog(ui: &Ui, inbound_index: usize) {
             auth: generate_client_auth(),
             level: 0,
             error: None,
+            diff_preview: None,
         };
     });
 }
@@ -1572,6 +1740,7 @@ fn open_edit_hysteria_dialog(ui: &Ui, service: &ApplicationService, row: &Hyster
                     level: row.level,
                     expected_fingerprint: String::new(),
                     error: Some(message),
+                    diff_preview: None,
                 };
             });
             return;
@@ -1586,6 +1755,7 @@ fn open_edit_hysteria_dialog(ui: &Ui, service: &ApplicationService, row: &Hyster
             level: row.level,
             expected_fingerprint: fingerprint,
             error: None,
+            diff_preview: None,
         };
     });
 }
@@ -1648,6 +1818,63 @@ fn show_dialogs(ui: &mut Ui, service: &mut ApplicationService) {
         9 => show_delete_hysteria_dialog(ui, service),
         _ => {}
     }
+    // Independent of the Add/Edit/Delete draft — can be open alongside the table (Roadmap §3:122).
+    show_qr_dialog(ui);
+}
+
+fn qr_dialog_id() -> egui::Id {
+    egui::Id::new("inbound_users_qr_dialog")
+}
+
+/// Opens the QR dialog for a freshly built share URI (Roadmap §3:122).
+fn open_qr_dialog(ui: &Ui, uri: String) {
+    ui.ctx().data_mut(|data| data.insert_temp(qr_dialog_id(), uri));
+}
+
+fn close_qr_dialog(ui: &Ui) {
+    ui.ctx().data_mut(|data| data.remove::<String>(qr_dialog_id()));
+}
+
+fn show_qr_dialog(ui: &mut Ui) {
+    let Some(uri) = ui
+        .ctx()
+        .data(|data| data.get_temp::<String>(qr_dialog_id()))
+    else {
+        return;
+    };
+
+    let mut open = true;
+    egui::Window::new("Share URI QR code")
+        .collapsible(false)
+        .resizable(false)
+        .open(&mut open)
+        .show(ui.ctx(), |ui| {
+            match super::qr_code(ui, &uri) {
+                Ok(()) => {}
+                Err(error) => {
+                    ui.colored_label(
+                        Color32::from_rgb(200, 60, 60),
+                        format!("Could not render QR code: {error}"),
+                    );
+                }
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let mut text = uri.clone();
+                ui.add(
+                    egui::TextEdit::singleline(&mut text)
+                        .desired_width(320.0)
+                        .interactive(false),
+                );
+                if ui.button("Copy").clicked() {
+                    ui.ctx().copy_text(uri.clone());
+                }
+            });
+        });
+
+    if !open {
+        close_qr_dialog(ui);
+    }
 }
 
 fn show_add_dialog(ui: &mut Ui, service: &mut ApplicationService) {
@@ -1658,7 +1885,7 @@ fn show_add_dialog(ui: &mut Ui, service: &mut ApplicationService) {
         .default_width(420.0)
         .open(&mut open)
         .show(ui.ctx(), |ui| {
-            let (mut email, mut uuid, mut flow, mut level_text, error) =
+            let (mut email, mut uuid, mut flow, mut level_text, error, diff_preview) =
                 with_dialog_draft(ui, |draft| {
                     let ClientDialogDraft::AddVless {
                         email,
@@ -1666,6 +1893,7 @@ fn show_add_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         flow,
                         level,
                         error,
+                        diff_preview,
                         ..
                     } = draft
                     else {
@@ -1675,6 +1903,7 @@ fn show_add_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                             VlessFlowChoice::None,
                             "0".to_owned(),
                             None,
+                            None,
                         );
                     };
                     (
@@ -1683,6 +1912,7 @@ fn show_add_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         *flow,
                         level.to_string(),
                         error.clone(),
+                        diff_preview.clone(),
                     )
                 });
 
@@ -1743,10 +1973,42 @@ fn show_add_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         }
                     }
                 }
+                if ui.button("Preview changes").clicked() {
+                    let level = level_text.trim().parse::<u32>().unwrap_or(0);
+                    let inbound_index = with_dialog_draft(ui, |draft| {
+                        if let ClientDialogDraft::AddVless { inbound_index, .. } = draft {
+                            Some(*inbound_index)
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(inbound_index) = inbound_index {
+                        let request = AddInboundClientRequest::Vless(AddUserRequest {
+                            inbound_index,
+                            email: email.clone(),
+                            id: Some(uuid.clone()),
+                            flow: flow.to_request(),
+                            level,
+                        });
+                        match service.preview_add_user_diff(request) {
+                            Ok(entries) => with_dialog_draft(ui, |draft| {
+                                if let ClientDialogDraft::AddVless { diff_preview, .. } = draft {
+                                    *diff_preview = Some(entries);
+                                }
+                            }),
+                            Err(message) => with_dialog_draft(ui, |draft| {
+                                if let ClientDialogDraft::AddVless { error, .. } = draft {
+                                    *error = Some(message);
+                                }
+                            }),
+                        }
+                    }
+                }
                 if ui.button("Cancel").clicked() {
                     close_dialog(ui);
                 }
             });
+            show_user_diff_preview(ui, &diff_preview);
 
             with_dialog_draft(ui, |draft| {
                 if let ClientDialogDraft::AddVless {
@@ -1778,7 +2040,7 @@ fn show_edit_dialog(ui: &mut Ui, service: &mut ApplicationService) {
         .default_width(420.0)
         .open(&mut open)
         .show(ui.ctx(), |ui| {
-            let (mut email, uuid, mut flow, mut level_text, unsupported_hint, error) =
+            let (mut email, uuid, mut flow, mut level_text, unsupported_hint, error, diff_preview) =
                 with_dialog_draft(ui, |draft| {
                     let ClientDialogDraft::EditVless {
                         email,
@@ -1787,6 +2049,7 @@ fn show_edit_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         unsupported_flow_hint,
                         level,
                         error,
+                        diff_preview,
                         ..
                     } = draft
                     else {
@@ -1795,6 +2058,7 @@ fn show_edit_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                             String::new(),
                             VlessFlowChoice::None,
                             "0".to_owned(),
+                            None,
                             None,
                             None,
                         );
@@ -1806,6 +2070,7 @@ fn show_edit_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         level.to_string(),
                         unsupported_flow_hint.clone(),
                         error.clone(),
+                        diff_preview.clone(),
                     )
                 });
 
@@ -1892,10 +2157,56 @@ fn show_edit_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         }
                     }
                 }
+                if ui.button("Preview changes").clicked() {
+                    let (inbound_index, client_index, fingerprint) =
+                        with_dialog_draft(ui, |draft| {
+                            if let ClientDialogDraft::EditVless {
+                                inbound_index,
+                                client_index,
+                                expected_fingerprint,
+                                ..
+                            } = draft
+                            {
+                                (
+                                    Some(*inbound_index),
+                                    Some(*client_index),
+                                    expected_fingerprint.clone(),
+                                )
+                            } else {
+                                (None, None, String::new())
+                            }
+                        });
+                    let level = level_text.trim().parse::<u32>().unwrap_or(0);
+                    if let (Some(inbound_index), Some(client_index)) =
+                        (inbound_index, client_index)
+                    {
+                        let request = UpdateInboundClientRequest::Vless(UpdateUserRequest {
+                            inbound_index,
+                            client_index,
+                            email: email.clone(),
+                            flow: flow.to_request(),
+                            level,
+                            expected_fingerprint: Some(fingerprint),
+                        });
+                        match service.preview_update_user_diff(request) {
+                            Ok(entries) => with_dialog_draft(ui, |draft| {
+                                if let ClientDialogDraft::EditVless { diff_preview, .. } = draft {
+                                    *diff_preview = Some(entries);
+                                }
+                            }),
+                            Err(message) => with_dialog_draft(ui, |draft| {
+                                if let ClientDialogDraft::EditVless { error, .. } = draft {
+                                    *error = Some(message);
+                                }
+                            }),
+                        }
+                    }
+                }
                 if ui.button("Cancel").clicked() {
                     close_dialog(ui);
                 }
             });
+            show_user_diff_preview(ui, &diff_preview);
 
             with_dialog_draft(ui, |draft| {
                 if let ClientDialogDraft::EditVless {

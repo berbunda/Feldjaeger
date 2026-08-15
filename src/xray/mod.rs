@@ -4,6 +4,7 @@
 //! [`crate::remote::RemoteAdmin`] for configuration I/O.
 //! Does not depend on SSH library APIs directly.
 
+mod cert_pin;
 pub mod config;
 mod discovery;
 mod geodata;
@@ -49,7 +50,8 @@ pub use config::{
     OutboundSummary, PolicySummary, RealityDestinationKey, RealityLimitFallbackDraft,
     RealitySettingsDraft,
     RemoveConfdirFileRequest, RemoveOutboundRequest, RenameOutboundOutcome, RenameOutboundTagRequest,
-    ReplaceOutboundRequest, RoutingRuleSummary, RoutingSummary,
+    ReplaceInboundRawJsonRequest, ReplaceOutboundRawJsonRequest, ReplaceOutboundRequest,
+    RoutingRuleSummary, RoutingSummary,
     SUPPORTED_USER_PROTOCOL, SecretFieldDraft, SniffingSettings, SniffingWriteOutcome,
     SourcedSection, StreamMethod, StreamMethodKey, SupportedUserInbound, SystemPolicySummary,
     TCP_FINALMASK_TYPES, TLS_VERSION_PRESETS, TUNNEL_NETWORKS, UDP_FINALMASK_TYPES,
@@ -68,7 +70,8 @@ pub use config::{
     extract_vless_clients, fakedns_summary, fallbacks_compatible_on_inbound,
     fallbacks_transport_compatible, first_failing_gate, format_tag_reference_block,
     g10_hysteria_requires_tls, g11_shadowsocks_tcp_only, g9_hysteria_protocol_transport_ok,
-    finalmask_layers_to_value, generate_client_auth, generate_client_uuid, inbound_fingerprint,
+    finalmask_layers_to_value, generate_client_auth, generate_client_uuid,
+    hysteria_salamander_obfs_password, inbound_fingerprint,
     inbound_has_vision_flow,
     inbound_summaries, inbound_tag_references, is_custom_mask_format, join_ws_path_and_ed,
     log_settings_change_summary, log_settings_from_section, log_settings_to_new_value,
@@ -77,9 +80,11 @@ pub use config::{
     parse_inbound_general,
     parse_inbound_protocol, parse_inbound_security, parse_inbound_stream, parse_sniffing_settings,
     parse_sockopt, sockopt_to_value,
-    policy_summary, port_is_shell_editable, reconcile_inbound_fallbacks, redacted_json_diff,
-    redacted_json_diff_bytes, remove_confdir_file, remove_outbound, rename_outbound_tag,
-    replace_outbound, routing_summary, routing_wiring_warnings,
+    policy_summary, port_hop_syntax, port_is_shell_editable, raw_port_display,
+    reconcile_inbound_fallbacks, redacted_json_diff, redacted_json_diff_bytes,
+    remove_confdir_file, remove_outbound, rename_outbound_tag, replace_inbound_raw_json,
+    replace_outbound, replace_outbound_raw_json, routing_summary,
+    routing_wiring_warnings, first_hop_port,
     selectable_stream_methods, sniffing_is_absent_defaults, split_ws_path_and_ed,
     stats_wiring_warnings, supported_user_inbounds, supported_vless_user_inbounds,
     transport_security_allowed,
@@ -114,6 +119,7 @@ pub use logs::{
     XrayLogErrorKind, XrayLogLineLimit, XrayLogResult, XrayLogSearch, XrayLogService,
     XrayLogSourceKind, XrayLogSourceSummary, XrayLogStreamEvent, log_config_view,
 };
+pub use cert_pin::cert_pin_sha256;
 pub use manager::XrayManager;
 pub use secret::SecretString;
 pub use share_uri::{

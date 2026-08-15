@@ -28,16 +28,15 @@ pub fn port_is_shell_editable(inbound: &Value) -> bool {
 }
 
 /// Applies General fields onto an inbound object in place.
+///
+/// A non-scalar `port` (range string / array / mixed list) is preserved byte-for-byte and never
+/// touched here — the General tab keeps it read-only, so `general.port` cannot represent it and
+/// must not overwrite or clear it (Roadmap §3:118; no coercion to scalar).
 pub fn apply_inbound_general(
     inbound: &mut Value,
     general: &InboundGeneral,
 ) -> ConfigModifyResult<()> {
-    if !port_is_shell_editable(inbound) {
-        return Err(ConfigModifyError::new(
-            ConfigModifyErrorKind::ValidationFailed,
-            "inbound port shape is not supported for shell editing (scalar only)".to_owned(),
-        ));
-    }
+    let port_editable = port_is_shell_editable(inbound);
 
     if let Some(port) = general.port {
         if port > u64::from(u16::MAX) {
@@ -64,9 +63,63 @@ pub fn apply_inbound_general(
 
     apply_optional_string(object, "tag", general.tag.as_deref());
     apply_optional_string(object, "listen", general.listen.as_deref());
-    apply_optional_port(object, general.port);
+    if port_editable {
+        apply_optional_port(object, general.port);
+    }
 
     Ok(())
+}
+
+/// Compact display text for a non-scalar `port` (range string / array / mixed list), for the
+/// General tab's read-only note. `None` when `port` is absent, scalar, or the inbound has no
+/// `port` key at all — [`port_is_shell_editable`] covers those cases instead.
+pub fn raw_port_display(inbound: &Value) -> Option<String> {
+    if port_is_shell_editable(inbound) {
+        return None;
+    }
+    let port = inbound.get("port")?;
+    Some(match port {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    })
+}
+
+/// First port number in a [`port_hop_syntax`] string (`"443,5000-6000"` → `443`), for scalar
+/// fallbacks (e.g. share-URI port validation) when only the hop form is available.
+pub fn first_hop_port(hop: &str) -> Option<u64> {
+    let first_entry = hop.split(',').next()?.trim();
+    let head = first_entry.split('-').next()?.trim();
+    head.parse().ok()
+}
+
+/// Flattens a non-scalar `port` into Hysteria2 URI "port hopping" syntax (`123,5000-6000`) —
+/// comma-separated ports/ranges, no brackets or quotes. This is also a valid Xray-core `port`
+/// string in its own right. `None` when `port` is absent or scalar (Roadmap §3:121).
+pub fn port_hop_syntax(inbound: &Value) -> Option<String> {
+    if port_is_shell_editable(inbound) {
+        return None;
+    }
+    match inbound.get("port")? {
+        Value::String(s) => {
+            let s = s.trim();
+            if s.is_empty() { None } else { Some(s.to_owned()) }
+        }
+        Value::Array(items) => {
+            let parts: Vec<String> = items
+                .iter()
+                .filter_map(|item| match item {
+                    Value::Number(n) => Some(n.to_string()),
+                    Value::String(s) => {
+                        let s = s.trim();
+                        (!s.is_empty()).then(|| s.to_owned())
+                    }
+                    _ => None,
+                })
+                .collect();
+            (!parts.is_empty()).then(|| parts.join(","))
+        }
+        _ => None,
+    }
 }
 
 fn apply_optional_string(object: &mut Map<String, Value>, key: &str, value: Option<&str>) {
@@ -111,4 +164,41 @@ pub fn parse_inbound_general(inbound: &Value) -> InboundGeneral {
         _ => None,
     };
     InboundGeneral { tag, listen, port }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn port_hop_syntax_none_for_scalar_or_absent() {
+        assert_eq!(port_hop_syntax(&json!({"port": 443})), None);
+        assert_eq!(port_hop_syntax(&json!({"port": "443"})), None);
+        assert_eq!(port_hop_syntax(&json!({})), None);
+    }
+
+    #[test]
+    fn port_hop_syntax_passes_through_string_form() {
+        assert_eq!(
+            port_hop_syntax(&json!({"port": "443,5000-6000"})),
+            Some("443,5000-6000".to_owned())
+        );
+    }
+
+    #[test]
+    fn port_hop_syntax_flattens_array_form() {
+        assert_eq!(
+            port_hop_syntax(&json!({"port": [443, "5000-6000", 8443]})),
+            Some("443,5000-6000,8443".to_owned())
+        );
+    }
+
+    #[test]
+    fn first_hop_port_extracts_leading_number() {
+        assert_eq!(first_hop_port("443,5000-6000"), Some(443));
+        assert_eq!(first_hop_port("5000-6000"), Some(5000));
+        assert_eq!(first_hop_port("5000-6000,443"), Some(5000));
+        assert_eq!(first_hop_port("not-a-port"), None);
+    }
 }

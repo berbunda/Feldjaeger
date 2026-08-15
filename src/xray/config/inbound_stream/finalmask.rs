@@ -103,6 +103,40 @@ pub fn validate_finalmask_layers(layers: &[FinalMaskLayerDraft]) -> ConfigModify
     Ok(())
 }
 
+/// Detects a `salamander` `finalmask.udp[]` layer (Hysteria2-compatible obfuscation, per
+/// <https://xtls.github.io/ru/config/transports/finalmask.html>) and returns its password.
+///
+/// Read-only inference from preserved raw JSON — Feldjäger does not yet offer a FinalMask UDP
+/// editor for Hysteria inbounds (`InboundStreamDraft.finalmask_udp` is VLESS/Trojan-only), so
+/// this only surfaces whatever is already configured on disk into the Share URI (Roadmap
+/// §3:121). Takes the **full inbound object**, not just the finalmask array.
+pub fn hysteria_salamander_obfs_password(inbound: &Value) -> Option<String> {
+    let layers = inbound
+        .get("streamSettings")?
+        .get("finalmask")?
+        .get("udp")?
+        .as_array()?;
+    for layer in layers {
+        let is_salamander = layer
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|t| t.eq_ignore_ascii_case("salamander"));
+        if !is_salamander {
+            continue;
+        }
+        let password = layer
+            .get("settings")
+            .and_then(|s| s.get("password"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        if let Some(password) = password {
+            return Some(password.to_owned());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,5 +192,48 @@ mod tests {
             settings: json!({}),
         }];
         assert!(validate_finalmask_layers(&layers).is_ok());
+    }
+
+    #[test]
+    fn salamander_obfs_password_found() {
+        let inbound = json!({
+            "streamSettings": {
+                "finalmask": {
+                    "udp": [{"type": "salamander", "settings": {"password": "cat"}}]
+                }
+            }
+        });
+        assert_eq!(
+            hysteria_salamander_obfs_password(&inbound),
+            Some("cat".to_owned())
+        );
+    }
+
+    #[test]
+    fn salamander_obfs_password_case_insensitive_type() {
+        let inbound = json!({
+            "streamSettings": {
+                "finalmask": {"udp": [{"type": "Salamander", "settings": {"password": "cat"}}]}
+            }
+        });
+        assert_eq!(
+            hysteria_salamander_obfs_password(&inbound),
+            Some("cat".to_owned())
+        );
+    }
+
+    #[test]
+    fn salamander_obfs_password_absent_when_no_salamander_layer() {
+        let inbound = json!({
+            "streamSettings": {
+                "finalmask": {"udp": [{"type": "noise", "settings": {}}]}
+            }
+        });
+        assert_eq!(hysteria_salamander_obfs_password(&inbound), None);
+    }
+
+    #[test]
+    fn salamander_obfs_password_absent_when_no_finalmask() {
+        assert_eq!(hysteria_salamander_obfs_password(&json!({})), None);
     }
 }

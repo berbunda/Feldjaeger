@@ -18,6 +18,7 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     service.tick_outbounds_page_status();
     show_delete_outbound_dialog(ui, service);
     show_rename_outbound_dialog(ui, service);
+    show_raw_json_outbound_dialog(ui, service);
 
     ui.heading("Outbounds");
     ui.add_space(8.0);
@@ -256,6 +257,27 @@ fn show_outbound_context_menu(
             );
             ui.close();
         }
+
+        // Raw JSON escape hatch (Roadmap §3:125) — any protocol, incl. ones with no Edit above.
+        if ui
+            .add_enabled(!busy, egui::Button::new("Raw JSON"))
+            .on_disabled_hover_text("Raw JSON requires an idle connection")
+            .clicked()
+        {
+            if let Some((text, expected_fingerprint)) = service.outbound_raw_json_view(row.index) {
+                set_raw_json_outbound_state(
+                    ui,
+                    RawJsonOutboundEditState {
+                        index: row.index,
+                        tag: row.tag.clone().unwrap_or_else(|| MISSING_FIELD.to_owned()),
+                        text,
+                        expected_fingerprint,
+                        error: None,
+                    },
+                );
+            }
+            ui.close();
+        }
     });
 }
 
@@ -441,6 +463,107 @@ fn show_rename_outbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
         clear_pending_outbound_rename(ui);
     } else {
         set_pending_outbound_rename(ui, pending);
+    }
+}
+
+// ─── Raw JSON escape hatch (Roadmap §3:125) ──────────────────────────────────
+
+/// Standalone dialog state — deliberately kept out of `OutboundEditorSession` (which only
+/// covers Freedom/Blackhole/DNS); Raw JSON is available for **any** outbound protocol.
+#[derive(Clone)]
+struct RawJsonOutboundEditState {
+    index: usize,
+    tag: String,
+    text: String,
+    expected_fingerprint: String,
+    error: Option<String>,
+}
+
+fn raw_json_outbound_id() -> egui::Id {
+    egui::Id::new("outbounds_raw_json_edit")
+}
+
+fn raw_json_outbound_state(ui: &Ui) -> Option<RawJsonOutboundEditState> {
+    ui.ctx()
+        .data(|d| d.get_temp::<RawJsonOutboundEditState>(raw_json_outbound_id()))
+}
+
+fn set_raw_json_outbound_state(ui: &Ui, state: RawJsonOutboundEditState) {
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(raw_json_outbound_id(), state));
+}
+
+fn clear_raw_json_outbound_state(ui: &Ui) {
+    ui.ctx()
+        .data_mut(|d| d.remove::<RawJsonOutboundEditState>(raw_json_outbound_id()));
+}
+
+fn show_raw_json_outbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
+    let Some(mut state) = raw_json_outbound_state(ui) else {
+        return;
+    };
+    let mut open = true;
+    let mut closed = false;
+    egui::Window::new(format!("Raw JSON — {}", state.tag))
+        .collapsible(false)
+        .resizable(true)
+        .default_width(560.0)
+        .default_height(480.0)
+        .open(&mut open)
+        .show(ui.ctx(), |ui| {
+            ui.label(
+                RichText::new(
+                    "Escape hatch: edits the entire outbound object as raw JSON — for fields \
+                     the structured editor doesn't cover, or for protocols with no structured \
+                     editor at all. Save replaces the whole object; invalid JSON or a stale \
+                     fingerprint (config changed underneath) is rejected before anything is \
+                     written.",
+                )
+                .size(12.0)
+                .color(Color32::from_rgb(140, 140, 140)),
+            );
+            ui.add_space(6.0);
+            if let Some(error) = &state.error {
+                ui.label(
+                    RichText::new(error.clone())
+                        .size(13.0)
+                        .color(Color32::from_rgb(200, 60, 60)),
+                );
+                ui.add_space(4.0);
+            }
+            egui::ScrollArea::vertical()
+                .max_height(360.0)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut state.text)
+                            .desired_rows(20)
+                            .desired_width(f32::INFINITY)
+                            .code_editor(),
+                    );
+                });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                let busy = service.is_outbound_mutation_busy();
+                if ui.add_enabled(!busy, egui::Button::new("Save")).clicked() {
+                    match service.start_replace_outbound_raw_json(
+                        state.index,
+                        &state.text,
+                        state.expected_fingerprint.clone(),
+                    ) {
+                        Ok(()) => closed = true,
+                        Err(message) => state.error = Some(message),
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    closed = true;
+                }
+            });
+        });
+
+    if closed || !open {
+        clear_raw_json_outbound_state(ui);
+    } else {
+        set_raw_json_outbound_state(ui, state);
     }
 }
 
