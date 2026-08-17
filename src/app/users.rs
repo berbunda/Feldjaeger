@@ -308,6 +308,8 @@ pub struct UserRowDisplay<'a> {
     pub id: String,
     /// Flow or `—`.
     pub flow: String,
+    /// `reverse.tag` or `—` (Roadmap §2.1:58).
+    pub reverse_tag: String,
     /// Inbound tag or `—`.
     pub inbound_tag: String,
     /// Basename of the source file.
@@ -320,6 +322,7 @@ pub fn user_row_display(client: &UserSummary) -> UserRowDisplay<'_> {
         email: display_optional_client_field(client.email.as_deref()),
         id: display_optional_client_field(client.id.as_deref()),
         flow: display_optional_client_field(client.flow.as_deref()),
+        reverse_tag: display_optional_client_field(client.reverse_tag.as_deref()),
         inbound_tag: display_optional_client_field(client.inbound_tag.as_deref()),
         source_file: display_source_file(&client.source_file),
     }
@@ -415,6 +418,7 @@ mod tests {
             id: Some(id.to_owned()),
             email: Some(email.to_owned()),
             flow: flow.map(str::to_owned),
+            reverse_tag: None,
         }
     }
 
@@ -583,6 +587,7 @@ mod tests {
             id: None,
             email: None,
             flow: Some("future_flow_mode".to_owned()),
+            reverse_tag: None,
         };
         let row = user_row_display(&summary);
         assert_eq!(row.email, MISSING_FIELD);

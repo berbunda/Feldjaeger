@@ -4,9 +4,14 @@
 //! pair with a sourced section model suitable for single-file and directory
 //! configs, while keeping unknown data for future write-back.
 
+mod api_settings;
 mod compatibility;
+mod dns_settings;
 mod editable;
+mod env_settings;
 mod errors;
+mod fakedns_settings;
+mod geodata_settings;
 mod inbound_clients;
 mod inbound_edit;
 mod inbound_fallbacks;
@@ -19,15 +24,32 @@ mod modify;
 mod modify_error;
 mod outbound_edit;
 mod outbound_protocol;
+mod burst_observatory_settings;
+mod metrics_settings;
+mod observatory_settings;
 mod parser;
+mod policy_settings;
+mod reverse_proxy;
+mod routing_settings;
 mod sections;
+mod stats_settings;
 mod serialize;
 mod sourced_section;
 mod summary;
 mod tag_refs;
 mod users;
+mod version_settings;
 mod wiring;
 
+pub use api_settings::{
+    ApiSettings, KNOWN_API_SERVICES, api_settings_change_summary, api_settings_from_section,
+    api_settings_to_new_value, apply_api_settings_to_value, validate_api_settings,
+};
+pub use burst_observatory_settings::{
+    BurstObservatorySettings, BurstPingConfigEntry, apply_burst_observatory_settings_to_value,
+    burst_observatory_settings_change_summary, burst_observatory_settings_from_section,
+    burst_observatory_settings_to_new_value, validate_burst_observatory_settings,
+};
 pub use compatibility::{
     CompatibilityGateId, allowed_security_modes, allowed_stream_methods, check_inbound_compatibility,
     coerce_display_stream_method, coerce_security_mode_for_transport, effective_security,
@@ -35,8 +57,28 @@ pub use compatibility::{
     g9_hysteria_protocol_transport_ok, inbound_has_vision_flow, matrix_transport, normalized_method,
     selectable_stream_methods, transport_security_allowed, vision_active_from_inbound,
 };
+pub use dns_settings::{
+    DnsHostEntry, DnsServerEntry, DnsSettings, QueryStrategy, apply_dns_settings_to_value,
+    dns_settings_change_summary, dns_settings_from_section, dns_settings_to_new_value,
+    validate_dns_settings,
+};
 pub use editable::{EditableXrayConfig, InboundLocation, OutboundLocation, parse_file_roots};
+pub use env_settings::{
+    EnvSettings, EnvVarEntry, KNOWN_ENV_VARS, apply_env_settings_to_value,
+    env_settings_change_summary, env_settings_from_section, env_settings_to_new_value,
+    validate_env_settings,
+};
 pub use errors::{ConfigError, ConfigErrorKind};
+pub use geodata_settings::{
+    GeodataAssetEntry, GeodataSettings, apply_geodata_settings_to_value,
+    geodata_settings_change_summary, geodata_settings_from_section, geodata_settings_to_new_value,
+    validate_geodata_settings,
+};
+pub use fakedns_settings::{
+    FakeDnsPoolEntry, FakeDnsSettings, apply_fakedns_settings_to_value,
+    fakedns_settings_change_summary, fakedns_settings_from_section, fakedns_settings_to_new_value,
+    validate_fakedns_settings,
+};
 pub use inbound_clients::{
     ClientRef, ClientsArrayKey, HysteriaClient, InboundClient, InboundClientProtocol,
     SecretFieldDraft, TrojanClient, VlessClient, apply_secret_draft, client_fingerprint,
@@ -83,7 +125,10 @@ pub use inbound_stream::{
     sockopt_to_value, split_ws_path_and_ed, validate_finalmask_layers, validate_kcp_settings,
     validate_sockopt, validate_xhttp_settings, xhttp_extra_json, xhttp_extra_object, xhttp_to_object,
 };
-pub use json_diff::{JsonDiffEntry, JsonDiffKind, redacted_json_diff, redacted_json_diff_bytes};
+pub use json_diff::{
+    JsonDiffEntry, JsonDiffKind, redacted_json_diff, redacted_json_diff_bytes,
+    redacted_json_diff_lines,
+};
 pub use log_settings::{
     LogLevel, LogOutput, LogSettings, MaskAddress, apply_log_settings_to_value,
     is_custom_mask_format, log_settings_change_summary, log_settings_from_section,
@@ -96,24 +141,71 @@ pub use modify::{
     ModifyConfigOutcome, ModifyUserOutcome, RemoveConfdirFileRequest, RemoveOutboundRequest,
     RenameOutboundOutcome, RenameOutboundTagRequest, ReplaceInboundRawJsonRequest,
     ReplaceOutboundRawJsonRequest, ReplaceOutboundRequest,
-    UpdateInboundClientRequest, UpdateInboundGeneralRequest, UpdateInboundShellRequest,
-    UpdateInboundSniffingRequest, UpdateLogSettingsRequest, UpdateOutboundShellRequest,
+    UpdateApiSettingsRequest, UpdateDnsSettingsRequest, UpdateFakeDnsSettingsRequest,
+    UpdateInboundClientRequest,
+    UpdateInboundGeneralRequest, UpdateInboundShellRequest, UpdateInboundSniffingRequest,
+    UpdateBurstObservatorySettingsRequest, UpdateEnvSettingsRequest, UpdateGeodataSettingsRequest,
+    UpdateLogSettingsRequest, UpdateMetricsSettingsRequest, UpdateObservatorySettingsRequest,
+    UpdateOutboundShellRequest,
+    UpdatePolicySettingsRequest,
+    UpdateRoutingSettingsRequest, UpdateStatsSettingsRequest, UpdateVersionSettingsRequest,
     UpdateUserRequest, add_confdir_file, add_inbound, add_inbound_client, add_outbound,
     add_outbound_shell, add_user, delete_inbound, delete_inbound_client, delete_outbound,
     delete_user, duplicate_inbound, duplicate_outbound, generate_client_auth,
     generate_client_uuid, remove_confdir_file, remove_outbound, rename_outbound_tag,
-    replace_inbound_raw_json, replace_outbound, replace_outbound_raw_json, update_inbound_client,
-    update_inbound_general, update_inbound_shell,
-    update_inbound_sniffing, update_log_settings, update_outbound_shell, update_user,
+    replace_inbound_raw_json, replace_outbound, replace_outbound_raw_json, update_api_settings,
+    update_burst_observatory_settings,
+    update_dns_settings, update_env_settings, update_fakedns_settings, update_geodata_settings,
+    update_inbound_client,
+    update_inbound_general,
+    update_inbound_shell,
+    update_inbound_sniffing, update_log_settings, update_metrics_settings,
+    update_observatory_settings,
+    update_outbound_shell, update_policy_settings,
+    update_routing_settings, update_stats_settings, update_version_settings,
+    update_user,
+};
+pub use metrics_settings::{
+    MetricsSettings, apply_metrics_settings_to_value, metrics_settings_change_summary,
+    metrics_settings_from_section, metrics_settings_to_new_value, validate_metrics_settings,
+};
+pub use version_settings::{
+    VersionSettings, apply_version_settings_to_value, validate_version_settings,
+    version_settings_change_summary, version_settings_from_section, version_settings_to_new_value,
 };
 pub use modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
-pub use outbound_edit::{OutboundGeneral, OutboundRef, apply_outbound_general, parse_outbound_general};
+pub use observatory_settings::{
+    ObservatorySettings, apply_observatory_settings_to_value, observatory_settings_change_summary,
+    observatory_settings_from_section, observatory_settings_to_new_value,
+    validate_observatory_settings,
+};
+pub use outbound_edit::{
+    OutboundGeneral, OutboundRef, ProxySettingsDraft, apply_outbound_general, parse_outbound_general,
+};
 pub use outbound_protocol::{
     BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS, DnsRuleDraft,
     FREEDOM_NOISE_TYPES, FragmentDraft, NoiseDraft, OutboundSettingsDraft,
     apply_outbound_settings, is_shell_editable_protocol, parse_outbound_settings,
 };
 pub use parser::{ConfigParseOutcome, XrayConfigParser};
+pub use stats_settings::{
+    StatsSettings, stats_settings_change_summary, stats_settings_from_section,
+    stats_settings_to_value, validate_stats_settings,
+};
+pub use policy_settings::{
+    PolicyLevelEntry, PolicySettings, SystemPolicyEntry, apply_policy_settings_to_value,
+    policy_settings_change_summary, policy_settings_from_section, policy_settings_to_new_value,
+    validate_policy_settings,
+};
+pub use reverse_proxy::{
+    ReverseSniffingDraft, ReverseTagDraft, parse_reverse, reverse_to_value, validate_reverse,
+};
+pub use routing_settings::{
+    BalancerEntry, BalancerStrategyType, CostEntry, DomainStrategy, NetworkKind, RoutingRuleEntry,
+    RoutingSettings, StrategyEntry, StrategySettingsEntry, WebhookEntry,
+    apply_routing_settings_to_value, routing_settings_change_summary, routing_settings_from_section,
+    routing_settings_to_new_value, validate_routing_settings,
+};
 pub use sections::{KNOWN_SECTION_NAMES, XrayConfig, XrayConfigSections};
 pub use sourced_section::SourcedSection;
 pub use summary::{

@@ -1151,12 +1151,27 @@ fn outbound_description(protocol: Option<&str>, value: &Value) -> String {
                 None => "Default (A/AAAA → internal DNS)".to_owned(),
             }
         }
+        OutboundKind::Vless => {
+            let settings = value.get("settings");
+            let reverse_tag = settings
+                .and_then(|s| s.get("reverse"))
+                .and_then(|r| r.get("tag"))
+                .and_then(Value::as_str)
+                .filter(|t| !t.is_empty());
+            let address = settings.and_then(|s| s.get("address")).and_then(Value::as_str);
+            let port = settings.and_then(|s| s.get("port")).and_then(Value::as_u64);
+            match (reverse_tag, address, port) {
+                (Some(tag), _, _) => format!("Reverse bridge → {tag}"),
+                (None, Some(address), Some(port)) => format!("{address}:{port}"),
+                (None, Some(address), None) => address.to_owned(),
+                (None, None, _) => "Summary unavailable".to_owned(),
+            }
+        }
         OutboundKind::Http
         | OutboundKind::Hysteria
         | OutboundKind::Loopback
         | OutboundKind::Shadowsocks
         | OutboundKind::Trojan
-        | OutboundKind::Vless
         | OutboundKind::Vmess
         | OutboundKind::Unknown => "Summary unavailable".to_owned(),
     }

@@ -74,6 +74,18 @@ pub fn redacted_json_diff_bytes(before: &[u8], after: &[u8]) -> Vec<JsonDiffEntr
     redacted_json_diff(&before_value, &after_value)
 }
 
+/// Line-level diff for plain-text files (e.g. systemd unit bodies) that reuses the same
+/// positional diff engine and `+`/`-`/`~` rendering as the JSON diff (Roadmap §3:126 — systemd
+/// unit is not Xray JSON config, but Feldjäger fully replaces it on Apply, so a before/after
+/// review deserves the same treatment). Each line becomes one array element; there is no
+/// secret-key redaction concept for plain text, so lines are shown verbatim (quoted, as any
+/// JSON string leaf would be).
+pub fn redacted_json_diff_lines(before: &str, after: &str) -> Vec<JsonDiffEntry> {
+    let before_value = Value::Array(before.lines().map(|l| Value::String(l.to_owned())).collect());
+    let after_value = Value::Array(after.lines().map(|l| Value::String(l.to_owned())).collect());
+    redacted_json_diff(&before_value, &after_value)
+}
+
 fn summarize_bytes(bytes: &[u8]) -> String {
     format!("<{} bytes>", bytes.len())
 }
@@ -307,5 +319,30 @@ mod tests {
     fn identical_yields_empty() {
         let value = json!({"a": 1});
         assert!(redacted_json_diff(&value, &value).is_empty());
+    }
+
+    #[test]
+    fn line_diff_detects_changed_and_added_lines() {
+        let before = "User=nobody\nExecStart=/usr/local/bin/xray run -config /etc/xray/config.json";
+        let after = "User=root\nExecStart=/usr/local/bin/xray run -config /etc/xray/config.json\nGroup=root";
+        let diff = redacted_json_diff_lines(before, after);
+        let changed = diff
+            .iter()
+            .find(|e| e.path == "[0]")
+            .expect("line 0 changed");
+        assert_eq!(changed.kind, JsonDiffKind::Changed);
+        assert_eq!(changed.before.as_deref(), Some("\"User=nobody\""));
+        assert_eq!(changed.after.as_deref(), Some("\"User=root\""));
+        let added = diff
+            .iter()
+            .find(|e| e.path == "[2]")
+            .expect("line 2 added");
+        assert_eq!(added.kind, JsonDiffKind::Added);
+    }
+
+    #[test]
+    fn line_diff_identical_yields_empty() {
+        let body = "[Unit]\nDescription=Xray Service\n";
+        assert!(redacted_json_diff_lines(body, body).is_empty());
     }
 }

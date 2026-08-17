@@ -6,7 +6,10 @@ use crate::app::inbounds::{
     LoadedConfigSnapshot, MISSING_FIELD, display_optional_str, display_source_file,
 };
 use crate::app::status::SshStatus;
-use crate::xray::{DiscoveryState, RoutingRuleSummary, RoutingSummary, routing_wiring_warnings};
+use crate::xray::{
+    DiscoveryState, RoutingRuleSummary, RoutingSettings, RoutingSummary,
+    routing_settings_change_summary, routing_wiring_warnings,
+};
 
 /// Columns that support sorting on the Routing rules table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -54,6 +57,18 @@ pub enum RoutingPageState {
     ConfigurationLoaded,
     /// Configuration loaded with non-fatal warnings.
     ConfigurationContainsWarnings,
+    /// In-memory draft is being edited (Roadmap §2.1:48).
+    EditMode,
+    /// Draft failed local validation.
+    ValidationError,
+    /// Remote save is in progress.
+    Saving,
+    /// Last save succeeded (transient before returning to view).
+    Saved,
+    /// Last save failed (classified error shown separately).
+    SaveFailed,
+    /// Top-level `routing` value is not a JSON object.
+    MalformedRoutingObject,
 }
 
 impl RoutingPageState {
@@ -75,6 +90,14 @@ impl RoutingPageState {
             Self::ConfigurationContainsWarnings => {
                 "Configuration loaded with warnings. Review the details below."
             }
+            Self::EditMode => {
+                "Editing routing settings. Changes are not saved until you click Save."
+            }
+            Self::ValidationError => "Routing settings validation failed. Fix the highlighted fields.",
+            Self::Saving => "Saving routing settings...",
+            Self::Saved => "Routing settings updated.",
+            Self::SaveFailed => "Failed to save routing settings.",
+            Self::MalformedRoutingObject => "Malformed routing object in the remote configuration.",
         }
     }
 
@@ -95,8 +118,11 @@ impl RoutingPageState {
     }
 }
 
-/// Read-only model exposed to the Routing page.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// View **and** edit model exposed to the Routing page (Roadmap §2.1:48). Browsing (table,
+/// selection, sort) uses [`RoutingSummary`]/[`RoutingRuleSummary`] as before; editing uses the
+/// typed [`RoutingSettings`] — mirrors how Inbounds browsing (summary rows) and Inbound Shell
+/// editing (a separate typed session) already coexist on one page.
+#[derive(Debug, Clone, PartialEq)]
 pub struct RoutingPageModel {
     /// Coarse page state.
     pub state: RoutingPageState,
@@ -114,6 +140,14 @@ pub struct RoutingPageModel {
     pub wiring_warnings: Vec<String>,
     /// Active sort settings.
     pub sort: RoutingSort,
+    /// Settings currently displayed by the edit form (loaded or draft).
+    pub routing_settings: RoutingSettings,
+    /// Whether the UI is in edit mode with an in-memory draft.
+    pub editing: bool,
+    /// Change summary lines when editing (loaded → draft).
+    pub change_summary: Vec<String>,
+    /// Last classified save/validation error for the page.
+    pub error_message: Option<String>,
 }
 
 /// Derives the Routing page state from connection, discovery, and config state.
@@ -152,14 +186,25 @@ pub fn derive_routing_page_state(
     }
 }
 
-/// Builds the read-only Routing page model.
+/// Builds the Routing page model (browsing + edit, Roadmap §2.1:48).
+///
+/// `draft`/`saving`/`error_message`/`saved_flash` mirror [`super::dns::build_dns_page_model`]'s
+/// parameters exactly; when `draft` is `None` the page behaves exactly as the read-only version
+/// did (browsing state machine drives `state`), and edit-related overrides only kick in once a
+/// draft exists — same precedence order DNS uses: Saving > Saved > (error while editing =
+/// ValidationError) > (error while not editing = SaveFailed) > Malformed > EditMode > the
+/// browsing state already computed by [`derive_routing_page_state`].
 pub fn build_routing_page_model(
     ssh: SshStatus,
     discovery: &DiscoveryState,
     config: &LoadedConfigSnapshot,
     sort: RoutingSort,
+    draft: Option<&RoutingSettings>,
+    saving: bool,
+    error_message: Option<String>,
+    saved_flash: bool,
 ) -> RoutingPageModel {
-    let state = derive_routing_page_state(ssh, discovery, config);
+    let mut state = derive_routing_page_state(ssh, discovery, config);
     let summary = config.routing().cloned();
     let mut rows = summary
         .as_ref()
@@ -170,6 +215,43 @@ pub fn build_routing_page_model(
         .editable()
         .map(|editable| routing_wiring_warnings(editable.sections()))
         .unwrap_or_default();
+
+    let mut routing_settings = RoutingSettings::defaults();
+    let mut editing = false;
+    let mut change_summary = Vec::new();
+
+    if let Some(editable) = config.editable() {
+        let loaded = editable.routing_settings();
+        let malformed = loaded
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("Malformed routing object"));
+
+        editing = draft.is_some();
+        routing_settings = draft.cloned().unwrap_or_else(|| loaded.clone());
+        change_summary = if let Some(draft) = draft {
+            routing_settings_change_summary(&loaded, draft)
+        } else {
+            Vec::new()
+        };
+
+        state = if saving {
+            RoutingPageState::Saving
+        } else if saved_flash {
+            RoutingPageState::Saved
+        } else if error_message.is_some() && editing {
+            RoutingPageState::ValidationError
+        } else if error_message.is_some() {
+            RoutingPageState::SaveFailed
+        } else if malformed {
+            RoutingPageState::MalformedRoutingObject
+        } else if editing {
+            RoutingPageState::EditMode
+        } else {
+            state
+        };
+    }
+
     RoutingPageModel {
         state,
         summary,
@@ -177,6 +259,10 @@ pub fn build_routing_page_model(
         warnings: config.warnings().to_vec(),
         wiring_warnings,
         sort,
+        routing_settings,
+        editing,
+        change_summary,
+        error_message,
     }
 }
 
@@ -352,6 +438,10 @@ mod tests {
             &succeeded(),
             &loaded(None, Vec::new()),
             RoutingSort::by_index(),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, RoutingPageState::RoutingSectionMissing);
         assert_eq!(model.state.message(), "Routing section is not configured.");
@@ -370,6 +460,10 @@ mod tests {
             &succeeded(),
             &loaded(Some(summary), Vec::new()),
             RoutingSort::by_index(),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, RoutingPageState::NoRoutingRules);
         assert_eq!(model.state.message(), "No routing rules.");
@@ -400,6 +494,10 @@ mod tests {
             &succeeded(),
             &loaded(Some(summary), Vec::new()),
             RoutingSort::by_index(),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, RoutingPageState::ConfigurationLoaded);
         assert_eq!(model.rows.len(), 1);
@@ -528,6 +626,10 @@ mod tests {
             &succeeded(),
             &LoadedConfigSnapshot::NotLoaded,
             RoutingSort::by_index(),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, RoutingPageState::ConfigurationNotLoaded);
         assert!(model.state.message().contains("Configuration not loaded"));
@@ -564,6 +666,10 @@ mod tests {
             &succeeded(),
             &loaded(Some(summary), vec!["other section warning".to_owned()]),
             RoutingSort::by_index(),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, RoutingPageState::ConfigurationContainsWarnings);
         assert!(model.state.shows_table());
@@ -618,6 +724,10 @@ mod tests {
             &succeeded(),
             &loaded(Some(summary), Vec::new()),
             RoutingSort::by_index(),
+            None,
+            false,
+            None,
+            false,
         );
         assert!(model.wiring_warnings.is_empty());
     }
@@ -632,6 +742,10 @@ mod tests {
             &succeeded(),
             &loaded_with_editable(editable),
             RoutingSort::by_index(),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.wiring_warnings.len(), 1);
         assert!(model.wiring_warnings[0].contains("balancerTag `missing`"));
@@ -647,6 +761,10 @@ mod tests {
             &succeeded(),
             &loaded_with_editable(editable),
             RoutingSort::by_index(),
+            None,
+            false,
+            None,
+            false,
         );
         assert!(model.wiring_warnings.is_empty());
     }

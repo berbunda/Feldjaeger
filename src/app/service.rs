@@ -1,6 +1,9 @@
 //! Application service facade for upper layers.
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -8,13 +11,48 @@ use feldjaeger_ssh::{HostKeyPolicy, RusshClient, RusshClientOptions, SshBackend,
 use tracing::{error, info, warn};
 
 use crate::init::{ServiceName, ServiceState, SystemdManager};
-use crate::remote::RemoteAdmin;
+use crate::netinfo::{
+    AsnLookupResult, ScanCandidateRow, build_probe_tls_client_config, enumerate_cidr_hosts,
+    lookup_target_asn,
+};
+use crate::remote::{ConfigBackup, RemoteAdmin};
 use crate::storage::{
     AppConfig, ConfigManager, ConnectionDraft, ConnectionValidationErrors, StoredConnectionProfile,
     ThemeMode, UiConfig, WindowPosition, WindowSize,
 };
 use crate::xray::{DefaultConfigValidator, XrayManager};
 
+use super::api_console::{ApiConsolePageModel, build_api_console_page_model};
+use super::api_ops::{
+    ApiCallOutcome, ApiCallRequest, run_api_call, stats_query_all_request, stats_sys_request,
+};
+use super::api_settings::{ApiSettingsPageModel, build_api_settings_page_model};
+use super::api_settings_ops::{ApiSettingsMutationOutcome, run_update_api_settings};
+use super::dns_settings_ops::{DnsSettingsMutationOutcome, run_update_dns_settings};
+use super::fakedns_settings_ops::{FakeDnsSettingsMutationOutcome, run_update_fakedns_settings};
+use super::routing_settings_ops::{RoutingSettingsMutationOutcome, run_update_routing_settings};
+use super::policy_settings_ops::{PolicySettingsMutationOutcome, run_update_policy_settings};
+use super::observatory_settings_ops::{
+    ObservatorySettingsMutationOutcome, run_update_observatory_settings,
+};
+use super::burst_observatory_settings_ops::{
+    BurstObservatorySettingsMutationOutcome, run_update_burst_observatory_settings,
+};
+use super::stats_settings_ops::{StatsSettingsMutationOutcome, run_update_stats_settings};
+use super::stats_settings::{StatsSettingsPageModel, build_stats_settings_page_model};
+use super::metrics_settings_ops::{MetricsSettingsMutationOutcome, run_update_metrics_settings};
+use super::metrics_settings::{MetricsSettingsPageModel, build_metrics_settings_page_model};
+use super::env_settings_ops::{EnvSettingsMutationOutcome, run_update_env_settings};
+use super::env_settings::{EnvSettingsPageModel, build_env_settings_page_model};
+use super::version_settings_ops::{VersionSettingsMutationOutcome, run_update_version_settings};
+use super::version_settings::{VersionSettingsPageModel, build_version_settings_page_model};
+use super::geodata_settings_ops::{GeodataSettingsMutationOutcome, run_update_geodata_settings};
+use super::geodata_settings::{GeodataSettingsPageModel, build_geodata_settings_page_model};
+use super::backup_ops::{
+    BackupContentOutcome, BackupListOutcome, BackupRestoreOutcome, run_fetch_backup_content,
+    run_list_backups, run_restore_backup,
+};
+use super::backups::{BackupsPageModel, build_backups_page_model};
 use super::burst_observatory::{BurstObservatoryPageModel, build_burst_observatory_page_model};
 use super::confdir_files::{ConfdirFilesPageModel, build_confdir_files_page_model};
 use super::connection_secrets::ConnectionSecrets;
@@ -35,6 +73,7 @@ use super::warp::{
     WarpUiState, WarpWorkerContext, build_warp_page_model, default_preferred_tag,
     run_warp_operation, user_facing_warp_error,
 };
+use super::inbound_import::{ImportPreview, build_import_preview};
     use super::inbound_ops::{
     InboundEditorSession, InboundMutationKind, InboundMutationOutcome, InboundMutationSuccess,
     InboundShellDrafts, InboundShellMutationKind, InboundShellMutationOutcome, Mldsa65Result,
@@ -49,7 +88,16 @@ use super::inbounds::{
 };
 use super::log_settings::{LogSettingsPageModel, build_log_settings_page_model};
 use super::log_settings_ops::{LogSettingsMutationOutcome, run_update_log_settings};
+use super::metrics_console::{
+    MetricsPageModel, MetricsScrapeSnapshot, build_metrics_page_model, resolve_metrics_listen,
+};
+use super::metrics_ops::{MetricsScrapeOutcome, run_metrics_scrape_op};
 use super::observatory::{ObservatoryPageModel, build_observatory_page_model};
+use super::target_lookup::{
+    TargetLookupPageModel, TargetLookupSnapshot, TargetScanPageModel, TargetScanSnapshot,
+    build_target_lookup_page_model, build_target_scan_page_model, candidate_prefix,
+};
+use super::target_scan_ops::{ScanEvent, run_target_scan};
 use super::outbounds::{
     OutboundsPageModel, OutboundsSort, OutboundsSortColumn, build_outbounds_page_model,
 };
@@ -59,6 +107,10 @@ use super::service_control::{
     ServiceControlState, ServiceOperation, ServiceOperationOutcome, ServicePageModel,
     UnitApplyOutcome, UnitApplyRequest, build_service_page_model, run_service_operation,
     run_unit_apply, user_facing_service_error, user_facing_unit_error,
+};
+use super::stats_console::{
+    StatsPageModel, StatsQuerySnapshot, StatsSysSnapshot, build_stats_page_model,
+    record_stats_sample,
 };
 use super::status::{CurrentOperation, OperationProgress, SshStatus, StatusSnapshot, XrayStatus};
 use super::user_ops::{
@@ -76,19 +128,39 @@ use super::xray_logs::{
     xray_log_event_channel, xray_log_probe_channel,
 };
 use crate::xray::{
-    AddInboundRequest, AddOutboundShellRequest, AddUserRequest, AvailableVersions,
-    BurstObservatorySummary, DeleteInboundRequest, DeleteUserRequest, DiscoveryState, DnsSummary,
-    DuplicateInboundRequest, EditableXrayConfig, FakeDnsSummary, InboundClientProtocol,
+    AddInboundRequest, AddOutboundShellRequest, AddUserRequest, ApiSettings, AvailableVersions,
+    BurstObservatorySummary, DebugVars, DeleteInboundRequest, DeleteUserRequest, DiscoveryState,
+    DnsSettings, DnsSummary,
+    DuplicateInboundRequest, EditableXrayConfig, FakeDnsSettings, FakeDnsSummary, InboundClientProtocol,
     InboundGeneral, InboundProtocolDraft, InboundRef, InboundSecurityDraft, InboundSecurityMode,
     InboundStreamDraft, InboundSummary, InstallChannel, LogSettings, ObservatorySummary,
     OutboundGeneral, OutboundRef, OutboundSettingsDraft, OutboundSummary, PolicySummary,
-    RoutingSummary, SniffingSettings, StreamMethod, UpdateInboundGeneralRequest,
-    UpdateInboundShellRequest, UpdateInboundSniffingRequest, UpdateLogSettingsRequest,
+    RemoteCliError, RemoteCliErrorKind, RemoteCliResult,
+    RoutingSummary, SniffingSettings, StatCounter, StreamMethod, SysStats,
+    UpdateInboundGeneralRequest,
+    UpdateApiSettingsRequest, UpdateDnsSettingsRequest, UpdateFakeDnsSettingsRequest, UpdateInboundShellRequest,
+    UpdateInboundSniffingRequest, UpdateLogSettingsRequest,
     UpdateOutboundShellRequest, UpdateUserRequest, UserSummary, VlessClientSummary, XrayInstaller,
     XrayLogLineLimit, XrayLogService, XrayLogSourceKind, add_inbound, is_shell_editable_protocol,
+    parse_debug_vars_stdout,
     parse_inbound_general, parse_inbound_protocol, parse_inbound_security, parse_inbound_stream,
     parse_outbound_general, parse_outbound_settings, parse_sniffing_settings,
-    port_is_shell_editable, raw_port_display, update_inbound_shell, validate_log_settings,
+    parse_stats_query_stdout, parse_stats_sys_stdout,
+    port_is_shell_editable, raw_port_display, update_api_settings, update_dns_settings,
+    update_fakedns_settings, update_routing_settings, update_policy_settings,
+    update_inbound_shell,
+    validate_api_settings, validate_dns_settings, validate_fakedns_settings, validate_log_settings,
+    validate_routing_settings, RoutingSettings, UpdateRoutingSettingsRequest,
+    validate_policy_settings, PolicySettings, UpdatePolicySettingsRequest,
+    update_observatory_settings, validate_observatory_settings, ObservatorySettings,
+    UpdateObservatorySettingsRequest,
+    update_burst_observatory_settings, validate_burst_observatory_settings,
+    BurstObservatorySettings, UpdateBurstObservatorySettingsRequest,
+    update_stats_settings, validate_stats_settings, StatsSettings, UpdateStatsSettingsRequest,
+    update_metrics_settings, validate_metrics_settings, MetricsSettings, UpdateMetricsSettingsRequest,
+    update_env_settings, validate_env_settings, EnvSettings, UpdateEnvSettingsRequest,
+    update_version_settings, validate_version_settings, VersionSettings, UpdateVersionSettingsRequest,
+    update_geodata_settings, validate_geodata_settings, GeodataSettings, UpdateGeodataSettingsRequest,
 };
 
 /// How long a transient Status Bar message remains visible.
@@ -187,10 +259,187 @@ pub struct ApplicationService {
     outbound_editor_session: Option<super::outbound_ops::OutboundEditorSession>,
     /// In-flight confdir-file mutation (Add / Remove; Roadmap §2.5:107).
     confdir_file_mutation_rx: Option<Receiver<super::confdir_ops::ConfdirFileMutationOutcome>>,
+    // ─── Backups / Rollback (Roadmap §3:127) ─────────────────────────────────
+    /// Read-only, best-effort background fetch — mirrors `unit_probe_rx`/`unit_file_diff_rx`
+    /// (§3:126): no `CurrentOperation`, not counted in `is_any_remote_busy`.
+    backup_list_rx: Option<Receiver<super::backup_ops::BackupListOutcome>>,
+    /// Original file path the last `start_list_backups` was requested for.
+    backup_list_target: Option<String>,
+    /// Listing result for `backup_list_target`, once the fetch completes.
+    backup_list_result: Option<Result<Vec<ConfigBackup>, String>>,
+    /// Read-only, best-effort background fetch (pre-restore diff preview), same contract as
+    /// `backup_list_rx`.
+    backup_content_rx: Option<Receiver<super::backup_ops::BackupContentOutcome>>,
+    /// Backup path the last `start_fetch_backup_content` was requested for.
+    backup_content_target: Option<String>,
+    /// Fetch result for `backup_content_target`, once it completes.
+    backup_content_result: Option<Result<Vec<u8>, String>>,
+    /// In-flight backup restore (a real mutation — has a `CurrentOperation` and counts toward
+    /// `is_any_remote_busy`, unlike the two read-only fetches above).
+    backup_restore_rx: Option<Receiver<super::backup_ops::BackupRestoreOutcome>>,
+    // ─── API Console (Roadmap §3:128 — live `xray api` operations) ──────────
+    /// Read-only, best-effort background call (list/info/count) — mirrors `backup_list_rx`: no
+    /// `CurrentOperation`, not counted in `is_any_remote_busy`. Only one read is ever in flight.
+    api_read_rx: Option<Receiver<ApiCallOutcome>>,
+    /// Identity of the read in flight / last completed (subcommand + args, not the display
+    /// label — two different calls, e.g. inbound users for two different tags, can share a
+    /// label but must not share a cached result).
+    api_read_key: Option<String>,
+    /// Result of the last completed read, keyed by `api_read_key`.
+    api_read_result: Option<(String, RemoteCliResult<String>)>,
+    /// In-flight live mutation (Add/Remove inbound/outbound/user/rule, balancer override, source
+    /// IP block, restart logger) — a real operation: has `CurrentOperation::ManagingLiveApi` and
+    /// counts toward `is_any_remote_busy`, unlike the read-only channel above.
+    api_mutation_rx: Option<Receiver<ApiCallOutcome>>,
+    /// Label + result of the last completed mutation, shown until the next one starts.
+    api_mutation_result: Option<(String, RemoteCliResult<String>)>,
+    // ─── Stats (Roadmap §3:129 — `statsquery`/`statssys` live read + charts) ────
+    // Two dedicated read channels, not the generic `api_read_*` slot above: the Stats page has
+    // two independently-triggerable reads (counters, sys stats) that must both stay cached at
+    // once, unlike the API Console's single-slot cache where only one subcommand's result is
+    // ever shown on screen at a time.
+    /// Read-only, best-effort background call for `statsquery` — same no-`CurrentOperation`
+    /// contract as `api_read_rx`.
+    stats_query_rx: Option<Receiver<ApiCallOutcome>>,
+    /// Parsed result of the last completed `statsquery` call.
+    stats_query_result: Option<RemoteCliResult<Vec<StatCounter>>>,
+    /// Per-counter sample history (Instant, value), oldest first — accumulated across every
+    /// successful `statsquery` response this session (Roadmap §3:129 — "charts").
+    stats_history: HashMap<String, VecDeque<(Instant, i64)>>,
+    /// Read-only, best-effort background call for `statssys`.
+    stats_sys_rx: Option<Receiver<ApiCallOutcome>>,
+    /// Parsed result of the last completed `statssys` call.
+    stats_sys_result: Option<RemoteCliResult<SysStats>>,
+    // ─── Metrics (Roadmap §3:130 — `metrics` HTTP endpoint scrape + dashboard) ────
+    /// Read-only, best-effort background scrape of `/debug/vars` — same no-`CurrentOperation`
+    /// contract as `stats_query_rx`, on its own channel (a different transport, a different
+    /// section's precondition — `metrics.listen`, not `api.listen`).
+    metrics_scrape_rx: Option<Receiver<MetricsScrapeOutcome>>,
+    /// Parsed result of the last completed scrape.
+    metrics_scrape_result: Option<RemoteCliResult<DebugVars>>,
+    /// Per-counter sample history, separate from `stats_history` (different transport — kept
+    /// apart so refreshing one page never perturbs the other's charts).
+    metrics_history: HashMap<String, VecDeque<(Instant, i64)>>,
+    // ─── Target Lookup (Roadmap §3:131 — SNI/Dest/host search by ASN) ────
+    // No SSH precondition, no `CurrentOperation`: this never touches the managed host or the SSH
+    // session, so it's not gated by `is_any_remote_busy` and can run at any connection state.
+    /// `true` while a lookup is in flight.
+    target_lookup_rx: Option<Receiver<Result<AsnLookupResult, String>>>,
+    /// Host the in-flight or last-completed lookup was started for.
+    target_lookup_host: Option<String>,
+    /// Result of the last completed lookup, for `target_lookup_host`.
+    target_lookup_result: Option<Result<AsnLookupResult, String>>,
+    // ─── AS-range REALITY candidate scan (Roadmap §3:131 follow-up) ────
+    // Also no SSH precondition/`CurrentOperation` — runs entirely locally (`netinfo`, `std::net`
+    // + `rustls`), same rationale as Target Lookup above.
+    /// `true` while a scan is in flight.
+    target_scan_rx: Option<Receiver<ScanEvent>>,
+    /// Set for an in-flight scan; `stop_target_scan` flips it to request early termination.
+    target_scan_cancel: Option<Arc<AtomicBool>>,
+    /// Valid candidates found so far in the current/last run.
+    target_scan_rows: Vec<ScanCandidateRow>,
+    /// How many addresses have been checked so far in the current/last run.
+    target_scan_checked: usize,
+    /// How many addresses this run actually checks (`min(prefix_total, address_limit)`, or
+    /// `prefix_total` when no limit was given).
+    target_scan_capped_total: usize,
+    /// True host count in `target_scan_prefix`, before capping.
+    target_scan_prefix_total: Option<usize>,
+    /// The prefix the current/last run targeted.
+    target_scan_prefix: Option<String>,
     log_settings_draft: Option<LogSettings>,
     log_settings_error: Option<String>,
     log_settings_saved_flash: bool,
     log_settings_rx: Option<Receiver<LogSettingsMutationOutcome>>,
+    /// Last redacted structural diff preview (Roadmap §3:126); stale until re-clicked, cleared
+    /// on begin/cancel edit and after a successful save.
+    log_settings_diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
+    // ─── API Settings (Roadmap §2.1:54 — the `api` top-level object editor; distinct
+    // from the API Console's live `xray api` gRPC calls, §3:128) ─────────────
+    api_settings_draft: Option<ApiSettings>,
+    api_settings_error: Option<String>,
+    api_settings_saved_flash: bool,
+    api_settings_rx: Option<Receiver<ApiSettingsMutationOutcome>>,
+    /// Last redacted structural diff preview (Roadmap §3:126); cleared on begin/cancel edit and
+    /// after a successful save — mirrors `log_settings_diff_preview`.
+    api_settings_diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
+    // ─── DNS Settings (Roadmap §2.1:46 — the `dns` top-level object editor) ──
+    dns_settings_draft: Option<DnsSettings>,
+    dns_settings_error: Option<String>,
+    dns_settings_saved_flash: bool,
+    dns_settings_rx: Option<Receiver<DnsSettingsMutationOutcome>>,
+    /// Last redacted structural diff preview (Roadmap §3:126); mirrors `api_settings_diff_preview`.
+    dns_settings_diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
+    // ─── FakeDNS Settings (Roadmap §2.1:47 — the `fakedns` top-level value editor) ──
+    fakedns_settings_draft: Option<FakeDnsSettings>,
+    fakedns_settings_error: Option<String>,
+    fakedns_settings_saved_flash: bool,
+    fakedns_settings_rx: Option<Receiver<FakeDnsSettingsMutationOutcome>>,
+    /// Last redacted structural diff preview (Roadmap §3:126); mirrors `dns_settings_diff_preview`.
+    fakedns_settings_diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
+    // ─── Routing Settings (Roadmap §2.1:48 — the `routing` top-level object editor) ──
+    routing_settings_draft: Option<RoutingSettings>,
+    routing_settings_error: Option<String>,
+    routing_settings_saved_flash: bool,
+    routing_settings_rx: Option<Receiver<RoutingSettingsMutationOutcome>>,
+    /// Last redacted structural diff preview (Roadmap §3:126); mirrors `fakedns_settings_diff_preview`.
+    routing_settings_diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
+    // ─── Policy Settings (Roadmap §2.1:49 — the `policy` top-level object editor) ──
+    policy_settings_draft: Option<PolicySettings>,
+    policy_settings_error: Option<String>,
+    policy_settings_saved_flash: bool,
+    policy_settings_rx: Option<Receiver<PolicySettingsMutationOutcome>>,
+    /// Last redacted structural diff preview (Roadmap §3:126); mirrors `routing_settings_diff_preview`.
+    policy_settings_diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
+    // ─── Observatory Settings (Roadmap §2.1:50 — the `observatory` top-level object editor) ──
+    observatory_settings_draft: Option<ObservatorySettings>,
+    observatory_settings_error: Option<String>,
+    observatory_settings_saved_flash: bool,
+    observatory_settings_rx: Option<Receiver<ObservatorySettingsMutationOutcome>>,
+    /// Last redacted structural diff preview (Roadmap §3:126); mirrors `policy_settings_diff_preview`.
+    observatory_settings_diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
+    // ─── Burst Observatory Settings (Roadmap §2.1:51 — the `burstObservatory` top-level object editor) ──
+    burst_observatory_settings_draft: Option<BurstObservatorySettings>,
+    burst_observatory_settings_error: Option<String>,
+    burst_observatory_settings_saved_flash: bool,
+    burst_observatory_settings_rx: Option<Receiver<BurstObservatorySettingsMutationOutcome>>,
+    /// Last redacted structural diff preview (Roadmap §3:126); mirrors `observatory_settings_diff_preview`.
+    burst_observatory_settings_diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
+    // ─── Stats Settings (Roadmap §2.1:52 — the `stats` top-level object editor) ──
+    stats_settings_draft: Option<StatsSettings>,
+    stats_settings_error: Option<String>,
+    stats_settings_saved_flash: bool,
+    stats_settings_rx: Option<Receiver<StatsSettingsMutationOutcome>>,
+    /// Last redacted structural diff preview (Roadmap §3:126); mirrors `burst_observatory_settings_diff_preview`.
+    stats_settings_diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
+    // ─── Metrics Settings (Roadmap §2.1:53 — the `metrics` top-level object editor) ──
+    metrics_settings_draft: Option<MetricsSettings>,
+    metrics_settings_error: Option<String>,
+    metrics_settings_saved_flash: bool,
+    metrics_settings_rx: Option<Receiver<MetricsSettingsMutationOutcome>>,
+    /// Last redacted structural diff preview (Roadmap §3:126); mirrors `stats_settings_diff_preview`.
+    metrics_settings_diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
+    // ─── Env Settings (Roadmap §2.1:55 — the `env` top-level object editor) ──
+    env_settings_draft: Option<EnvSettings>,
+    env_settings_error: Option<String>,
+    env_settings_saved_flash: bool,
+    env_settings_rx: Option<Receiver<EnvSettingsMutationOutcome>>,
+    /// Last redacted structural diff preview (Roadmap §3:126); mirrors `metrics_settings_diff_preview`.
+    env_settings_diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
+    // ─── Version Settings (Roadmap §2.1:56 — the `version` top-level object editor) ──
+    version_settings_draft: Option<VersionSettings>,
+    version_settings_error: Option<String>,
+    version_settings_saved_flash: bool,
+    version_settings_rx: Option<Receiver<VersionSettingsMutationOutcome>>,
+    /// Last redacted structural diff preview (Roadmap §3:126); mirrors `env_settings_diff_preview`.
+    version_settings_diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
+    // ─── GeoData Settings (Roadmap §2.1:57 — the `geodata` top-level object editor) ──
+    geodata_settings_draft: Option<GeodataSettings>,
+    geodata_settings_error: Option<String>,
+    geodata_settings_saved_flash: bool,
+    geodata_settings_rx: Option<Receiver<GeodataSettingsMutationOutcome>>,
+    /// Last redacted structural diff preview (Roadmap §3:126); mirrors `version_settings_diff_preview`.
+    geodata_settings_diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
     service_control: ServiceControlState,
     service_control_rx: Option<Receiver<ServiceOperationOutcome>>,
     service_state: Option<ServiceState>,
@@ -199,6 +448,10 @@ pub struct ApplicationService {
     unit_apply_rx: Option<Receiver<UnitApplyOutcome>>,
     unit_apply_busy: bool,
     unit_apply_needs_restart_prompt: bool,
+    /// Current remote unit file body fetched for the Edit-unit before/after diff (Roadmap
+    /// §3:126); `Ok(None)` means no unit file exists yet (nothing to diff against).
+    unit_file_diff_result: Option<Result<Option<String>, String>>,
+    unit_file_diff_rx: Option<Receiver<Result<Option<String>, String>>>,
     xray_lifecycle: XrayLifecycleState,
     xray_lifecycle_rx: Option<Receiver<XrayLifecycleOutcome>>,
     install_channel: InstallChannel,
@@ -415,6 +668,36 @@ impl ApplicationService {
             discovery: DiscoveryState::Idle,
             discovery_rx: None,
             loaded_config: LoadedConfigSnapshot::None,
+            backup_list_rx: None,
+            backup_list_target: None,
+            backup_list_result: None,
+            backup_content_rx: None,
+            backup_content_target: None,
+            backup_content_result: None,
+            backup_restore_rx: None,
+            api_read_rx: None,
+            api_read_key: None,
+            api_read_result: None,
+            api_mutation_rx: None,
+            api_mutation_result: None,
+            stats_query_rx: None,
+            stats_query_result: None,
+            stats_history: HashMap::new(),
+            stats_sys_rx: None,
+            stats_sys_result: None,
+            metrics_scrape_rx: None,
+            metrics_scrape_result: None,
+            metrics_history: HashMap::new(),
+            target_lookup_rx: None,
+            target_lookup_host: None,
+            target_lookup_result: None,
+            target_scan_rx: None,
+            target_scan_cancel: None,
+            target_scan_rows: Vec::new(),
+            target_scan_checked: 0,
+            target_scan_capped_total: 0,
+            target_scan_prefix_total: None,
+            target_scan_prefix: None,
             inbounds_sort: InboundsSort::by_index(),
             outbounds_sort: OutboundsSort::by_index(),
             outbounds_status_announced: false,
@@ -441,6 +724,67 @@ impl ApplicationService {
             log_settings_error: None,
             log_settings_saved_flash: false,
             log_settings_rx: None,
+            log_settings_diff_preview: None,
+            api_settings_draft: None,
+            api_settings_error: None,
+            api_settings_saved_flash: false,
+            api_settings_rx: None,
+            api_settings_diff_preview: None,
+            dns_settings_draft: None,
+            dns_settings_error: None,
+            dns_settings_saved_flash: false,
+            dns_settings_rx: None,
+            dns_settings_diff_preview: None,
+            fakedns_settings_draft: None,
+            fakedns_settings_error: None,
+            fakedns_settings_saved_flash: false,
+            fakedns_settings_rx: None,
+            fakedns_settings_diff_preview: None,
+            routing_settings_draft: None,
+            routing_settings_error: None,
+            routing_settings_saved_flash: false,
+            routing_settings_rx: None,
+            routing_settings_diff_preview: None,
+            policy_settings_draft: None,
+            policy_settings_error: None,
+            policy_settings_saved_flash: false,
+            policy_settings_rx: None,
+            policy_settings_diff_preview: None,
+            observatory_settings_draft: None,
+            observatory_settings_error: None,
+            observatory_settings_saved_flash: false,
+            observatory_settings_rx: None,
+            observatory_settings_diff_preview: None,
+            burst_observatory_settings_draft: None,
+            burst_observatory_settings_error: None,
+            burst_observatory_settings_saved_flash: false,
+            burst_observatory_settings_rx: None,
+            burst_observatory_settings_diff_preview: None,
+            stats_settings_draft: None,
+            stats_settings_error: None,
+            stats_settings_saved_flash: false,
+            stats_settings_rx: None,
+            stats_settings_diff_preview: None,
+            metrics_settings_draft: None,
+            metrics_settings_error: None,
+            metrics_settings_saved_flash: false,
+            metrics_settings_rx: None,
+            metrics_settings_diff_preview: None,
+            env_settings_draft: None,
+            env_settings_error: None,
+            env_settings_saved_flash: false,
+            env_settings_rx: None,
+            env_settings_diff_preview: None,
+            version_settings_draft: None,
+            version_settings_error: None,
+            version_settings_saved_flash: false,
+            version_settings_rx: None,
+            version_settings_diff_preview: None,
+            geodata_settings_draft: None,
+            geodata_settings_error: None,
+            geodata_settings_saved_flash: false,
+            geodata_settings_rx: None,
+            geodata_settings_diff_preview: None,
             service_control: ServiceControlState::Idle,
             service_control_rx: None,
             service_state: None,
@@ -449,6 +793,8 @@ impl ApplicationService {
             unit_apply_rx: None,
             unit_apply_busy: false,
             unit_apply_needs_restart_prompt: false,
+            unit_file_diff_result: None,
+            unit_file_diff_rx: None,
             xray_lifecycle: XrayLifecycleState::Idle,
             xray_lifecycle_rx: None,
             install_channel: InstallChannel::Stable,
@@ -634,43 +980,2755 @@ impl ApplicationService {
         )
     }
 
-    /// Builds the read-only DNS page model for the GUI.
+    // ─── DNS Settings (Roadmap §2.1:46) ──────────────────────────────────────
+
+    /// Read-only / edit model for the DNS page.
     pub fn dns_page_model(&self) -> DnsPageModel {
-        build_dns_page_model(self.ssh_status, &self.discovery, &self.loaded_config)
+        build_dns_page_model(
+            self.ssh_status,
+            &self.discovery,
+            &self.loaded_config,
+            self.dns_settings_draft.as_ref(),
+            self.is_dns_settings_mutation_busy(),
+            self.dns_settings_error.clone(),
+            self.dns_settings_saved_flash,
+        )
     }
 
-    /// Builds the read-only FakeDNS page model for the GUI.
+    /// `true` while a dns-settings save is in flight.
+    pub fn is_dns_settings_mutation_busy(&self) -> bool {
+        self.dns_settings_rx.is_some()
+    }
+
+    /// Enters edit mode with an in-memory draft cloned from the loaded config.
+    pub fn begin_edit_dns_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        let settings = {
+            let Some(editable) = self.loaded_config.editable() else {
+                return Err("Configuration not loaded.".to_owned());
+            };
+            editable.dns_settings()
+        };
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        self.show_status_message("Loading DNS settings...");
+        self.dns_settings_draft = Some(settings);
+        self.dns_settings_error = None;
+        self.dns_settings_saved_flash = false;
+        self.dns_settings_diff_preview = None;
+        self.clear_current_operation();
+        Ok(())
+    }
+
+    /// Discards the in-memory draft and returns to view mode.
+    pub fn cancel_edit_dns_settings(&mut self) {
+        self.dns_settings_draft = None;
+        self.dns_settings_error = None;
+        self.dns_settings_saved_flash = false;
+        self.dns_settings_diff_preview = None;
+        self.clear_current_operation();
+    }
+
+    /// Mutable access to the dns-settings draft (edit mode only).
+    pub fn dns_settings_draft_mut(&mut self) -> Option<&mut DnsSettings> {
+        self.dns_settings_draft.as_mut()
+    }
+
+    /// Borrowed dns-settings draft.
+    pub fn dns_settings_draft(&self) -> Option<&DnsSettings> {
+        self.dns_settings_draft.as_ref()
+    }
+
+    /// Last computed redacted structural diff preview for the dns settings draft (Roadmap
+    /// §3:126), if `preview_dns_settings_diff` was clicked since the last edit/save.
+    pub fn dns_settings_diff_preview(&self) -> Option<&[crate::xray::JsonDiffEntry]> {
+        self.dns_settings_diff_preview.as_deref()
+    }
+
+    /// Dry-runs the dns settings save and stores a redacted structural diff preview, without
+    /// mutating the loaded config or touching the remote (mirrors
+    /// `preview_api_settings_diff`).
+    pub fn preview_dns_settings_diff(&mut self) -> Result<(), String> {
+        let draft = self
+            .dns_settings_draft
+            .clone()
+            .ok_or_else(|| "Not in edit mode.".to_owned())?;
+        validate_dns_settings(&draft).map_err(|e| e.message())?;
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = UpdateDnsSettingsRequest { settings: draft };
+        let outcome =
+            update_dns_settings(&mut editable, request).map_err(|e| e.message())?;
+        self.dns_settings_diff_preview = Some(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ));
+        Ok(())
+    }
+
+    /// Validates the draft and starts the remote save workflow.
+    pub fn start_save_dns_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+
+        let draft = match &self.dns_settings_draft {
+            Some(draft) => draft.clone(),
+            None => return Err("Not in edit mode.".to_owned()),
+        };
+
+        self.show_status_message("Validating DNS settings...");
+        if let Err(error) = validate_dns_settings(&draft) {
+            self.dns_settings_error = Some(error.message());
+            return Err(error.message());
+        }
+
+        let editable = match self.loaded_config.editable() {
+            Some(editable) => editable.clone(),
+            None => return Err("Configuration not loaded.".to_owned()),
+        };
+
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    profile
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.dns_settings_rx = Some(rx);
+        self.dns_settings_error = None;
+        self.dns_settings_saved_flash = false;
+        self.status_message_until = None;
+        self.operation = CurrentOperation::SavingDnsSettings;
+        self.show_status_message("Saving DNS settings...");
+
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let request = UpdateDnsSettingsRequest { settings: draft };
+        let validate_hint = self.config_validate_hint();
+
+        info!(target: "app", "starting dns settings mutation");
+
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = tx.send(DnsSettingsMutationOutcome {
+                        result: Err(crate::xray::ConfigModifyError::new(
+                            crate::xray::ConfigModifyErrorKind::UploadFailed,
+                            format!("failed to start async runtime: {error}"),
+                        )),
+                    });
+                    return;
+                }
+            };
+
+            let outcome = runtime.block_on(run_update_dns_settings(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+
+        Ok(())
+    }
+
+    /// Polls for a completed dns-settings save.
+    pub fn poll_dns_settings_mutation(&mut self) {
+        let Some(rx) = &self.dns_settings_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.dns_settings_rx = None;
+                match outcome.result {
+                    Ok(success) => {
+                        let inbounds = success.editable.inbound_summaries();
+                        let outbounds = success.editable.outbound_summaries();
+                        let dns = success.editable.dns_summary();
+                        let fakedns = success.editable.fakedns_summary();
+                        let observatory = success.editable.observatory_summary();
+                        let burst_observatory = success.editable.burst_observatory_summary();
+                        let routing = success.editable.routing_summary();
+                        let policy = success.editable.policy_summary();
+                        let vless_clients = success.editable.vless_clients();
+                        let warnings = self.loaded_config.warnings().to_vec();
+                        self.loaded_config = LoadedConfigSnapshot::Loaded {
+                            inbounds,
+                            outbounds,
+                            dns,
+                            fakedns,
+                            observatory,
+                            burst_observatory,
+                            routing,
+                            policy,
+                            vless_clients,
+                            warnings,
+                            editable: Some(success.editable),
+                        };
+                        self.dns_settings_draft = None;
+                        self.dns_settings_error = None;
+                        self.dns_settings_saved_flash = true;
+                        self.dns_settings_diff_preview = None;
+                        self.show_status_message(
+                            "DNS settings were updated. Restart or reload Xray to apply the changes.",
+                        );
+                    }
+                    Err(error) => {
+                        let technical =
+                            crate::logging::redact::sanitize_detail(error.message().as_str());
+                        error!(
+                            target: "app",
+                            detail = %technical,
+                            "Xray dns settings validation failed"
+                        );
+                        let user_message = user_facing_config_modify_error(&error);
+                        self.dns_settings_error = Some(user_message.clone());
+                        self.show_status_message(user_message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.dns_settings_rx = None;
+                if matches!(self.operation, CurrentOperation::SavingDnsSettings) {
+                    self.dns_settings_error =
+                        Some("Remote write failed: worker ended unexpectedly".to_owned());
+                    self.show_status_message("Remote write failed: worker ended unexpectedly");
+                }
+            }
+        }
+    }
+
+    // ─── FakeDNS Settings (Roadmap §2.1:47) ──────────────────────────────────
+
+    /// Read-only / edit model for the FakeDNS page.
     pub fn fakedns_page_model(&self) -> FakeDnsPageModel {
-        build_fakedns_page_model(self.ssh_status, &self.discovery, &self.loaded_config)
+        build_fakedns_page_model(
+            self.ssh_status,
+            &self.discovery,
+            &self.loaded_config,
+            self.fakedns_settings_draft.as_ref(),
+            self.is_fakedns_settings_mutation_busy(),
+            self.fakedns_settings_error.clone(),
+            self.fakedns_settings_saved_flash,
+        )
     }
 
-    /// Builds the read-only Observatory page model for the GUI.
+    /// `true` while a fakedns-settings save is in flight.
+    pub fn is_fakedns_settings_mutation_busy(&self) -> bool {
+        self.fakedns_settings_rx.is_some()
+    }
+
+    /// Enters edit mode with an in-memory draft cloned from the loaded config.
+    pub fn begin_edit_fakedns_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        let settings = {
+            let Some(editable) = self.loaded_config.editable() else {
+                return Err("Configuration not loaded.".to_owned());
+            };
+            editable.fakedns_settings()
+        };
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        self.show_status_message("Loading FakeDNS settings...");
+        self.fakedns_settings_draft = Some(settings);
+        self.fakedns_settings_error = None;
+        self.fakedns_settings_saved_flash = false;
+        self.fakedns_settings_diff_preview = None;
+        self.clear_current_operation();
+        Ok(())
+    }
+
+    /// Discards the in-memory draft and returns to view mode.
+    pub fn cancel_edit_fakedns_settings(&mut self) {
+        self.fakedns_settings_draft = None;
+        self.fakedns_settings_error = None;
+        self.fakedns_settings_saved_flash = false;
+        self.fakedns_settings_diff_preview = None;
+        self.clear_current_operation();
+    }
+
+    /// Mutable access to the fakedns-settings draft (edit mode only).
+    pub fn fakedns_settings_draft_mut(&mut self) -> Option<&mut FakeDnsSettings> {
+        self.fakedns_settings_draft.as_mut()
+    }
+
+    /// Borrowed fakedns-settings draft.
+    pub fn fakedns_settings_draft(&self) -> Option<&FakeDnsSettings> {
+        self.fakedns_settings_draft.as_ref()
+    }
+
+    /// Last computed redacted structural diff preview for the fakedns settings draft (Roadmap
+    /// §3:126), if `preview_fakedns_settings_diff` was clicked since the last edit/save.
+    pub fn fakedns_settings_diff_preview(&self) -> Option<&[crate::xray::JsonDiffEntry]> {
+        self.fakedns_settings_diff_preview.as_deref()
+    }
+
+    /// Dry-runs the fakedns settings save and stores a redacted structural diff preview, without
+    /// mutating the loaded config or touching the remote (mirrors `preview_dns_settings_diff`).
+    pub fn preview_fakedns_settings_diff(&mut self) -> Result<(), String> {
+        let draft = self
+            .fakedns_settings_draft
+            .clone()
+            .ok_or_else(|| "Not in edit mode.".to_owned())?;
+        validate_fakedns_settings(&draft).map_err(|e| e.message())?;
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = UpdateFakeDnsSettingsRequest { settings: draft };
+        let outcome =
+            update_fakedns_settings(&mut editable, request).map_err(|e| e.message())?;
+        self.fakedns_settings_diff_preview = Some(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ));
+        Ok(())
+    }
+
+    /// Validates the draft and starts the remote save workflow.
+    pub fn start_save_fakedns_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+
+        let draft = match &self.fakedns_settings_draft {
+            Some(draft) => draft.clone(),
+            None => return Err("Not in edit mode.".to_owned()),
+        };
+
+        self.show_status_message("Validating FakeDNS settings...");
+        if let Err(error) = validate_fakedns_settings(&draft) {
+            self.fakedns_settings_error = Some(error.message());
+            return Err(error.message());
+        }
+
+        let editable = match self.loaded_config.editable() {
+            Some(editable) => editable.clone(),
+            None => return Err("Configuration not loaded.".to_owned()),
+        };
+
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    profile
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.fakedns_settings_rx = Some(rx);
+        self.fakedns_settings_error = None;
+        self.fakedns_settings_saved_flash = false;
+        self.status_message_until = None;
+        self.operation = CurrentOperation::SavingFakeDnsSettings;
+        self.show_status_message("Saving FakeDNS settings...");
+
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let request = UpdateFakeDnsSettingsRequest { settings: draft };
+        let validate_hint = self.config_validate_hint();
+
+        info!(target: "app", "starting fakedns settings mutation");
+
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = tx.send(FakeDnsSettingsMutationOutcome {
+                        result: Err(crate::xray::ConfigModifyError::new(
+                            crate::xray::ConfigModifyErrorKind::UploadFailed,
+                            format!("failed to start async runtime: {error}"),
+                        )),
+                    });
+                    return;
+                }
+            };
+
+            let outcome = runtime.block_on(run_update_fakedns_settings(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+
+        Ok(())
+    }
+
+    /// Polls for a completed fakedns-settings save.
+    pub fn poll_fakedns_settings_mutation(&mut self) {
+        let Some(rx) = &self.fakedns_settings_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.fakedns_settings_rx = None;
+                match outcome.result {
+                    Ok(success) => {
+                        let inbounds = success.editable.inbound_summaries();
+                        let outbounds = success.editable.outbound_summaries();
+                        let dns = success.editable.dns_summary();
+                        let fakedns = success.editable.fakedns_summary();
+                        let observatory = success.editable.observatory_summary();
+                        let burst_observatory = success.editable.burst_observatory_summary();
+                        let routing = success.editable.routing_summary();
+                        let policy = success.editable.policy_summary();
+                        let vless_clients = success.editable.vless_clients();
+                        let warnings = self.loaded_config.warnings().to_vec();
+                        self.loaded_config = LoadedConfigSnapshot::Loaded {
+                            inbounds,
+                            outbounds,
+                            dns,
+                            fakedns,
+                            observatory,
+                            burst_observatory,
+                            routing,
+                            policy,
+                            vless_clients,
+                            warnings,
+                            editable: Some(success.editable),
+                        };
+                        self.fakedns_settings_draft = None;
+                        self.fakedns_settings_error = None;
+                        self.fakedns_settings_saved_flash = true;
+                        self.fakedns_settings_diff_preview = None;
+                        self.show_status_message(
+                            "FakeDNS settings were updated. Restart or reload Xray to apply the changes.",
+                        );
+                    }
+                    Err(error) => {
+                        let technical =
+                            crate::logging::redact::sanitize_detail(error.message().as_str());
+                        error!(
+                            target: "app",
+                            detail = %technical,
+                            "Xray fakedns settings validation failed"
+                        );
+                        let user_message = user_facing_config_modify_error(&error);
+                        self.fakedns_settings_error = Some(user_message.clone());
+                        self.show_status_message(user_message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.fakedns_settings_rx = None;
+                if matches!(self.operation, CurrentOperation::SavingFakeDnsSettings) {
+                    self.fakedns_settings_error =
+                        Some("Remote write failed: worker ended unexpectedly".to_owned());
+                    self.show_status_message("Remote write failed: worker ended unexpectedly");
+                }
+            }
+        }
+    }
+
+    // ─── Stats Settings (Roadmap §2.1:52) ────────────────────────────────────
+
+    /// Read-only / edit model for the Stats Settings page.
+    pub fn stats_settings_page_model(&self) -> StatsSettingsPageModel {
+        build_stats_settings_page_model(
+            self.ssh_status,
+            &self.discovery,
+            &self.loaded_config,
+            self.stats_settings_draft.as_ref(),
+            self.is_stats_settings_mutation_busy(),
+            self.stats_settings_error.clone(),
+            self.stats_settings_saved_flash,
+        )
+    }
+
+    /// `true` while a stats-settings save is in flight.
+    pub fn is_stats_settings_mutation_busy(&self) -> bool {
+        self.stats_settings_rx.is_some()
+    }
+
+    /// Enters edit mode with an in-memory draft cloned from the loaded config.
+    pub fn begin_edit_stats_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        let settings = {
+            let Some(editable) = self.loaded_config.editable() else {
+                return Err("Configuration not loaded.".to_owned());
+            };
+            editable.stats_settings()
+        };
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        self.show_status_message("Loading stats settings...");
+        self.stats_settings_draft = Some(settings);
+        self.stats_settings_error = None;
+        self.stats_settings_saved_flash = false;
+        self.stats_settings_diff_preview = None;
+        self.clear_current_operation();
+        Ok(())
+    }
+
+    /// Discards the in-memory draft and returns to view mode.
+    pub fn cancel_edit_stats_settings(&mut self) {
+        self.stats_settings_draft = None;
+        self.stats_settings_error = None;
+        self.stats_settings_saved_flash = false;
+        self.stats_settings_diff_preview = None;
+        self.clear_current_operation();
+    }
+
+    /// Mutable access to the stats-settings draft (edit mode only).
+    pub fn stats_settings_draft_mut(&mut self) -> Option<&mut StatsSettings> {
+        self.stats_settings_draft.as_mut()
+    }
+
+    /// Borrowed stats-settings draft.
+    pub fn stats_settings_draft(&self) -> Option<&StatsSettings> {
+        self.stats_settings_draft.as_ref()
+    }
+
+    /// Last computed redacted structural diff preview for the stats settings draft (Roadmap
+    /// §3:126), if `preview_stats_settings_diff` was clicked since the last edit/save.
+    pub fn stats_settings_diff_preview(&self) -> Option<&[crate::xray::JsonDiffEntry]> {
+        self.stats_settings_diff_preview.as_deref()
+    }
+
+    /// Dry-runs the stats settings save and stores a redacted structural diff preview, without
+    /// mutating the loaded config or touching the remote (mirrors `preview_dns_settings_diff`).
+    pub fn preview_stats_settings_diff(&mut self) -> Result<(), String> {
+        let draft = self
+            .stats_settings_draft
+            .clone()
+            .ok_or_else(|| "Not in edit mode.".to_owned())?;
+        validate_stats_settings(&draft).map_err(|e| e.message())?;
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = UpdateStatsSettingsRequest { settings: draft };
+        let outcome = update_stats_settings(&mut editable, request).map_err(|e| e.message())?;
+        self.stats_settings_diff_preview = Some(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ));
+        Ok(())
+    }
+
+    /// Validates the draft and starts the remote save workflow.
+    pub fn start_save_stats_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+
+        let draft = match &self.stats_settings_draft {
+            Some(draft) => draft.clone(),
+            None => return Err("Not in edit mode.".to_owned()),
+        };
+
+        self.show_status_message("Validating stats settings...");
+        if let Err(error) = validate_stats_settings(&draft) {
+            self.stats_settings_error = Some(error.message());
+            return Err(error.message());
+        }
+
+        let editable = match self.loaded_config.editable() {
+            Some(editable) => editable.clone(),
+            None => return Err("Configuration not loaded.".to_owned()),
+        };
+
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    profile
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.stats_settings_rx = Some(rx);
+        self.stats_settings_error = None;
+        self.stats_settings_saved_flash = false;
+        self.status_message_until = None;
+        self.operation = CurrentOperation::SavingStatsSettings;
+        self.show_status_message("Saving stats settings...");
+
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let request = UpdateStatsSettingsRequest { settings: draft };
+        let validate_hint = self.config_validate_hint();
+
+        info!(target: "app", "starting stats settings mutation");
+
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = tx.send(StatsSettingsMutationOutcome {
+                        result: Err(crate::xray::ConfigModifyError::new(
+                            crate::xray::ConfigModifyErrorKind::UploadFailed,
+                            format!("failed to start async runtime: {error}"),
+                        )),
+                    });
+                    return;
+                }
+            };
+
+            let outcome = runtime.block_on(run_update_stats_settings(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+
+        Ok(())
+    }
+
+    /// Polls for a completed stats-settings save.
+    pub fn poll_stats_settings_mutation(&mut self) {
+        let Some(rx) = &self.stats_settings_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.stats_settings_rx = None;
+                match outcome.result {
+                    Ok(success) => {
+                        let inbounds = success.editable.inbound_summaries();
+                        let outbounds = success.editable.outbound_summaries();
+                        let dns = success.editable.dns_summary();
+                        let fakedns = success.editable.fakedns_summary();
+                        let observatory = success.editable.observatory_summary();
+                        let burst_observatory = success.editable.burst_observatory_summary();
+                        let routing = success.editable.routing_summary();
+                        let policy = success.editable.policy_summary();
+                        let vless_clients = success.editable.vless_clients();
+                        let warnings = self.loaded_config.warnings().to_vec();
+                        self.loaded_config = LoadedConfigSnapshot::Loaded {
+                            inbounds,
+                            outbounds,
+                            dns,
+                            fakedns,
+                            observatory,
+                            burst_observatory,
+                            routing,
+                            policy,
+                            vless_clients,
+                            warnings,
+                            editable: Some(success.editable),
+                        };
+                        self.stats_settings_draft = None;
+                        self.stats_settings_error = None;
+                        self.stats_settings_saved_flash = true;
+                        self.stats_settings_diff_preview = None;
+                        self.show_status_message(
+                            "Stats settings were updated. Restart or reload Xray to apply the changes.",
+                        );
+                    }
+                    Err(error) => {
+                        let technical =
+                            crate::logging::redact::sanitize_detail(error.message().as_str());
+                        error!(
+                            target: "app",
+                            detail = %technical,
+                            "Xray stats settings validation failed"
+                        );
+                        let user_message = user_facing_config_modify_error(&error);
+                        self.stats_settings_error = Some(user_message.clone());
+                        self.show_status_message(user_message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.stats_settings_rx = None;
+                if matches!(self.operation, CurrentOperation::SavingStatsSettings) {
+                    self.stats_settings_error =
+                        Some("Remote write failed: worker ended unexpectedly".to_owned());
+                    self.show_status_message("Remote write failed: worker ended unexpectedly");
+                }
+            }
+        }
+    }
+
+    // ─── Metrics Settings (Roadmap §2.1:53) ──────────────────────────────────
+
+    /// Read-only / edit model for the Metrics Settings page.
+    pub fn metrics_settings_page_model(&self) -> MetricsSettingsPageModel {
+        build_metrics_settings_page_model(
+            self.ssh_status,
+            &self.discovery,
+            &self.loaded_config,
+            self.metrics_settings_draft.as_ref(),
+            self.is_metrics_settings_mutation_busy(),
+            self.metrics_settings_error.clone(),
+            self.metrics_settings_saved_flash,
+        )
+    }
+
+    /// `true` while a metrics-settings save is in flight.
+    pub fn is_metrics_settings_mutation_busy(&self) -> bool {
+        self.metrics_settings_rx.is_some()
+    }
+
+    /// Enters edit mode with an in-memory draft cloned from the loaded config.
+    pub fn begin_edit_metrics_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        let settings = {
+            let Some(editable) = self.loaded_config.editable() else {
+                return Err("Configuration not loaded.".to_owned());
+            };
+            editable.metrics_settings()
+        };
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        self.show_status_message("Loading metrics settings...");
+        self.metrics_settings_draft = Some(settings);
+        self.metrics_settings_error = None;
+        self.metrics_settings_saved_flash = false;
+        self.metrics_settings_diff_preview = None;
+        self.clear_current_operation();
+        Ok(())
+    }
+
+    /// Discards the in-memory draft and returns to view mode.
+    pub fn cancel_edit_metrics_settings(&mut self) {
+        self.metrics_settings_draft = None;
+        self.metrics_settings_error = None;
+        self.metrics_settings_saved_flash = false;
+        self.metrics_settings_diff_preview = None;
+        self.clear_current_operation();
+    }
+
+    /// Mutable access to the metrics-settings draft (edit mode only).
+    pub fn metrics_settings_draft_mut(&mut self) -> Option<&mut MetricsSettings> {
+        self.metrics_settings_draft.as_mut()
+    }
+
+    /// Borrowed metrics-settings draft.
+    pub fn metrics_settings_draft(&self) -> Option<&MetricsSettings> {
+        self.metrics_settings_draft.as_ref()
+    }
+
+    /// Last computed redacted structural diff preview for the metrics settings draft (Roadmap
+    /// §3:126), if `preview_metrics_settings_diff` was clicked since the last edit/save.
+    pub fn metrics_settings_diff_preview(&self) -> Option<&[crate::xray::JsonDiffEntry]> {
+        self.metrics_settings_diff_preview.as_deref()
+    }
+
+    /// Dry-runs the metrics settings save and stores a redacted structural diff preview, without
+    /// mutating the loaded config or touching the remote (mirrors `preview_dns_settings_diff`).
+    pub fn preview_metrics_settings_diff(&mut self) -> Result<(), String> {
+        let draft = self
+            .metrics_settings_draft
+            .clone()
+            .ok_or_else(|| "Not in edit mode.".to_owned())?;
+        validate_metrics_settings(&draft).map_err(|e| e.message())?;
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = UpdateMetricsSettingsRequest { settings: draft };
+        let outcome = update_metrics_settings(&mut editable, request).map_err(|e| e.message())?;
+        self.metrics_settings_diff_preview = Some(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ));
+        Ok(())
+    }
+
+    /// Validates the draft and starts the remote save workflow.
+    pub fn start_save_metrics_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+
+        let draft = match &self.metrics_settings_draft {
+            Some(draft) => draft.clone(),
+            None => return Err("Not in edit mode.".to_owned()),
+        };
+
+        self.show_status_message("Validating metrics settings...");
+        if let Err(error) = validate_metrics_settings(&draft) {
+            self.metrics_settings_error = Some(error.message());
+            return Err(error.message());
+        }
+
+        let editable = match self.loaded_config.editable() {
+            Some(editable) => editable.clone(),
+            None => return Err("Configuration not loaded.".to_owned()),
+        };
+
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    profile
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.metrics_settings_rx = Some(rx);
+        self.metrics_settings_error = None;
+        self.metrics_settings_saved_flash = false;
+        self.status_message_until = None;
+        self.operation = CurrentOperation::SavingMetricsSettings;
+        self.show_status_message("Saving metrics settings...");
+
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let request = UpdateMetricsSettingsRequest { settings: draft };
+        let validate_hint = self.config_validate_hint();
+
+        info!(target: "app", "starting metrics settings mutation");
+
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = tx.send(MetricsSettingsMutationOutcome {
+                        result: Err(crate::xray::ConfigModifyError::new(
+                            crate::xray::ConfigModifyErrorKind::UploadFailed,
+                            format!("failed to start async runtime: {error}"),
+                        )),
+                    });
+                    return;
+                }
+            };
+
+            let outcome = runtime.block_on(run_update_metrics_settings(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+
+        Ok(())
+    }
+
+    /// Polls for a completed metrics-settings save.
+    pub fn poll_metrics_settings_mutation(&mut self) {
+        let Some(rx) = &self.metrics_settings_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.metrics_settings_rx = None;
+                match outcome.result {
+                    Ok(success) => {
+                        let inbounds = success.editable.inbound_summaries();
+                        let outbounds = success.editable.outbound_summaries();
+                        let dns = success.editable.dns_summary();
+                        let fakedns = success.editable.fakedns_summary();
+                        let observatory = success.editable.observatory_summary();
+                        let burst_observatory = success.editable.burst_observatory_summary();
+                        let routing = success.editable.routing_summary();
+                        let policy = success.editable.policy_summary();
+                        let vless_clients = success.editable.vless_clients();
+                        let warnings = self.loaded_config.warnings().to_vec();
+                        self.loaded_config = LoadedConfigSnapshot::Loaded {
+                            inbounds,
+                            outbounds,
+                            dns,
+                            fakedns,
+                            observatory,
+                            burst_observatory,
+                            routing,
+                            policy,
+                            vless_clients,
+                            warnings,
+                            editable: Some(success.editable),
+                        };
+                        self.metrics_settings_draft = None;
+                        self.metrics_settings_error = None;
+                        self.metrics_settings_saved_flash = true;
+                        self.metrics_settings_diff_preview = None;
+                        self.show_status_message(
+                            "Metrics settings were updated. Restart or reload Xray to apply the changes.",
+                        );
+                    }
+                    Err(error) => {
+                        let technical =
+                            crate::logging::redact::sanitize_detail(error.message().as_str());
+                        error!(
+                            target: "app",
+                            detail = %technical,
+                            "Xray metrics settings validation failed"
+                        );
+                        let user_message = user_facing_config_modify_error(&error);
+                        self.metrics_settings_error = Some(user_message.clone());
+                        self.show_status_message(user_message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.metrics_settings_rx = None;
+                if matches!(self.operation, CurrentOperation::SavingMetricsSettings) {
+                    self.metrics_settings_error =
+                        Some("Remote write failed: worker ended unexpectedly".to_owned());
+                    self.show_status_message("Remote write failed: worker ended unexpectedly");
+                }
+            }
+        }
+    }
+
+    // ─── Env Settings (Roadmap §2.1:55) ──────────────────────────────────────
+
+    /// Read-only / edit model for the Env Settings page.
+    pub fn env_settings_page_model(&self) -> EnvSettingsPageModel {
+        build_env_settings_page_model(
+            self.ssh_status,
+            &self.discovery,
+            &self.loaded_config,
+            self.env_settings_draft.as_ref(),
+            self.is_env_settings_mutation_busy(),
+            self.env_settings_error.clone(),
+            self.env_settings_saved_flash,
+        )
+    }
+
+    /// `true` while an env-settings save is in flight.
+    pub fn is_env_settings_mutation_busy(&self) -> bool {
+        self.env_settings_rx.is_some()
+    }
+
+    /// Enters edit mode with an in-memory draft cloned from the loaded config.
+    pub fn begin_edit_env_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        let settings = {
+            let Some(editable) = self.loaded_config.editable() else {
+                return Err("Configuration not loaded.".to_owned());
+            };
+            editable.env_settings()
+        };
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        self.show_status_message("Loading env settings...");
+        self.env_settings_draft = Some(settings);
+        self.env_settings_error = None;
+        self.env_settings_saved_flash = false;
+        self.env_settings_diff_preview = None;
+        self.clear_current_operation();
+        Ok(())
+    }
+
+    /// Discards the in-memory draft and returns to view mode.
+    pub fn cancel_edit_env_settings(&mut self) {
+        self.env_settings_draft = None;
+        self.env_settings_error = None;
+        self.env_settings_saved_flash = false;
+        self.env_settings_diff_preview = None;
+        self.clear_current_operation();
+    }
+
+    /// Mutable access to the env-settings draft (edit mode only).
+    pub fn env_settings_draft_mut(&mut self) -> Option<&mut EnvSettings> {
+        self.env_settings_draft.as_mut()
+    }
+
+    /// Borrowed env-settings draft.
+    pub fn env_settings_draft(&self) -> Option<&EnvSettings> {
+        self.env_settings_draft.as_ref()
+    }
+
+    /// Last computed redacted structural diff preview for the env settings draft (Roadmap
+    /// §3:126), if `preview_env_settings_diff` was clicked since the last edit/save.
+    pub fn env_settings_diff_preview(&self) -> Option<&[crate::xray::JsonDiffEntry]> {
+        self.env_settings_diff_preview.as_deref()
+    }
+
+    /// Dry-runs the env settings save and stores a redacted structural diff preview, without
+    /// mutating the loaded config or touching the remote (mirrors `preview_metrics_settings_diff`).
+    pub fn preview_env_settings_diff(&mut self) -> Result<(), String> {
+        let draft = self
+            .env_settings_draft
+            .clone()
+            .ok_or_else(|| "Not in edit mode.".to_owned())?;
+        validate_env_settings(&draft).map_err(|e| e.message())?;
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = UpdateEnvSettingsRequest { settings: draft };
+        let outcome = update_env_settings(&mut editable, request).map_err(|e| e.message())?;
+        self.env_settings_diff_preview = Some(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ));
+        Ok(())
+    }
+
+    /// Validates the draft and starts the remote save workflow.
+    pub fn start_save_env_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+
+        let draft = match &self.env_settings_draft {
+            Some(draft) => draft.clone(),
+            None => return Err("Not in edit mode.".to_owned()),
+        };
+
+        self.show_status_message("Validating env settings...");
+        if let Err(error) = validate_env_settings(&draft) {
+            self.env_settings_error = Some(error.message());
+            return Err(error.message());
+        }
+
+        let editable = match self.loaded_config.editable() {
+            Some(editable) => editable.clone(),
+            None => return Err("Configuration not loaded.".to_owned()),
+        };
+
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    profile
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.env_settings_rx = Some(rx);
+        self.env_settings_error = None;
+        self.env_settings_saved_flash = false;
+        self.status_message_until = None;
+        self.operation = CurrentOperation::SavingEnvSettings;
+        self.show_status_message("Saving env settings...");
+
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let request = UpdateEnvSettingsRequest { settings: draft };
+        let validate_hint = self.config_validate_hint();
+
+        info!(target: "app", "starting env settings mutation");
+
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = tx.send(EnvSettingsMutationOutcome {
+                        result: Err(crate::xray::ConfigModifyError::new(
+                            crate::xray::ConfigModifyErrorKind::UploadFailed,
+                            format!("failed to start async runtime: {error}"),
+                        )),
+                    });
+                    return;
+                }
+            };
+
+            let outcome = runtime.block_on(run_update_env_settings(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+
+        Ok(())
+    }
+
+    /// Polls for a completed env-settings save.
+    pub fn poll_env_settings_mutation(&mut self) {
+        let Some(rx) = &self.env_settings_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.env_settings_rx = None;
+                match outcome.result {
+                    Ok(success) => {
+                        let inbounds = success.editable.inbound_summaries();
+                        let outbounds = success.editable.outbound_summaries();
+                        let dns = success.editable.dns_summary();
+                        let fakedns = success.editable.fakedns_summary();
+                        let observatory = success.editable.observatory_summary();
+                        let burst_observatory = success.editable.burst_observatory_summary();
+                        let routing = success.editable.routing_summary();
+                        let policy = success.editable.policy_summary();
+                        let vless_clients = success.editable.vless_clients();
+                        let warnings = self.loaded_config.warnings().to_vec();
+                        self.loaded_config = LoadedConfigSnapshot::Loaded {
+                            inbounds,
+                            outbounds,
+                            dns,
+                            fakedns,
+                            observatory,
+                            burst_observatory,
+                            routing,
+                            policy,
+                            vless_clients,
+                            warnings,
+                            editable: Some(success.editable),
+                        };
+                        self.env_settings_draft = None;
+                        self.env_settings_error = None;
+                        self.env_settings_saved_flash = true;
+                        self.env_settings_diff_preview = None;
+                        self.show_status_message(
+                            "Env settings were updated. Restart or reload Xray to apply the changes.",
+                        );
+                    }
+                    Err(error) => {
+                        let technical =
+                            crate::logging::redact::sanitize_detail(error.message().as_str());
+                        error!(
+                            target: "app",
+                            detail = %technical,
+                            "Xray env settings validation failed"
+                        );
+                        let user_message = user_facing_config_modify_error(&error);
+                        self.env_settings_error = Some(user_message.clone());
+                        self.show_status_message(user_message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.env_settings_rx = None;
+                if matches!(self.operation, CurrentOperation::SavingEnvSettings) {
+                    self.env_settings_error =
+                        Some("Remote write failed: worker ended unexpectedly".to_owned());
+                    self.show_status_message("Remote write failed: worker ended unexpectedly");
+                }
+            }
+        }
+    }
+
+    // ─── Version Settings (Roadmap §2.1:56) ──────────────────────────────────
+
+    /// Read-only / edit model for the Version Settings page.
+    pub fn version_settings_page_model(&self) -> VersionSettingsPageModel {
+        build_version_settings_page_model(
+            self.ssh_status,
+            &self.discovery,
+            &self.loaded_config,
+            self.version_settings_draft.as_ref(),
+            self.is_version_settings_mutation_busy(),
+            self.version_settings_error.clone(),
+            self.version_settings_saved_flash,
+        )
+    }
+
+    /// `true` while a version-settings save is in flight.
+    pub fn is_version_settings_mutation_busy(&self) -> bool {
+        self.version_settings_rx.is_some()
+    }
+
+    /// Enters edit mode with an in-memory draft cloned from the loaded config.
+    pub fn begin_edit_version_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        let settings = {
+            let Some(editable) = self.loaded_config.editable() else {
+                return Err("Configuration not loaded.".to_owned());
+            };
+            editable.version_settings()
+        };
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        self.show_status_message("Loading version settings...");
+        self.version_settings_draft = Some(settings);
+        self.version_settings_error = None;
+        self.version_settings_saved_flash = false;
+        self.version_settings_diff_preview = None;
+        self.clear_current_operation();
+        Ok(())
+    }
+
+    /// Discards the in-memory draft and returns to view mode.
+    pub fn cancel_edit_version_settings(&mut self) {
+        self.version_settings_draft = None;
+        self.version_settings_error = None;
+        self.version_settings_saved_flash = false;
+        self.version_settings_diff_preview = None;
+        self.clear_current_operation();
+    }
+
+    /// Mutable access to the version-settings draft (edit mode only).
+    pub fn version_settings_draft_mut(&mut self) -> Option<&mut VersionSettings> {
+        self.version_settings_draft.as_mut()
+    }
+
+    /// Borrowed version-settings draft.
+    pub fn version_settings_draft(&self) -> Option<&VersionSettings> {
+        self.version_settings_draft.as_ref()
+    }
+
+    /// Last computed redacted structural diff preview for the version settings draft (Roadmap
+    /// §3:126), if `preview_version_settings_diff` was clicked since the last edit/save.
+    pub fn version_settings_diff_preview(&self) -> Option<&[crate::xray::JsonDiffEntry]> {
+        self.version_settings_diff_preview.as_deref()
+    }
+
+    /// Dry-runs the version settings save and stores a redacted structural diff preview, without
+    /// mutating the loaded config or touching the remote (mirrors `preview_env_settings_diff`).
+    pub fn preview_version_settings_diff(&mut self) -> Result<(), String> {
+        let draft = self
+            .version_settings_draft
+            .clone()
+            .ok_or_else(|| "Not in edit mode.".to_owned())?;
+        validate_version_settings(&draft).map_err(|e| e.message())?;
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = UpdateVersionSettingsRequest { settings: draft };
+        let outcome = update_version_settings(&mut editable, request).map_err(|e| e.message())?;
+        self.version_settings_diff_preview = Some(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ));
+        Ok(())
+    }
+
+    /// Validates the draft and starts the remote save workflow.
+    pub fn start_save_version_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+
+        let draft = match &self.version_settings_draft {
+            Some(draft) => draft.clone(),
+            None => return Err("Not in edit mode.".to_owned()),
+        };
+
+        self.show_status_message("Validating version settings...");
+        if let Err(error) = validate_version_settings(&draft) {
+            self.version_settings_error = Some(error.message());
+            return Err(error.message());
+        }
+
+        let editable = match self.loaded_config.editable() {
+            Some(editable) => editable.clone(),
+            None => return Err("Configuration not loaded.".to_owned()),
+        };
+
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    profile
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.version_settings_rx = Some(rx);
+        self.version_settings_error = None;
+        self.version_settings_saved_flash = false;
+        self.status_message_until = None;
+        self.operation = CurrentOperation::SavingVersionSettings;
+        self.show_status_message("Saving version settings...");
+
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let request = UpdateVersionSettingsRequest { settings: draft };
+        let validate_hint = self.config_validate_hint();
+
+        info!(target: "app", "starting version settings mutation");
+
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = tx.send(VersionSettingsMutationOutcome {
+                        result: Err(crate::xray::ConfigModifyError::new(
+                            crate::xray::ConfigModifyErrorKind::UploadFailed,
+                            format!("failed to start async runtime: {error}"),
+                        )),
+                    });
+                    return;
+                }
+            };
+
+            let outcome = runtime.block_on(run_update_version_settings(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+
+        Ok(())
+    }
+
+    /// Polls for a completed version-settings save.
+    pub fn poll_version_settings_mutation(&mut self) {
+        let Some(rx) = &self.version_settings_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.version_settings_rx = None;
+                match outcome.result {
+                    Ok(success) => {
+                        let inbounds = success.editable.inbound_summaries();
+                        let outbounds = success.editable.outbound_summaries();
+                        let dns = success.editable.dns_summary();
+                        let fakedns = success.editable.fakedns_summary();
+                        let observatory = success.editable.observatory_summary();
+                        let burst_observatory = success.editable.burst_observatory_summary();
+                        let routing = success.editable.routing_summary();
+                        let policy = success.editable.policy_summary();
+                        let vless_clients = success.editable.vless_clients();
+                        let warnings = self.loaded_config.warnings().to_vec();
+                        self.loaded_config = LoadedConfigSnapshot::Loaded {
+                            inbounds,
+                            outbounds,
+                            dns,
+                            fakedns,
+                            observatory,
+                            burst_observatory,
+                            routing,
+                            policy,
+                            vless_clients,
+                            warnings,
+                            editable: Some(success.editable),
+                        };
+                        self.version_settings_draft = None;
+                        self.version_settings_error = None;
+                        self.version_settings_saved_flash = true;
+                        self.version_settings_diff_preview = None;
+                        self.show_status_message(
+                            "Version settings were updated. Restart or reload Xray to apply the changes.",
+                        );
+                    }
+                    Err(error) => {
+                        let technical =
+                            crate::logging::redact::sanitize_detail(error.message().as_str());
+                        error!(
+                            target: "app",
+                            detail = %technical,
+                            "Xray version settings validation failed"
+                        );
+                        let user_message = user_facing_config_modify_error(&error);
+                        self.version_settings_error = Some(user_message.clone());
+                        self.show_status_message(user_message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.version_settings_rx = None;
+                if matches!(self.operation, CurrentOperation::SavingVersionSettings) {
+                    self.version_settings_error =
+                        Some("Remote write failed: worker ended unexpectedly".to_owned());
+                    self.show_status_message("Remote write failed: worker ended unexpectedly");
+                }
+            }
+        }
+    }
+
+    // ─── GeoData Settings (Roadmap §2.1:57) ──────────────────────────────────
+
+    /// Read-only / edit model for the GeoData Settings page.
+    pub fn geodata_settings_page_model(&self) -> GeodataSettingsPageModel {
+        build_geodata_settings_page_model(
+            self.ssh_status,
+            &self.discovery,
+            &self.loaded_config,
+            self.geodata_settings_draft.as_ref(),
+            self.is_geodata_settings_mutation_busy(),
+            self.geodata_settings_error.clone(),
+            self.geodata_settings_saved_flash,
+        )
+    }
+
+    /// `true` while a geodata-settings save is in flight.
+    pub fn is_geodata_settings_mutation_busy(&self) -> bool {
+        self.geodata_settings_rx.is_some()
+    }
+
+    /// Enters edit mode with an in-memory draft cloned from the loaded config.
+    pub fn begin_edit_geodata_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        let settings = {
+            let Some(editable) = self.loaded_config.editable() else {
+                return Err("Configuration not loaded.".to_owned());
+            };
+            editable.geodata_settings()
+        };
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        self.show_status_message("Loading geodata settings...");
+        self.geodata_settings_draft = Some(settings);
+        self.geodata_settings_error = None;
+        self.geodata_settings_saved_flash = false;
+        self.geodata_settings_diff_preview = None;
+        self.clear_current_operation();
+        Ok(())
+    }
+
+    /// Discards the in-memory draft and returns to view mode.
+    pub fn cancel_edit_geodata_settings(&mut self) {
+        self.geodata_settings_draft = None;
+        self.geodata_settings_error = None;
+        self.geodata_settings_saved_flash = false;
+        self.geodata_settings_diff_preview = None;
+        self.clear_current_operation();
+    }
+
+    /// Mutable access to the geodata-settings draft (edit mode only).
+    pub fn geodata_settings_draft_mut(&mut self) -> Option<&mut GeodataSettings> {
+        self.geodata_settings_draft.as_mut()
+    }
+
+    /// Borrowed geodata-settings draft.
+    pub fn geodata_settings_draft(&self) -> Option<&GeodataSettings> {
+        self.geodata_settings_draft.as_ref()
+    }
+
+    /// Last computed redacted structural diff preview for the geodata settings draft (Roadmap
+    /// §3:126), if `preview_geodata_settings_diff` was clicked since the last edit/save.
+    pub fn geodata_settings_diff_preview(&self) -> Option<&[crate::xray::JsonDiffEntry]> {
+        self.geodata_settings_diff_preview.as_deref()
+    }
+
+    /// Dry-runs the geodata settings save and stores a redacted structural diff preview, without
+    /// mutating the loaded config or touching the remote (mirrors `preview_version_settings_diff`).
+    pub fn preview_geodata_settings_diff(&mut self) -> Result<(), String> {
+        let draft = self
+            .geodata_settings_draft
+            .clone()
+            .ok_or_else(|| "Not in edit mode.".to_owned())?;
+        validate_geodata_settings(&draft).map_err(|e| e.message())?;
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = UpdateGeodataSettingsRequest { settings: draft };
+        let outcome = update_geodata_settings(&mut editable, request).map_err(|e| e.message())?;
+        self.geodata_settings_diff_preview = Some(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ));
+        Ok(())
+    }
+
+    /// Validates the draft and starts the remote save workflow.
+    pub fn start_save_geodata_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+
+        let draft = match &self.geodata_settings_draft {
+            Some(draft) => draft.clone(),
+            None => return Err("Not in edit mode.".to_owned()),
+        };
+
+        self.show_status_message("Validating geodata settings...");
+        if let Err(error) = validate_geodata_settings(&draft) {
+            self.geodata_settings_error = Some(error.message());
+            return Err(error.message());
+        }
+
+        let editable = match self.loaded_config.editable() {
+            Some(editable) => editable.clone(),
+            None => return Err("Configuration not loaded.".to_owned()),
+        };
+
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    profile
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.geodata_settings_rx = Some(rx);
+        self.geodata_settings_error = None;
+        self.geodata_settings_saved_flash = false;
+        self.status_message_until = None;
+        self.operation = CurrentOperation::SavingGeodataSettings;
+        self.show_status_message("Saving geodata settings...");
+
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let request = UpdateGeodataSettingsRequest { settings: draft };
+        let validate_hint = self.config_validate_hint();
+
+        info!(target: "app", "starting geodata settings mutation");
+
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = tx.send(GeodataSettingsMutationOutcome {
+                        result: Err(crate::xray::ConfigModifyError::new(
+                            crate::xray::ConfigModifyErrorKind::UploadFailed,
+                            format!("failed to start async runtime: {error}"),
+                        )),
+                    });
+                    return;
+                }
+            };
+
+            let outcome = runtime.block_on(run_update_geodata_settings(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+
+        Ok(())
+    }
+
+    /// Polls for a completed geodata-settings save.
+    pub fn poll_geodata_settings_mutation(&mut self) {
+        let Some(rx) = &self.geodata_settings_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.geodata_settings_rx = None;
+                match outcome.result {
+                    Ok(success) => {
+                        let inbounds = success.editable.inbound_summaries();
+                        let outbounds = success.editable.outbound_summaries();
+                        let dns = success.editable.dns_summary();
+                        let fakedns = success.editable.fakedns_summary();
+                        let observatory = success.editable.observatory_summary();
+                        let burst_observatory = success.editable.burst_observatory_summary();
+                        let routing = success.editable.routing_summary();
+                        let policy = success.editable.policy_summary();
+                        let vless_clients = success.editable.vless_clients();
+                        let warnings = self.loaded_config.warnings().to_vec();
+                        self.loaded_config = LoadedConfigSnapshot::Loaded {
+                            inbounds,
+                            outbounds,
+                            dns,
+                            fakedns,
+                            observatory,
+                            burst_observatory,
+                            routing,
+                            policy,
+                            vless_clients,
+                            warnings,
+                            editable: Some(success.editable),
+                        };
+                        self.geodata_settings_draft = None;
+                        self.geodata_settings_error = None;
+                        self.geodata_settings_saved_flash = true;
+                        self.geodata_settings_diff_preview = None;
+                        self.show_status_message(
+                            "GeoData settings were updated. Restart or reload Xray to apply the changes.",
+                        );
+                    }
+                    Err(error) => {
+                        let technical =
+                            crate::logging::redact::sanitize_detail(error.message().as_str());
+                        error!(
+                            target: "app",
+                            detail = %technical,
+                            "Xray geodata settings validation failed"
+                        );
+                        let user_message = user_facing_config_modify_error(&error);
+                        self.geodata_settings_error = Some(user_message.clone());
+                        self.show_status_message(user_message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.geodata_settings_rx = None;
+                if matches!(self.operation, CurrentOperation::SavingGeodataSettings) {
+                    self.geodata_settings_error =
+                        Some("Remote write failed: worker ended unexpectedly".to_owned());
+                    self.show_status_message("Remote write failed: worker ended unexpectedly");
+                }
+            }
+        }
+    }
+
+    // ─── Routing Settings (Roadmap §2.1:48) ──────────────────────────────────
+
+    /// `true` while a routing-settings save is in flight.
+    pub fn is_routing_settings_mutation_busy(&self) -> bool {
+        self.routing_settings_rx.is_some()
+    }
+
+    /// Enters edit mode with an in-memory draft cloned from the loaded config.
+    pub fn begin_edit_routing_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        let settings = {
+            let Some(editable) = self.loaded_config.editable() else {
+                return Err("Configuration not loaded.".to_owned());
+            };
+            editable.routing_settings()
+        };
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        self.show_status_message("Loading routing settings...");
+        self.routing_settings_draft = Some(settings);
+        self.routing_settings_error = None;
+        self.routing_settings_saved_flash = false;
+        self.routing_settings_diff_preview = None;
+        self.clear_current_operation();
+        Ok(())
+    }
+
+    /// Discards the in-memory draft and returns to view mode.
+    pub fn cancel_edit_routing_settings(&mut self) {
+        self.routing_settings_draft = None;
+        self.routing_settings_error = None;
+        self.routing_settings_saved_flash = false;
+        self.routing_settings_diff_preview = None;
+        self.clear_current_operation();
+    }
+
+    /// Mutable access to the routing-settings draft (edit mode only).
+    pub fn routing_settings_draft_mut(&mut self) -> Option<&mut RoutingSettings> {
+        self.routing_settings_draft.as_mut()
+    }
+
+    /// Borrowed routing-settings draft.
+    pub fn routing_settings_draft(&self) -> Option<&RoutingSettings> {
+        self.routing_settings_draft.as_ref()
+    }
+
+    /// Last computed redacted structural diff preview for the routing settings draft (Roadmap
+    /// §3:126), if `preview_routing_settings_diff` was clicked since the last edit/save.
+    pub fn routing_settings_diff_preview(&self) -> Option<&[crate::xray::JsonDiffEntry]> {
+        self.routing_settings_diff_preview.as_deref()
+    }
+
+    /// Dry-runs the routing settings save and stores a redacted structural diff preview, without
+    /// mutating the loaded config or touching the remote (mirrors `preview_dns_settings_diff`).
+    pub fn preview_routing_settings_diff(&mut self) -> Result<(), String> {
+        let draft = self
+            .routing_settings_draft
+            .clone()
+            .ok_or_else(|| "Not in edit mode.".to_owned())?;
+        validate_routing_settings(&draft).map_err(|e| e.message())?;
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = UpdateRoutingSettingsRequest { settings: draft };
+        let outcome =
+            update_routing_settings(&mut editable, request).map_err(|e| e.message())?;
+        self.routing_settings_diff_preview = Some(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ));
+        Ok(())
+    }
+
+    /// Validates the draft and starts the remote save workflow.
+    pub fn start_save_routing_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+
+        let draft = match &self.routing_settings_draft {
+            Some(draft) => draft.clone(),
+            None => return Err("Not in edit mode.".to_owned()),
+        };
+
+        self.show_status_message("Validating routing settings...");
+        if let Err(error) = validate_routing_settings(&draft) {
+            self.routing_settings_error = Some(error.message());
+            return Err(error.message());
+        }
+
+        let editable = match self.loaded_config.editable() {
+            Some(editable) => editable.clone(),
+            None => return Err("Configuration not loaded.".to_owned()),
+        };
+
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    profile
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.routing_settings_rx = Some(rx);
+        self.routing_settings_error = None;
+        self.routing_settings_saved_flash = false;
+        self.status_message_until = None;
+        self.operation = CurrentOperation::SavingRoutingSettings;
+        self.show_status_message("Saving routing settings...");
+
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let request = UpdateRoutingSettingsRequest { settings: draft };
+        let validate_hint = self.config_validate_hint();
+
+        info!(target: "app", "starting routing settings mutation");
+
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = tx.send(RoutingSettingsMutationOutcome {
+                        result: Err(crate::xray::ConfigModifyError::new(
+                            crate::xray::ConfigModifyErrorKind::UploadFailed,
+                            format!("failed to start async runtime: {error}"),
+                        )),
+                    });
+                    return;
+                }
+            };
+
+            let outcome = runtime.block_on(run_update_routing_settings(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+
+        Ok(())
+    }
+
+    /// Polls for a completed routing-settings save.
+    pub fn poll_routing_settings_mutation(&mut self) {
+        let Some(rx) = &self.routing_settings_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.routing_settings_rx = None;
+                match outcome.result {
+                    Ok(success) => {
+                        let inbounds = success.editable.inbound_summaries();
+                        let outbounds = success.editable.outbound_summaries();
+                        let dns = success.editable.dns_summary();
+                        let fakedns = success.editable.fakedns_summary();
+                        let observatory = success.editable.observatory_summary();
+                        let burst_observatory = success.editable.burst_observatory_summary();
+                        let routing = success.editable.routing_summary();
+                        let policy = success.editable.policy_summary();
+                        let vless_clients = success.editable.vless_clients();
+                        let warnings = self.loaded_config.warnings().to_vec();
+                        self.loaded_config = LoadedConfigSnapshot::Loaded {
+                            inbounds,
+                            outbounds,
+                            dns,
+                            fakedns,
+                            observatory,
+                            burst_observatory,
+                            routing,
+                            policy,
+                            vless_clients,
+                            warnings,
+                            editable: Some(success.editable),
+                        };
+                        self.routing_settings_draft = None;
+                        self.routing_settings_error = None;
+                        self.routing_settings_saved_flash = true;
+                        self.routing_settings_diff_preview = None;
+                        self.show_status_message(
+                            "Routing settings were updated. Restart or reload Xray to apply the changes.",
+                        );
+                    }
+                    Err(error) => {
+                        let technical =
+                            crate::logging::redact::sanitize_detail(error.message().as_str());
+                        error!(
+                            target: "app",
+                            detail = %technical,
+                            "Xray routing settings validation failed"
+                        );
+                        let user_message = user_facing_config_modify_error(&error);
+                        self.routing_settings_error = Some(user_message.clone());
+                        self.show_status_message(user_message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.routing_settings_rx = None;
+                if matches!(self.operation, CurrentOperation::SavingRoutingSettings) {
+                    self.routing_settings_error =
+                        Some("Remote write failed: worker ended unexpectedly".to_owned());
+                    self.show_status_message("Remote write failed: worker ended unexpectedly");
+                }
+            }
+        }
+    }
+
+    // ─── Policy Settings (Roadmap §2.1:49) ───────────────────────────────────
+
+    /// `true` while a policy-settings save is in flight.
+    pub fn is_policy_settings_mutation_busy(&self) -> bool {
+        self.policy_settings_rx.is_some()
+    }
+
+    /// Enters edit mode with an in-memory draft cloned from the loaded config.
+    pub fn begin_edit_policy_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        let settings = {
+            let Some(editable) = self.loaded_config.editable() else {
+                return Err("Configuration not loaded.".to_owned());
+            };
+            editable.policy_settings()
+        };
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        self.show_status_message("Loading policy settings...");
+        self.policy_settings_draft = Some(settings);
+        self.policy_settings_error = None;
+        self.policy_settings_saved_flash = false;
+        self.policy_settings_diff_preview = None;
+        self.clear_current_operation();
+        Ok(())
+    }
+
+    /// Discards the in-memory draft and returns to view mode.
+    pub fn cancel_edit_policy_settings(&mut self) {
+        self.policy_settings_draft = None;
+        self.policy_settings_error = None;
+        self.policy_settings_saved_flash = false;
+        self.policy_settings_diff_preview = None;
+        self.clear_current_operation();
+    }
+
+    /// Mutable access to the policy-settings draft (edit mode only).
+    pub fn policy_settings_draft_mut(&mut self) -> Option<&mut PolicySettings> {
+        self.policy_settings_draft.as_mut()
+    }
+
+    /// Borrowed policy-settings draft.
+    pub fn policy_settings_draft(&self) -> Option<&PolicySettings> {
+        self.policy_settings_draft.as_ref()
+    }
+
+    /// Last computed redacted structural diff preview for the policy settings draft (Roadmap
+    /// §3:126), if `preview_policy_settings_diff` was clicked since the last edit/save.
+    pub fn policy_settings_diff_preview(&self) -> Option<&[crate::xray::JsonDiffEntry]> {
+        self.policy_settings_diff_preview.as_deref()
+    }
+
+    /// Dry-runs the policy settings save and stores a redacted structural diff preview, without
+    /// mutating the loaded config or touching the remote (mirrors `preview_dns_settings_diff`).
+    pub fn preview_policy_settings_diff(&mut self) -> Result<(), String> {
+        let draft = self
+            .policy_settings_draft
+            .clone()
+            .ok_or_else(|| "Not in edit mode.".to_owned())?;
+        validate_policy_settings(&draft).map_err(|e| e.message())?;
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = UpdatePolicySettingsRequest { settings: draft };
+        let outcome =
+            update_policy_settings(&mut editable, request).map_err(|e| e.message())?;
+        self.policy_settings_diff_preview = Some(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ));
+        Ok(())
+    }
+
+    /// Validates the draft and starts the remote save workflow.
+    pub fn start_save_policy_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+
+        let draft = match &self.policy_settings_draft {
+            Some(draft) => draft.clone(),
+            None => return Err("Not in edit mode.".to_owned()),
+        };
+
+        self.show_status_message("Validating policy settings...");
+        if let Err(error) = validate_policy_settings(&draft) {
+            self.policy_settings_error = Some(error.message());
+            return Err(error.message());
+        }
+
+        let editable = match self.loaded_config.editable() {
+            Some(editable) => editable.clone(),
+            None => return Err("Configuration not loaded.".to_owned()),
+        };
+
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    profile
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.policy_settings_rx = Some(rx);
+        self.policy_settings_error = None;
+        self.policy_settings_saved_flash = false;
+        self.status_message_until = None;
+        self.operation = CurrentOperation::SavingPolicySettings;
+        self.show_status_message("Saving policy settings...");
+
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let request = UpdatePolicySettingsRequest { settings: draft };
+        let validate_hint = self.config_validate_hint();
+
+        info!(target: "app", "starting policy settings mutation");
+
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = tx.send(PolicySettingsMutationOutcome {
+                        result: Err(crate::xray::ConfigModifyError::new(
+                            crate::xray::ConfigModifyErrorKind::UploadFailed,
+                            format!("failed to start async runtime: {error}"),
+                        )),
+                    });
+                    return;
+                }
+            };
+
+            let outcome = runtime.block_on(run_update_policy_settings(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+
+        Ok(())
+    }
+
+    /// Polls for a completed policy-settings save.
+    pub fn poll_policy_settings_mutation(&mut self) {
+        let Some(rx) = &self.policy_settings_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.policy_settings_rx = None;
+                match outcome.result {
+                    Ok(success) => {
+                        let inbounds = success.editable.inbound_summaries();
+                        let outbounds = success.editable.outbound_summaries();
+                        let dns = success.editable.dns_summary();
+                        let fakedns = success.editable.fakedns_summary();
+                        let observatory = success.editable.observatory_summary();
+                        let burst_observatory = success.editable.burst_observatory_summary();
+                        let routing = success.editable.routing_summary();
+                        let policy = success.editable.policy_summary();
+                        let vless_clients = success.editable.vless_clients();
+                        let warnings = self.loaded_config.warnings().to_vec();
+                        self.loaded_config = LoadedConfigSnapshot::Loaded {
+                            inbounds,
+                            outbounds,
+                            dns,
+                            fakedns,
+                            observatory,
+                            burst_observatory,
+                            routing,
+                            policy,
+                            vless_clients,
+                            warnings,
+                            editable: Some(success.editable),
+                        };
+                        self.policy_settings_draft = None;
+                        self.policy_settings_error = None;
+                        self.policy_settings_saved_flash = true;
+                        self.policy_settings_diff_preview = None;
+                        self.show_status_message(
+                            "Policy settings were updated. Restart or reload Xray to apply the changes.",
+                        );
+                    }
+                    Err(error) => {
+                        let technical =
+                            crate::logging::redact::sanitize_detail(error.message().as_str());
+                        error!(
+                            target: "app",
+                            detail = %technical,
+                            "Xray policy settings validation failed"
+                        );
+                        let user_message = user_facing_config_modify_error(&error);
+                        self.policy_settings_error = Some(user_message.clone());
+                        self.show_status_message(user_message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.policy_settings_rx = None;
+                if matches!(self.operation, CurrentOperation::SavingPolicySettings) {
+                    self.policy_settings_error =
+                        Some("Remote write failed: worker ended unexpectedly".to_owned());
+                    self.show_status_message("Remote write failed: worker ended unexpectedly");
+                }
+            }
+        }
+    }
+
+    /// Builds the Observatory page model for the GUI (browsing + edit, Roadmap §2.1:50).
     pub fn observatory_page_model(&self) -> ObservatoryPageModel {
-        build_observatory_page_model(self.ssh_status, &self.discovery, &self.loaded_config)
+        build_observatory_page_model(
+            self.ssh_status,
+            &self.discovery,
+            &self.loaded_config,
+            self.observatory_settings_draft.as_ref(),
+            self.is_observatory_settings_mutation_busy(),
+            self.observatory_settings_error.clone(),
+            self.observatory_settings_saved_flash,
+        )
     }
 
-    /// Builds the read-only Burst Observatory page model.
+    // ─── Observatory Settings (Roadmap §2.1:50) ──────────────────────────────
+
+    /// `true` while an observatory-settings save is in flight.
+    pub fn is_observatory_settings_mutation_busy(&self) -> bool {
+        self.observatory_settings_rx.is_some()
+    }
+
+    /// Enters edit mode with an in-memory draft cloned from the loaded config.
+    pub fn begin_edit_observatory_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        let settings = {
+            let Some(editable) = self.loaded_config.editable() else {
+                return Err("Configuration not loaded.".to_owned());
+            };
+            editable.observatory_settings()
+        };
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        self.show_status_message("Loading Observatory settings...");
+        self.observatory_settings_draft = Some(settings);
+        self.observatory_settings_error = None;
+        self.observatory_settings_saved_flash = false;
+        self.observatory_settings_diff_preview = None;
+        self.clear_current_operation();
+        Ok(())
+    }
+
+    /// Discards the in-memory draft and returns to view mode.
+    pub fn cancel_edit_observatory_settings(&mut self) {
+        self.observatory_settings_draft = None;
+        self.observatory_settings_error = None;
+        self.observatory_settings_saved_flash = false;
+        self.observatory_settings_diff_preview = None;
+        self.clear_current_operation();
+    }
+
+    /// Mutable access to the observatory-settings draft (edit mode only).
+    pub fn observatory_settings_draft_mut(&mut self) -> Option<&mut ObservatorySettings> {
+        self.observatory_settings_draft.as_mut()
+    }
+
+    /// Borrowed observatory-settings draft.
+    pub fn observatory_settings_draft(&self) -> Option<&ObservatorySettings> {
+        self.observatory_settings_draft.as_ref()
+    }
+
+    /// Last computed redacted structural diff preview for the observatory settings draft
+    /// (Roadmap §3:126), if `preview_observatory_settings_diff` was clicked since the last
+    /// edit/save.
+    pub fn observatory_settings_diff_preview(&self) -> Option<&[crate::xray::JsonDiffEntry]> {
+        self.observatory_settings_diff_preview.as_deref()
+    }
+
+    /// Dry-runs the observatory settings save and stores a redacted structural diff preview,
+    /// without mutating the loaded config or touching the remote (mirrors
+    /// `preview_dns_settings_diff`).
+    pub fn preview_observatory_settings_diff(&mut self) -> Result<(), String> {
+        let draft = self
+            .observatory_settings_draft
+            .clone()
+            .ok_or_else(|| "Not in edit mode.".to_owned())?;
+        validate_observatory_settings(&draft).map_err(|e| e.message())?;
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = UpdateObservatorySettingsRequest { settings: draft };
+        let outcome =
+            update_observatory_settings(&mut editable, request).map_err(|e| e.message())?;
+        self.observatory_settings_diff_preview = Some(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ));
+        Ok(())
+    }
+
+    /// Validates the draft and starts the remote save workflow.
+    pub fn start_save_observatory_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+
+        let draft = match &self.observatory_settings_draft {
+            Some(draft) => draft.clone(),
+            None => return Err("Not in edit mode.".to_owned()),
+        };
+
+        self.show_status_message("Validating Observatory settings...");
+        if let Err(error) = validate_observatory_settings(&draft) {
+            self.observatory_settings_error = Some(error.message());
+            return Err(error.message());
+        }
+
+        let editable = match self.loaded_config.editable() {
+            Some(editable) => editable.clone(),
+            None => return Err("Configuration not loaded.".to_owned()),
+        };
+
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    profile
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.observatory_settings_rx = Some(rx);
+        self.observatory_settings_error = None;
+        self.observatory_settings_saved_flash = false;
+        self.status_message_until = None;
+        self.operation = CurrentOperation::SavingObservatorySettings;
+        self.show_status_message("Saving Observatory settings...");
+
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let request = UpdateObservatorySettingsRequest { settings: draft };
+        let validate_hint = self.config_validate_hint();
+
+        info!(target: "app", "starting observatory settings mutation");
+
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = tx.send(ObservatorySettingsMutationOutcome {
+                        result: Err(crate::xray::ConfigModifyError::new(
+                            crate::xray::ConfigModifyErrorKind::UploadFailed,
+                            format!("failed to start async runtime: {error}"),
+                        )),
+                    });
+                    return;
+                }
+            };
+
+            let outcome = runtime.block_on(run_update_observatory_settings(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+
+        Ok(())
+    }
+
+    /// Polls for a completed observatory-settings save.
+    pub fn poll_observatory_settings_mutation(&mut self) {
+        let Some(rx) = &self.observatory_settings_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.observatory_settings_rx = None;
+                match outcome.result {
+                    Ok(success) => {
+                        let inbounds = success.editable.inbound_summaries();
+                        let outbounds = success.editable.outbound_summaries();
+                        let dns = success.editable.dns_summary();
+                        let fakedns = success.editable.fakedns_summary();
+                        let observatory = success.editable.observatory_summary();
+                        let burst_observatory = success.editable.burst_observatory_summary();
+                        let routing = success.editable.routing_summary();
+                        let policy = success.editable.policy_summary();
+                        let vless_clients = success.editable.vless_clients();
+                        let warnings = self.loaded_config.warnings().to_vec();
+                        self.loaded_config = LoadedConfigSnapshot::Loaded {
+                            inbounds,
+                            outbounds,
+                            dns,
+                            fakedns,
+                            observatory,
+                            burst_observatory,
+                            routing,
+                            policy,
+                            vless_clients,
+                            warnings,
+                            editable: Some(success.editable),
+                        };
+                        self.observatory_settings_draft = None;
+                        self.observatory_settings_error = None;
+                        self.observatory_settings_saved_flash = true;
+                        self.observatory_settings_diff_preview = None;
+                        self.show_status_message(
+                            "Observatory settings were updated. Restart or reload Xray to apply the changes.",
+                        );
+                    }
+                    Err(error) => {
+                        let technical =
+                            crate::logging::redact::sanitize_detail(error.message().as_str());
+                        error!(
+                            target: "app",
+                            detail = %technical,
+                            "Xray observatory settings validation failed"
+                        );
+                        let user_message = user_facing_config_modify_error(&error);
+                        self.observatory_settings_error = Some(user_message.clone());
+                        self.show_status_message(user_message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.observatory_settings_rx = None;
+                if matches!(self.operation, CurrentOperation::SavingObservatorySettings) {
+                    self.observatory_settings_error =
+                        Some("Remote write failed: worker ended unexpectedly".to_owned());
+                    self.show_status_message("Remote write failed: worker ended unexpectedly");
+                }
+            }
+        }
+    }
+
+    /// Builds the Burst Observatory page model for the GUI (browsing + edit, Roadmap §2.1:51).
     pub fn burst_observatory_page_model(&self) -> BurstObservatoryPageModel {
-        build_burst_observatory_page_model(self.ssh_status, &self.discovery, &self.loaded_config)
+        build_burst_observatory_page_model(
+            self.ssh_status,
+            &self.discovery,
+            &self.loaded_config,
+            self.burst_observatory_settings_draft.as_ref(),
+            self.is_burst_observatory_settings_mutation_busy(),
+            self.burst_observatory_settings_error.clone(),
+            self.burst_observatory_settings_saved_flash,
+        )
     }
 
-    /// Builds the read-only Routing page model for the GUI.
+    // ─── Burst Observatory Settings (Roadmap §2.1:51) ────────────────────────
+
+    /// `true` while a burstObservatory-settings save is in flight.
+    pub fn is_burst_observatory_settings_mutation_busy(&self) -> bool {
+        self.burst_observatory_settings_rx.is_some()
+    }
+
+    /// Enters edit mode with an in-memory draft cloned from the loaded config.
+    pub fn begin_edit_burst_observatory_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        let settings = {
+            let Some(editable) = self.loaded_config.editable() else {
+                return Err("Configuration not loaded.".to_owned());
+            };
+            editable.burst_observatory_settings()
+        };
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        self.show_status_message("Loading BurstObservatory settings...");
+        self.burst_observatory_settings_draft = Some(settings);
+        self.burst_observatory_settings_error = None;
+        self.burst_observatory_settings_saved_flash = false;
+        self.burst_observatory_settings_diff_preview = None;
+        self.clear_current_operation();
+        Ok(())
+    }
+
+    /// Discards the in-memory draft and returns to view mode.
+    pub fn cancel_edit_burst_observatory_settings(&mut self) {
+        self.burst_observatory_settings_draft = None;
+        self.burst_observatory_settings_error = None;
+        self.burst_observatory_settings_saved_flash = false;
+        self.burst_observatory_settings_diff_preview = None;
+        self.clear_current_operation();
+    }
+
+    /// Mutable access to the burstObservatory-settings draft (edit mode only).
+    pub fn burst_observatory_settings_draft_mut(&mut self) -> Option<&mut BurstObservatorySettings> {
+        self.burst_observatory_settings_draft.as_mut()
+    }
+
+    /// Borrowed burstObservatory-settings draft.
+    pub fn burst_observatory_settings_draft(&self) -> Option<&BurstObservatorySettings> {
+        self.burst_observatory_settings_draft.as_ref()
+    }
+
+    /// Last computed redacted structural diff preview for the burstObservatory settings draft
+    /// (Roadmap §3:126), if `preview_burst_observatory_settings_diff` was clicked since the last
+    /// edit/save.
+    pub fn burst_observatory_settings_diff_preview(&self) -> Option<&[crate::xray::JsonDiffEntry]> {
+        self.burst_observatory_settings_diff_preview.as_deref()
+    }
+
+    /// Dry-runs the burstObservatory settings save and stores a redacted structural diff preview,
+    /// without mutating the loaded config or touching the remote (mirrors
+    /// `preview_dns_settings_diff`).
+    pub fn preview_burst_observatory_settings_diff(&mut self) -> Result<(), String> {
+        let draft = self
+            .burst_observatory_settings_draft
+            .clone()
+            .ok_or_else(|| "Not in edit mode.".to_owned())?;
+        validate_burst_observatory_settings(&draft).map_err(|e| e.message())?;
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = UpdateBurstObservatorySettingsRequest { settings: draft };
+        let outcome = update_burst_observatory_settings(&mut editable, request)
+            .map_err(|e| e.message())?;
+        self.burst_observatory_settings_diff_preview = Some(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ));
+        Ok(())
+    }
+
+    /// Validates the draft and starts the remote save workflow.
+    pub fn start_save_burst_observatory_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+
+        let draft = match &self.burst_observatory_settings_draft {
+            Some(draft) => draft.clone(),
+            None => return Err("Not in edit mode.".to_owned()),
+        };
+
+        self.show_status_message("Validating BurstObservatory settings...");
+        if let Err(error) = validate_burst_observatory_settings(&draft) {
+            self.burst_observatory_settings_error = Some(error.message());
+            return Err(error.message());
+        }
+
+        let editable = match self.loaded_config.editable() {
+            Some(editable) => editable.clone(),
+            None => return Err("Configuration not loaded.".to_owned()),
+        };
+
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    profile
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.burst_observatory_settings_rx = Some(rx);
+        self.burst_observatory_settings_error = None;
+        self.burst_observatory_settings_saved_flash = false;
+        self.status_message_until = None;
+        self.operation = CurrentOperation::SavingBurstObservatorySettings;
+        self.show_status_message("Saving BurstObservatory settings...");
+
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let request = UpdateBurstObservatorySettingsRequest { settings: draft };
+        let validate_hint = self.config_validate_hint();
+
+        info!(target: "app", "starting burstObservatory settings mutation");
+
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = tx.send(BurstObservatorySettingsMutationOutcome {
+                        result: Err(crate::xray::ConfigModifyError::new(
+                            crate::xray::ConfigModifyErrorKind::UploadFailed,
+                            format!("failed to start async runtime: {error}"),
+                        )),
+                    });
+                    return;
+                }
+            };
+
+            let outcome = runtime.block_on(run_update_burst_observatory_settings(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+
+        Ok(())
+    }
+
+    /// Polls for a completed burstObservatory-settings save.
+    pub fn poll_burst_observatory_settings_mutation(&mut self) {
+        let Some(rx) = &self.burst_observatory_settings_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.burst_observatory_settings_rx = None;
+                match outcome.result {
+                    Ok(success) => {
+                        let inbounds = success.editable.inbound_summaries();
+                        let outbounds = success.editable.outbound_summaries();
+                        let dns = success.editable.dns_summary();
+                        let fakedns = success.editable.fakedns_summary();
+                        let observatory = success.editable.observatory_summary();
+                        let burst_observatory = success.editable.burst_observatory_summary();
+                        let routing = success.editable.routing_summary();
+                        let policy = success.editable.policy_summary();
+                        let vless_clients = success.editable.vless_clients();
+                        let warnings = self.loaded_config.warnings().to_vec();
+                        self.loaded_config = LoadedConfigSnapshot::Loaded {
+                            inbounds,
+                            outbounds,
+                            dns,
+                            fakedns,
+                            observatory,
+                            burst_observatory,
+                            routing,
+                            policy,
+                            vless_clients,
+                            warnings,
+                            editable: Some(success.editable),
+                        };
+                        self.burst_observatory_settings_draft = None;
+                        self.burst_observatory_settings_error = None;
+                        self.burst_observatory_settings_saved_flash = true;
+                        self.burst_observatory_settings_diff_preview = None;
+                        self.show_status_message(
+                            "BurstObservatory settings were updated. Restart or reload Xray to apply the changes.",
+                        );
+                    }
+                    Err(error) => {
+                        let technical =
+                            crate::logging::redact::sanitize_detail(error.message().as_str());
+                        error!(
+                            target: "app",
+                            detail = %technical,
+                            "Xray burstObservatory settings validation failed"
+                        );
+                        let user_message = user_facing_config_modify_error(&error);
+                        self.burst_observatory_settings_error = Some(user_message.clone());
+                        self.show_status_message(user_message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.burst_observatory_settings_rx = None;
+                if matches!(self.operation, CurrentOperation::SavingBurstObservatorySettings) {
+                    self.burst_observatory_settings_error =
+                        Some("Remote write failed: worker ended unexpectedly".to_owned());
+                    self.show_status_message("Remote write failed: worker ended unexpectedly");
+                }
+            }
+        }
+    }
+
+    /// Builds the Routing page model for the GUI (browsing + edit, Roadmap §2.1:48).
     pub fn routing_page_model(&self) -> RoutingPageModel {
         build_routing_page_model(
             self.ssh_status,
             &self.discovery,
             &self.loaded_config,
             self.routing_sort,
+            self.routing_settings_draft.as_ref(),
+            self.is_routing_settings_mutation_busy(),
+            self.routing_settings_error.clone(),
+            self.routing_settings_saved_flash,
         )
     }
 
-    /// Builds the read-only Policy page model for the GUI.
+    /// Builds the Policy page model for the GUI (browsing + edit, Roadmap §2.1:49).
     pub fn policy_page_model(&self) -> PolicyPageModel {
         build_policy_page_model(
             self.ssh_status,
             &self.discovery,
             &self.loaded_config,
             self.policy_sort,
+            self.policy_settings_draft.as_ref(),
+            self.is_policy_settings_mutation_busy(),
+            self.policy_settings_error.clone(),
+            self.policy_settings_saved_flash,
         )
     }
 
@@ -788,6 +3846,16 @@ impl ApplicationService {
             vision_active,
         });
         Ok(())
+    }
+
+    /// Parses a pasted share URI (`vless://`/`trojan://`/`hy2://`) and builds a read-only import
+    /// preview — summaries + every warning about what can't fully round-trip (Roadmap §3:133).
+    /// Pure/synchronous — no SSH, no config mutation; applying the result to a new inbound's
+    /// editor session or to an existing inbound's Add User dialog happens in the GUI layer
+    /// (mirrors `apply_inbound_preset`, Roadmap §3:123).
+    pub fn preview_inbound_import(&self, uri_text: &str) -> Result<ImportPreview, String> {
+        let parsed = crate::xray::parse_share_uri(uri_text).map_err(|error| error.detail().to_owned())?;
+        Ok(build_import_preview(parsed))
     }
 
     /// Opens an IB-L1 session for adding a new inbound.
@@ -1018,6 +4086,51 @@ impl ApplicationService {
             &outcome.serialized,
         );
         if let Some(session) = &mut self.inbound_editor_session {
+            session.diff_preview = Some(entries);
+        }
+        Ok(())
+    }
+
+    /// Dry-runs Outbound Shell Save / Add and stores a redacted JSON diff preview
+    /// (Roadmap §3:126 — extends IB-L5 beyond inbounds).
+    pub fn preview_outbound_shell_diff(&mut self) -> Result<(), String> {
+        let editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let session = self
+            .outbound_editor_session
+            .as_ref()
+            .ok_or_else(|| "Not editing an outbound.".to_owned())?;
+
+        let outcome = if session.is_add {
+            let request = AddOutboundShellRequest {
+                general: session.general.clone(),
+                settings: session.settings.clone(),
+                preferred_source_file: editable.primary_source_file().map(str::to_owned),
+            };
+            let mut editable = editable;
+            crate::xray::add_outbound_shell(&mut editable, request).map_err(|e| e.message())?
+        } else {
+            let outbound_ref = session
+                .outbound_ref
+                .clone()
+                .ok_or_else(|| "Missing outbound ref.".to_owned())?;
+            let request = UpdateOutboundShellRequest {
+                outbound_ref,
+                general: session.general.clone(),
+                settings: session.settings.clone(),
+            };
+            let mut editable = editable;
+            crate::xray::update_outbound_shell(&mut editable, request).map_err(|e| e.message())?
+        };
+
+        let entries = crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        );
+        if let Some(session) = &mut self.outbound_editor_session {
             session.diff_preview = Some(entries);
         }
         Ok(())
@@ -1884,6 +4997,82 @@ impl ApplicationService {
         Some((pretty, fingerprint))
     }
 
+    /// Dry-runs a raw JSON outbound replace and returns a redacted structural diff preview,
+    /// without mutating the loaded config or touching the remote (Roadmap §3:126).
+    pub fn preview_replace_outbound_raw_json_diff(
+        &self,
+        outbound_index: usize,
+        raw_text: &str,
+        expected_fingerprint: String,
+    ) -> Result<Vec<crate::xray::JsonDiffEntry>, String> {
+        let new_value: serde_json::Value =
+            serde_json::from_str(raw_text).map_err(|error| format!("Invalid JSON: {error}"))?;
+        if !new_value.is_object() {
+            return Err("Outbound must be a JSON object.".to_owned());
+        }
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = crate::xray::ReplaceOutboundRawJsonRequest {
+            outbound_index,
+            expected_fingerprint: Some(expected_fingerprint),
+            new_value,
+        };
+        let outcome = crate::xray::replace_outbound_raw_json(&mut editable, request)
+            .map_err(|e| e.message())?;
+        Ok(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ))
+    }
+
+    /// Dry-runs an outbound tag rename and returns a redacted structural diff preview, without
+    /// mutating the loaded config or touching the remote (Roadmap §3:126).
+    pub fn preview_rename_outbound_tag_diff(
+        &self,
+        outbound_index: usize,
+        new_tag: &str,
+    ) -> Result<Vec<crate::xray::JsonDiffEntry>, String> {
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = crate::xray::RenameOutboundTagRequest {
+            outbound_index,
+            expected_fingerprint: None,
+            new_tag: new_tag.to_owned(),
+        };
+        let outcome =
+            crate::xray::rename_outbound_tag(&mut editable, request).map_err(|e| e.message())?;
+        Ok(crate::xray::redacted_json_diff_bytes(
+            &outcome.outcome.original_serialized,
+            &outcome.outcome.serialized,
+        ))
+    }
+
+    /// Dry-runs an outbound duplicate and returns a redacted structural diff preview, without
+    /// mutating the loaded config or touching the remote (Roadmap §3:126).
+    pub fn preview_duplicate_outbound_diff(
+        &self,
+        outbound_index: usize,
+    ) -> Result<Vec<crate::xray::JsonDiffEntry>, String> {
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = crate::xray::DuplicateOutboundRequest { outbound_index };
+        let outcome =
+            crate::xray::duplicate_outbound(&mut editable, request).map_err(|e| e.message())?;
+        Ok(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ))
+    }
+
     /// Parses `raw_text`, validates it's a JSON object, and starts a remote replace of the
     /// outbound's entire JSON object (Roadmap §3:125 escape hatch — any protocol).
     pub fn start_replace_outbound_raw_json(
@@ -2120,6 +5309,1196 @@ impl ApplicationService {
         }
     }
 
+    // ─── Backups / Rollback (Roadmap §3:127) ─────────────────────────────────
+
+    /// Read-only model for the Backups page.
+    pub fn backups_page_model(&self) -> BackupsPageModel {
+        build_backups_page_model(self.ssh_status, &self.discovery, &self.loaded_config)
+    }
+
+    /// `true` while a backup listing is in flight for `original_path`.
+    pub fn is_listing_backups(&self, original_path: &str) -> bool {
+        self.backup_list_rx.is_some() && self.backup_list_target.as_deref() == Some(original_path)
+    }
+
+    /// Last listing result for `original_path`, if one was requested (`None` before the first
+    /// `start_list_backups` call for this file, or while a *different* file's listing is
+    /// in flight and this one hasn't been requested yet).
+    pub fn backup_list_result(&self, original_path: &str) -> Option<&Result<Vec<ConfigBackup>, String>> {
+        if self.backup_list_target.as_deref() == Some(original_path) {
+            self.backup_list_result.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Starts a background listing of previously created backups for `original_path`
+    /// (read-only; mirrors `start_unit_host_probe`/`start_fetch_unit_file` — no
+    /// `CurrentOperation`, not gated by `is_any_remote_busy`). No-op while this exact file's
+    /// listing is already in flight.
+    pub fn start_list_backups(&mut self, original_path: String) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.is_listing_backups(&original_path) {
+            return Ok(());
+        }
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => profile,
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.backup_list_rx = Some(rx);
+        self.backup_list_target = Some(original_path.clone());
+        self.backup_list_result = None;
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        info!(target: "app", path = %original_path, "starting backup listing");
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => return,
+            };
+            let outcome =
+                runtime.block_on(run_list_backups(&client, &profile, &secrets, &remote, original_path));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
+    /// Polls the in-flight backup listing, if any.
+    pub fn poll_backup_list(&mut self) {
+        let Some(rx) = &self.backup_list_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(BackupListOutcome {
+                original_path,
+                result,
+            }) => {
+                self.backup_list_rx = None;
+                if self.backup_list_target.as_deref() == Some(original_path.as_str()) {
+                    self.backup_list_result = Some(result);
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.backup_list_rx = None;
+                self.backup_list_result = Some(Err("worker ended unexpectedly".to_owned()));
+            }
+        }
+    }
+
+    /// `true` while a backup's content is being fetched for the pre-restore diff preview.
+    pub fn is_fetching_backup_content(&self, backup_path: &str) -> bool {
+        self.backup_content_rx.is_some() && self.backup_content_target.as_deref() == Some(backup_path)
+    }
+
+    /// Last content-fetch result for `backup_path`, if one was requested.
+    pub fn backup_content_result(&self, backup_path: &str) -> Option<&Result<Vec<u8>, String>> {
+        if self.backup_content_target.as_deref() == Some(backup_path) {
+            self.backup_content_result.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Starts a background read of one backup's content, for the pre-restore diff preview
+    /// (read-only; same no-`CurrentOperation` contract as `start_list_backups`).
+    pub fn start_fetch_backup_content(&mut self, backup_path: String) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.is_fetching_backup_content(&backup_path) {
+            return Ok(());
+        }
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => profile,
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.backup_content_rx = Some(rx);
+        self.backup_content_target = Some(backup_path.clone());
+        self.backup_content_result = None;
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        info!(target: "app", path = %backup_path, "starting backup content fetch");
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => return,
+            };
+            let outcome = runtime.block_on(run_fetch_backup_content(&client, &profile, &secrets, backup_path));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
+    /// Polls the in-flight backup content fetch, if any.
+    pub fn poll_backup_content(&mut self) {
+        let Some(rx) = &self.backup_content_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(BackupContentOutcome { backup_path, result }) => {
+                self.backup_content_rx = None;
+                if self.backup_content_target.as_deref() == Some(backup_path.as_str()) {
+                    self.backup_content_result = Some(result);
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.backup_content_rx = None;
+                self.backup_content_result = Some(Err("worker ended unexpectedly".to_owned()));
+            }
+        }
+    }
+
+    /// Serializes what Feldjäger currently has loaded for `source_file` — the "current" side
+    /// of the pre-restore diff, computed locally (no remote read).
+    pub fn current_source_file_bytes(&self, source_file: &str) -> Option<Vec<u8>> {
+        self.loaded_config
+            .editable()?
+            .serialize_source_file(source_file)
+            .ok()
+    }
+
+    /// `true` while a backup restore is in flight.
+    pub fn is_restoring_backup(&self) -> bool {
+        self.backup_restore_rx.is_some()
+    }
+
+    /// Restores `backup_path`'s content over `original_path` (Roadmap §3:127). Goes through the
+    /// full backup → write → `xray run -test` → restore-on-failure pipeline — restoring is
+    /// itself reversible, same as every other config mutation.
+    pub fn start_restore_backup(
+        &mut self,
+        original_path: String,
+        backup_path: String,
+    ) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        let expected_current_bytes = self
+            .current_source_file_bytes(&original_path)
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?;
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    profile
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.backup_restore_rx = Some(rx);
+        self.status_message_until = None;
+        self.operation = CurrentOperation::RestoringBackup;
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let validate_hint = self.config_validate_hint();
+        info!(target: "app", original = %original_path, backup = %backup_path, "starting backup restore");
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            let outcome = runtime.block_on(run_restore_backup(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                original_path,
+                backup_path,
+                expected_current_bytes,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
+    /// Polls the in-flight backup restore, if any.
+    pub fn poll_backup_restore(&mut self) {
+        let Some(rx) = &self.backup_restore_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(BackupRestoreOutcome { result }) => {
+                self.backup_restore_rx = None;
+                self.operation = CurrentOperation::Ready;
+                match result {
+                    Ok(()) => {
+                        // The restored file may have changed inbounds/outbounds/anything else
+                        // in ways no local patch can safely reproduce — reload everything from
+                        // remote, the same recovery path `start_unit_apply` uses after a
+                        // successful unit Apply.
+                        self.show_status_message(
+                            "Backup restored. Reloading configuration...",
+                        );
+                        let _ = self.start_discovery();
+                        // Listings/content for the restored file are now stale.
+                        self.backup_list_result = None;
+                        self.backup_content_result = None;
+                    }
+                    Err(error) => {
+                        let user_message = if error.message().is_empty() {
+                            crate::logging::redact::user_message_see_log(
+                                "Unable to restore backup.",
+                            )
+                        } else {
+                            error.message().to_owned()
+                        };
+                        self.show_status_message(user_message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.backup_restore_rx = None;
+                self.operation = CurrentOperation::Ready;
+                self.show_status_message("Backup restore failed: worker ended unexpectedly");
+            }
+        }
+    }
+
+    // ─── API Console (Roadmap §3:128 — live `xray api` operations) ──────────
+
+    /// Read-only model for the API Console page.
+    pub fn api_console_page_model(&self) -> ApiConsolePageModel {
+        build_api_console_page_model(self.ssh_status, &self.discovery, &self.loaded_config)
+    }
+
+    fn resolve_binary_path_for_live_api(&self) -> Result<String, String> {
+        match &self.discovery {
+            DiscoveryState::Succeeded(installation) => Ok(installation
+                .binary_path
+                .as_ref()
+                .map(|p| p.as_str())
+                .unwrap_or("/usr/local/bin/xray")
+                .to_owned()),
+            _ => Err("Xray not discovered; cannot run a live API call.".to_owned()),
+        }
+    }
+
+    fn resolve_api_server_addr(&self) -> Result<String, String> {
+        self.loaded_config
+            .editable()
+            .and_then(|editable| super::api_console::resolve_api_listen(editable.sections()))
+            .ok_or_else(|| {
+                "No `api.listen` address in the loaded configuration.".to_owned()
+            })
+    }
+
+    /// Identity of a live API call for read caching — subcommand + args, not the display label
+    /// (two different calls, e.g. inbound users for two different tags, can share a label but
+    /// must not share a cached result).
+    fn api_call_key(request: &ApiCallRequest) -> String {
+        format!("{}\u{1}{}", request.subcommand, request.args.join("\u{1}"))
+    }
+
+    /// `true` while a read-only live API call identical to `request` is in flight.
+    pub fn is_running_api_read(&self, request: &ApiCallRequest) -> bool {
+        let key = Self::api_call_key(request);
+        self.api_read_rx.is_some() && self.api_read_key.as_deref() == Some(key.as_str())
+    }
+
+    /// Last result for a read-only live API call identical to `request`, if one was started.
+    pub fn api_read_result(&self, request: &ApiCallRequest) -> Option<&RemoteCliResult<String>> {
+        let key = Self::api_call_key(request);
+        match &self.api_read_result {
+            Some((k, result)) if k == &key => Some(result),
+            _ => None,
+        }
+    }
+
+    /// Starts a read-only live API call (list/info/count) — mirrors `start_list_backups`: no
+    /// `CurrentOperation`, not gated by `is_any_remote_busy`, so it can run alongside other
+    /// pages' background reads. No-op while this exact call is already in flight.
+    pub fn start_api_read(&mut self, request: ApiCallRequest) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        let key = Self::api_call_key(&request);
+        if self.api_read_rx.is_some() && self.api_read_key.as_deref() == Some(key.as_str()) {
+            return Ok(());
+        }
+        let binary_path = self.resolve_binary_path_for_live_api()?;
+        let server_addr = self.resolve_api_server_addr()?;
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(p) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    p
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.api_read_rx = Some(rx);
+        self.api_read_key = Some(key);
+        self.api_read_result = None;
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let subcommand = request.subcommand;
+        info!(target: "app", subcommand, "starting live api read");
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => return,
+            };
+            let outcome = runtime.block_on(run_api_call(
+                &client,
+                &profile,
+                &secrets,
+                binary_path,
+                server_addr,
+                request,
+            ));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
+    /// Polls the in-flight read-only live API call, if any.
+    pub fn poll_api_read(&mut self) {
+        let Some(rx) = &self.api_read_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(ApiCallOutcome { result, .. }) => {
+                self.api_read_rx = None;
+                if let Some(key) = self.api_read_key.clone() {
+                    self.api_read_result = Some((key, result));
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.api_read_rx = None;
+                if let Some(key) = self.api_read_key.clone() {
+                    self.api_read_result = Some((
+                        key,
+                        Err(RemoteCliError::new(
+                            RemoteCliErrorKind::CommandFailed,
+                            "worker ended unexpectedly".to_owned(),
+                        )),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// `true` while a live API mutation (Add/Remove inbound/outbound/user/rule, balancer
+    /// override, source IP block, restart logger) is in flight.
+    pub fn is_running_api_mutation(&self) -> bool {
+        self.api_mutation_rx.is_some()
+    }
+
+    /// Label + result of the last completed live API mutation, if any.
+    pub fn api_mutation_result(&self) -> Option<&(String, RemoteCliResult<String>)> {
+        self.api_mutation_result.as_ref()
+    }
+
+    /// Starts a live API mutation. Unlike every other configuration change in this crate, this
+    /// **never** touches the config file — it runs `xray api <subcommand>` against the already
+    /// running process, so nothing here is backed up, validated, or reversible from Feldjäger's
+    /// side (Roadmap §3:128 — the user explicitly accepted this trade-off when choosing the full
+    /// HandlerService/RoutingService console scope).
+    pub fn start_api_mutation(&mut self, request: ApiCallRequest) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        let binary_path = self.resolve_binary_path_for_live_api()?;
+        let server_addr = self.resolve_api_server_addr()?;
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(p) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    p
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.api_mutation_rx = Some(rx);
+        self.status_message_until = None;
+        self.operation = CurrentOperation::ManagingLiveApi {
+            text: request.label.clone(),
+        };
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let subcommand = request.subcommand;
+        info!(target: "app", subcommand, "starting live api mutation");
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime");
+            let outcome = runtime.block_on(run_api_call(
+                &client,
+                &profile,
+                &secrets,
+                binary_path,
+                server_addr,
+                request,
+            ));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
+    /// Polls the in-flight live API mutation, if any.
+    pub fn poll_api_mutation(&mut self) {
+        let Some(rx) = &self.api_mutation_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(ApiCallOutcome { label, result }) => {
+                self.api_mutation_rx = None;
+                self.operation = CurrentOperation::Ready;
+                match &result {
+                    Ok(_) => self.show_status_message("Live API call completed."),
+                    Err(error) => self.show_status_message(error.message()),
+                }
+                // Live-only mutations can change what a cached list/info read would show
+                // (added/removed inbound, outbound, user, rule, balancer target, …) — drop it so
+                // the next view reflects current runtime state instead of a stale one.
+                self.api_read_result = None;
+                self.api_mutation_result = Some((label, result));
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.api_mutation_rx = None;
+                self.operation = CurrentOperation::Ready;
+                self.show_status_message("Live API call failed: worker ended unexpectedly");
+            }
+        }
+    }
+
+    // ─── Stats (Roadmap §3:129 — `statsquery`/`statssys` live read + charts) ────
+
+    /// Read-only model for the Stats page.
+    pub fn stats_page_model(&self) -> StatsPageModel {
+        build_stats_page_model(
+            self.ssh_status,
+            &self.discovery,
+            &self.loaded_config,
+            StatsQuerySnapshot {
+                is_running: self.stats_query_rx.is_some(),
+                last_result: self.stats_query_result.as_ref(),
+                history: &self.stats_history,
+            },
+            StatsSysSnapshot {
+                is_running: self.stats_sys_rx.is_some(),
+                last_result: self.stats_sys_result.as_ref(),
+            },
+        )
+    }
+
+    /// Starts a `statsquery` call (fetches every counter; never passes `-reset`). No-op while
+    /// one is already in flight — mirrors `start_api_read`'s single-in-flight contract, but on
+    /// its own channel so it doesn't collide with a concurrent `statssys` call.
+    pub fn start_stats_query(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.stats_query_rx.is_some() {
+            return Ok(());
+        }
+        let binary_path = self.resolve_binary_path_for_live_api()?;
+        let server_addr = self.resolve_api_server_addr()?;
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(p) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    p
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.stats_query_rx = Some(rx);
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        info!(target: "app", "starting live statsquery read");
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => return,
+            };
+            let outcome = runtime.block_on(run_api_call(
+                &client,
+                &profile,
+                &secrets,
+                binary_path,
+                server_addr,
+                stats_query_all_request(),
+            ));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
+    /// Polls the in-flight `statsquery` call, if any. On success, parses the response and both
+    /// records a new sample per counter into `stats_history` and refreshes `stats_query_result`.
+    pub fn poll_stats_query(&mut self) {
+        let Some(rx) = &self.stats_query_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(ApiCallOutcome { result, .. }) => {
+                self.stats_query_rx = None;
+                match result {
+                    Ok(stdout) => match parse_stats_query_stdout(&stdout) {
+                        Ok(counters) => {
+                            record_stats_sample(&mut self.stats_history, &counters, Instant::now());
+                            self.stats_query_result = Some(Ok(counters));
+                        }
+                        Err(error) => self.stats_query_result = Some(Err(error)),
+                    },
+                    Err(error) => self.stats_query_result = Some(Err(error)),
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.stats_query_rx = None;
+                self.stats_query_result = Some(Err(RemoteCliError::new(
+                    RemoteCliErrorKind::CommandFailed,
+                    "worker ended unexpectedly".to_owned(),
+                )));
+            }
+        }
+    }
+
+    /// Starts a `statssys` call. Same single-in-flight, no-`CurrentOperation` contract as
+    /// `start_stats_query`, on its own channel.
+    pub fn start_stats_sys_query(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.stats_sys_rx.is_some() {
+            return Ok(());
+        }
+        let binary_path = self.resolve_binary_path_for_live_api()?;
+        let server_addr = self.resolve_api_server_addr()?;
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(p) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    p
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.stats_sys_rx = Some(rx);
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        info!(target: "app", "starting live statssys read");
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => return,
+            };
+            let outcome = runtime.block_on(run_api_call(
+                &client,
+                &profile,
+                &secrets,
+                binary_path,
+                server_addr,
+                stats_sys_request(),
+            ));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
+    /// Polls the in-flight `statssys` call, if any.
+    pub fn poll_stats_sys_query(&mut self) {
+        let Some(rx) = &self.stats_sys_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(ApiCallOutcome { result, .. }) => {
+                self.stats_sys_rx = None;
+                self.stats_sys_result = Some(result.and_then(|stdout| parse_stats_sys_stdout(&stdout)));
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.stats_sys_rx = None;
+                self.stats_sys_result = Some(Err(RemoteCliError::new(
+                    RemoteCliErrorKind::CommandFailed,
+                    "worker ended unexpectedly".to_owned(),
+                )));
+            }
+        }
+    }
+
+    // ─── Metrics (Roadmap §3:130 — `metrics` HTTP endpoint scrape + dashboard) ────
+
+    fn resolve_metrics_listen_addr(&self) -> Result<String, String> {
+        self.loaded_config
+            .editable()
+            .and_then(|editable| resolve_metrics_listen(editable.sections()))
+            .ok_or_else(|| "No `metrics.listen` address in the loaded configuration.".to_owned())
+    }
+
+    /// Read-only model for the Metrics page.
+    pub fn metrics_page_model(&self) -> MetricsPageModel {
+        build_metrics_page_model(
+            self.ssh_status,
+            &self.discovery,
+            &self.loaded_config,
+            MetricsScrapeSnapshot {
+                is_running: self.metrics_scrape_rx.is_some(),
+                last_result: self.metrics_scrape_result.as_ref(),
+                history: &self.metrics_history,
+            },
+        )
+    }
+
+    /// Starts a `/debug/vars` scrape. No-op while one is already in flight — same single-in-flight
+    /// contract as `start_stats_query`, on its own channel.
+    pub fn start_metrics_scrape(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.metrics_scrape_rx.is_some() {
+            return Ok(());
+        }
+        let listen_addr = self.resolve_metrics_listen_addr()?;
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(p) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    p
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.metrics_scrape_rx = Some(rx);
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        info!(target: "app", "starting metrics scrape");
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => return,
+            };
+            let outcome = runtime.block_on(run_metrics_scrape_op(
+                &client,
+                &profile,
+                &secrets,
+                listen_addr,
+            ));
+            let _ = tx.send(outcome);
+        });
+        Ok(())
+    }
+
+    /// Polls the in-flight scrape, if any. On success, parses the response and both records a
+    /// new sample per traffic counter into `metrics_history` and refreshes `metrics_scrape_result`.
+    pub fn poll_metrics_scrape(&mut self) {
+        let Some(rx) = &self.metrics_scrape_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(MetricsScrapeOutcome { result }) => {
+                self.metrics_scrape_rx = None;
+                match result {
+                    Ok(body) => match parse_debug_vars_stdout(&body) {
+                        Ok(vars) => {
+                            record_stats_sample(&mut self.metrics_history, &vars.stats, Instant::now());
+                            self.metrics_scrape_result = Some(Ok(vars));
+                        }
+                        Err(error) => self.metrics_scrape_result = Some(Err(error)),
+                    },
+                    Err(error) => self.metrics_scrape_result = Some(Err(error)),
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.metrics_scrape_rx = None;
+                self.metrics_scrape_result = Some(Err(RemoteCliError::new(
+                    RemoteCliErrorKind::CommandFailed,
+                    "worker ended unexpectedly".to_owned(),
+                )));
+            }
+        }
+    }
+
+    // ─── Target Lookup (Roadmap §3:131 — SNI/Dest/host search by ASN) ────
+
+    /// Read-only model for the Target Lookup page.
+    pub fn target_lookup_page_model(&self) -> TargetLookupPageModel {
+        build_target_lookup_page_model(TargetLookupSnapshot {
+            is_running: self.target_lookup_rx.is_some(),
+            host: self.target_lookup_host.as_deref(),
+            last_result: self.target_lookup_result.as_ref(),
+        })
+    }
+
+    /// Starts a target lookup for `host` (a domain or IP the caller is considering for a
+    /// REALITY `dest`, TLS `serverName`, or routing `domain` value). Unlike every other
+    /// `start_*` in this crate, this reaches the public internet (Team Cymru whois), never the
+    /// managed SSH host — no SSH-connected precondition, no `CurrentOperation`, not counted in
+    /// `is_any_remote_busy` (`netinfo` module doc explains the rationale). No-op while a lookup
+    /// is already in flight.
+    pub fn start_target_lookup(&mut self, host: String) -> Result<(), String> {
+        let trimmed = host.trim();
+        if trimmed.is_empty() {
+            return Err("Enter a domain or IP address.".to_owned());
+        }
+        if self.target_lookup_rx.is_some() {
+            return Ok(());
+        }
+        let host = trimmed.to_owned();
+        self.target_lookup_host = Some(host.clone());
+        self.target_lookup_result = None;
+        let (tx, rx) = mpsc::channel();
+        self.target_lookup_rx = Some(rx);
+        info!(target: "app", "starting target lookup");
+        thread::spawn(move || {
+            let result = lookup_target_asn(&host).map_err(|error| error.message());
+            let _ = tx.send(result);
+        });
+        Ok(())
+    }
+
+    /// Polls the in-flight target lookup, if any.
+    pub fn poll_target_lookup(&mut self) {
+        let Some(rx) = &self.target_lookup_rx else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(result) => {
+                self.target_lookup_rx = None;
+                self.target_lookup_result = Some(result);
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.target_lookup_rx = None;
+                self.target_lookup_result = Some(Err("worker ended unexpectedly".to_owned()));
+            }
+        }
+    }
+
+    // ─── AS-range REALITY candidate scan (Roadmap §3:131 follow-up) ────
+
+    /// Read-only model for the AS-range scan section (below the ASN lookup result on the same
+    /// page).
+    pub fn target_scan_page_model(&self) -> TargetScanPageModel {
+        let asn_result = self.target_lookup_result.as_ref().and_then(|r| r.as_ref().ok());
+        build_target_scan_page_model(
+            asn_result,
+            TargetScanSnapshot {
+                scanned_prefix: self.target_scan_prefix.as_deref(),
+                prefix_total: self.target_scan_prefix_total,
+                capped_total: self.target_scan_capped_total,
+                is_running: self.target_scan_rx.is_some(),
+                checked: self.target_scan_checked,
+                rows: &self.target_scan_rows,
+            },
+        )
+    }
+
+    /// Starts a scan of `cidr_override` when given (any network the user typed in, not
+    /// necessarily the current lookup's BGP prefix), falling back to the BGP prefix from the
+    /// current ASN lookup result otherwise. `thread_count` workers probe concurrently, each
+    /// pacing itself with `pause` between its own successive probes. `address_limit` caps how many
+    /// addresses this run checks; `None` scans every host in the network (no cap — the user is
+    /// trusted to judge how long a wide prefix will take). Unlike every other `start_*` in this
+    /// crate (aside from `start_target_lookup`), this reaches the public internet directly, never
+    /// the managed SSH host — no SSH-connected precondition, no `CurrentOperation`, not counted in
+    /// `is_any_remote_busy`. No-op while a scan is already in flight.
+    pub fn start_target_scan(
+        &mut self,
+        cidr_override: Option<&str>,
+        thread_count: usize,
+        pause: Duration,
+        address_limit: Option<usize>,
+    ) -> Result<(), String> {
+        if self.target_scan_rx.is_some() {
+            return Ok(());
+        }
+        let prefix = match cidr_override.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(manual) => manual.to_owned(),
+            None => {
+                let asn_result = self
+                    .target_lookup_result
+                    .as_ref()
+                    .and_then(|r| r.as_ref().ok())
+                    .ok_or_else(|| "Enter a network (CIDR) or look up a host first.".to_owned())?;
+                candidate_prefix(asn_result)
+                    .ok_or_else(|| "No BGP prefix available for the current lookup.".to_owned())?
+            }
+        };
+        let cidr_hosts = enumerate_cidr_hosts(&prefix, address_limit.unwrap_or(usize::MAX))
+            .map_err(|error| error.message())?;
+
+        let tls_config = build_probe_tls_client_config();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+
+        self.target_scan_rx = Some(rx);
+        self.target_scan_cancel = Some(Arc::clone(&cancel));
+        self.target_scan_rows = Vec::new();
+        self.target_scan_checked = 0;
+        self.target_scan_capped_total = cidr_hosts.hosts.len();
+        self.target_scan_prefix_total = Some(cidr_hosts.total);
+        self.target_scan_prefix = Some(prefix);
+
+        info!(target: "app", "starting target scan");
+        thread::spawn(move || {
+            run_target_scan(cidr_hosts.hosts, tls_config, cancel, tx, pause, thread_count);
+        });
+        Ok(())
+    }
+
+    /// Requests early termination of an in-flight scan; the background thread notices within
+    /// ~250ms and still sends a final [`ScanEvent::Done`].
+    pub fn stop_target_scan(&mut self) {
+        if let Some(cancel) = &self.target_scan_cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Drains every currently-available scan event (not just one — this channel is a genuine
+    /// stream of many events per run, unlike the single-shot channels elsewhere in this crate).
+    pub fn poll_target_scan(&mut self) {
+        let Some(rx) = &self.target_scan_rx else {
+            return;
+        };
+        loop {
+            match rx.try_recv() {
+                Ok(ScanEvent::Row(row)) => self.target_scan_rows.push(row),
+                // Multiple workers report progress concurrently, so arrival order isn't
+                // guaranteed to be monotonic — never let the displayed count regress.
+                Ok(ScanEvent::Progress(checked)) => {
+                    self.target_scan_checked = self.target_scan_checked.max(checked)
+                }
+                Ok(ScanEvent::Done) => {
+                    self.target_scan_rx = None;
+                    self.target_scan_cancel = None;
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.target_scan_rx = None;
+                    self.target_scan_cancel = None;
+                    break;
+                }
+            }
+        }
+    }
+
+    // ─── API Settings (Roadmap §2.1:54) ──────────────────────────────────────
+
+    /// Read-only / edit model for the API Settings page.
+    pub fn api_settings_page_model(&self) -> ApiSettingsPageModel {
+        build_api_settings_page_model(
+            self.ssh_status,
+            &self.discovery,
+            &self.loaded_config,
+            self.api_settings_draft.as_ref(),
+            self.is_api_settings_mutation_busy(),
+            self.api_settings_error.clone(),
+            self.api_settings_saved_flash,
+        )
+    }
+
+    /// `true` while an api-settings save is in flight.
+    pub fn is_api_settings_mutation_busy(&self) -> bool {
+        self.api_settings_rx.is_some()
+    }
+
+    /// Enters edit mode with an in-memory draft cloned from the loaded config.
+    pub fn begin_edit_api_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        let settings = {
+            let Some(editable) = self.loaded_config.editable() else {
+                return Err("Configuration not loaded.".to_owned());
+            };
+            editable.api_settings()
+        };
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        self.show_status_message("Loading API settings...");
+        self.api_settings_draft = Some(settings);
+        self.api_settings_error = None;
+        self.api_settings_saved_flash = false;
+        self.api_settings_diff_preview = None;
+        self.clear_current_operation();
+        Ok(())
+    }
+
+    /// Discards the in-memory draft and returns to view mode.
+    pub fn cancel_edit_api_settings(&mut self) {
+        self.api_settings_draft = None;
+        self.api_settings_error = None;
+        self.api_settings_saved_flash = false;
+        self.api_settings_diff_preview = None;
+        self.clear_current_operation();
+    }
+
+    /// Mutable access to the api-settings draft (edit mode only).
+    pub fn api_settings_draft_mut(&mut self) -> Option<&mut ApiSettings> {
+        self.api_settings_draft.as_mut()
+    }
+
+    /// Borrowed api-settings draft.
+    pub fn api_settings_draft(&self) -> Option<&ApiSettings> {
+        self.api_settings_draft.as_ref()
+    }
+
+    /// Last computed redacted structural diff preview for the api settings draft (Roadmap
+    /// §3:126), if `preview_api_settings_diff` was clicked since the last edit/save.
+    pub fn api_settings_diff_preview(&self) -> Option<&[crate::xray::JsonDiffEntry]> {
+        self.api_settings_diff_preview.as_deref()
+    }
+
+    /// Dry-runs the api settings save and stores a redacted structural diff preview, without
+    /// mutating the loaded config or touching the remote (mirrors
+    /// `preview_log_settings_diff`).
+    pub fn preview_api_settings_diff(&mut self) -> Result<(), String> {
+        let draft = self
+            .api_settings_draft
+            .clone()
+            .ok_or_else(|| "Not in edit mode.".to_owned())?;
+        validate_api_settings(&draft).map_err(|e| e.message())?;
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = UpdateApiSettingsRequest { settings: draft };
+        let outcome =
+            update_api_settings(&mut editable, request).map_err(|e| e.message())?;
+        self.api_settings_diff_preview = Some(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ));
+        Ok(())
+    }
+
+    /// Validates the draft and starts the remote save workflow.
+    pub fn start_save_api_settings(&mut self) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if !matches!(self.discovery, DiscoveryState::Succeeded(_)) {
+            return Err("Xray not discovered.".to_owned());
+        }
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+
+        let draft = match &self.api_settings_draft {
+            Some(draft) => draft.clone(),
+            None => return Err("Not in edit mode.".to_owned()),
+        };
+
+        self.show_status_message("Validating API settings...");
+        if let Err(error) = validate_api_settings(&draft) {
+            self.api_settings_error = Some(error.message());
+            return Err(error.message());
+        }
+
+        let editable = match self.loaded_config.editable() {
+            Some(editable) => editable.clone(),
+            None => return Err("Configuration not loaded.".to_owned()),
+        };
+
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => {
+                    self.connection_errors = ConnectionValidationErrors::default();
+                    profile
+                }
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (tx, rx) = mpsc::channel();
+        self.api_settings_rx = Some(rx);
+        self.api_settings_error = None;
+        self.api_settings_saved_flash = false;
+        self.status_message_until = None;
+        self.operation = CurrentOperation::SavingApiSettings;
+        self.show_status_message("Saving API settings...");
+
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        let remote = self.remote.clone();
+        let request = UpdateApiSettingsRequest { settings: draft };
+        let validate_hint = self.config_validate_hint();
+
+        info!(target: "app", "starting api settings mutation");
+
+        thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = tx.send(ApiSettingsMutationOutcome {
+                        result: Err(crate::xray::ConfigModifyError::new(
+                            crate::xray::ConfigModifyErrorKind::UploadFailed,
+                            format!("failed to start async runtime: {error}"),
+                        )),
+                    });
+                    return;
+                }
+            };
+
+            let outcome = runtime.block_on(run_update_api_settings(
+                &client,
+                &profile,
+                &secrets,
+                &remote,
+                editable,
+                request,
+                validate_hint,
+            ));
+            let _ = tx.send(outcome);
+        });
+
+        Ok(())
+    }
+
+    /// Polls for a completed api-settings save.
+    pub fn poll_api_settings_mutation(&mut self) {
+        let Some(rx) = &self.api_settings_rx else {
+            return;
+        };
+
+        match rx.try_recv() {
+            Ok(outcome) => {
+                self.api_settings_rx = None;
+                match outcome.result {
+                    Ok(success) => {
+                        let inbounds = success.editable.inbound_summaries();
+                        let outbounds = success.editable.outbound_summaries();
+                        let dns = success.editable.dns_summary();
+                        let fakedns = success.editable.fakedns_summary();
+                        let observatory = success.editable.observatory_summary();
+                        let burst_observatory = success.editable.burst_observatory_summary();
+                        let routing = success.editable.routing_summary();
+                        let policy = success.editable.policy_summary();
+                        let vless_clients = success.editable.vless_clients();
+                        let warnings = self.loaded_config.warnings().to_vec();
+                        self.loaded_config = LoadedConfigSnapshot::Loaded {
+                            inbounds,
+                            outbounds,
+                            dns,
+                            fakedns,
+                            observatory,
+                            burst_observatory,
+                            routing,
+                            policy,
+                            vless_clients,
+                            warnings,
+                            editable: Some(success.editable),
+                        };
+                        self.api_settings_draft = None;
+                        self.api_settings_error = None;
+                        self.api_settings_saved_flash = true;
+                        self.api_settings_diff_preview = None;
+                        self.show_status_message(
+                            "API settings were updated. Restart or reload Xray to apply the changes.",
+                        );
+                    }
+                    Err(error) => {
+                        let technical =
+                            crate::logging::redact::sanitize_detail(error.message().as_str());
+                        error!(
+                            target: "app",
+                            detail = %technical,
+                            "Xray api settings validation failed"
+                        );
+                        let user_message = user_facing_config_modify_error(&error);
+                        self.api_settings_error = Some(user_message.clone());
+                        self.show_status_message(user_message);
+                    }
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.api_settings_rx = None;
+                if matches!(self.operation, CurrentOperation::SavingApiSettings) {
+                    self.api_settings_error =
+                        Some("Remote write failed: worker ended unexpectedly".to_owned());
+                    self.show_status_message("Remote write failed: worker ended unexpectedly");
+                }
+            }
+        }
+    }
+
     // ─── Outbound Shell (Freedom, Blackhole; Roadmap §2.4:94, §2.4:95) ───────
 
     /// Returns the current outbound editor session, if any.
@@ -2154,6 +6533,12 @@ impl ApplicationService {
         self.begin_add_outbound(OutboundSettingsDraft::dns_default())
     }
 
+    /// Opens an Add session for a new VLESS outbound (Roadmap §2.1:58 — bridge side of
+    /// VLESS-native reverse proxy, or a plain forward outbound).
+    pub fn begin_add_outbound_vless(&mut self) -> Result<(), String> {
+        self.begin_add_outbound(OutboundSettingsDraft::vless_default())
+    }
+
     fn begin_add_outbound(&mut self, settings: OutboundSettingsDraft) -> Result<(), String> {
         if self.is_any_remote_busy() {
             return Err("Another operation is already running.".to_owned());
@@ -2164,9 +6549,11 @@ impl ApplicationService {
             general: OutboundGeneral {
                 tag: None,
                 send_through: None,
+                proxy_settings: None,
             },
             settings,
             is_add: true,
+            diff_preview: None,
         });
         Ok(())
     }
@@ -2197,6 +6584,7 @@ impl ApplicationService {
             general,
             settings,
             is_add: false,
+            diff_preview: None,
         });
         Ok(())
     }
@@ -2365,6 +6753,26 @@ impl ApplicationService {
             let _ = tx.send(outcome);
         });
         Ok(())
+    }
+
+    /// Dry-runs an inbound duplicate and returns a redacted structural diff preview, without
+    /// mutating the loaded config or touching the remote (Roadmap §3:126).
+    pub fn preview_duplicate_inbound_diff(
+        &self,
+        inbound_index: usize,
+    ) -> Result<Vec<crate::xray::JsonDiffEntry>, String> {
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = crate::xray::DuplicateInboundRequest { inbound_index };
+        let outcome =
+            crate::xray::duplicate_inbound(&mut editable, request).map_err(|e| e.message())?;
+        Ok(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ))
     }
 
     /// Duplicates a shell-editable inbound (unique tag, same source file).
@@ -3099,6 +7507,37 @@ impl ApplicationService {
         let pretty = serde_json::to_string_pretty(inbound.value()).ok()?;
         let fingerprint = editable.inbound_object_fingerprint(inbound_index).ok()?;
         Some((pretty, fingerprint))
+    }
+
+    /// Dry-runs a raw JSON inbound replace and returns a redacted structural diff preview,
+    /// without mutating the loaded config or touching the remote (Roadmap §3:126).
+    pub fn preview_replace_inbound_raw_json_diff(
+        &self,
+        inbound_index: usize,
+        raw_text: &str,
+        expected_fingerprint: String,
+    ) -> Result<Vec<crate::xray::JsonDiffEntry>, String> {
+        let new_value: serde_json::Value =
+            serde_json::from_str(raw_text).map_err(|error| format!("Invalid JSON: {error}"))?;
+        if !new_value.is_object() {
+            return Err("Inbound must be a JSON object.".to_owned());
+        }
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = crate::xray::ReplaceInboundRawJsonRequest {
+            inbound_index,
+            expected_fingerprint: Some(expected_fingerprint),
+            new_value,
+        };
+        let outcome =
+            crate::xray::replace_inbound_raw_json(&mut editable, request).map_err(|e| e.message())?;
+        Ok(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ))
     }
 
     /// Parses `raw_text`, validates it's a JSON object, and starts a remote replace of the
@@ -4183,6 +8622,20 @@ impl ApplicationService {
             || self.inbound_mutation_rx.is_some()
             || self.outbound_mutation_rx.is_some()
             || self.confdir_file_mutation_rx.is_some()
+            || self.backup_restore_rx.is_some()
+            || self.api_mutation_rx.is_some()
+            || self.api_settings_rx.is_some()
+            || self.dns_settings_rx.is_some()
+            || self.fakedns_settings_rx.is_some()
+            || self.routing_settings_rx.is_some()
+            || self.policy_settings_rx.is_some()
+            || self.observatory_settings_rx.is_some()
+            || self.burst_observatory_settings_rx.is_some()
+            || self.stats_settings_rx.is_some()
+            || self.metrics_settings_rx.is_some()
+            || self.env_settings_rx.is_some()
+            || self.version_settings_rx.is_some()
+            || self.geodata_settings_rx.is_some()
     }
 
     /// Returns `true` while a log-settings save is in flight.
@@ -4275,6 +8728,64 @@ impl ApplicationService {
                     let _ = ptx.send(probe);
                 }
                 let _ = session.disconnect().await;
+            });
+        });
+        Ok(())
+    }
+
+    /// Last fetched current unit file body for the Edit-unit before/after diff (Roadmap
+    /// §3:126); `None` while the fetch is still in flight (or none was started).
+    pub fn unit_file_diff_result(&self) -> Option<&Result<Option<String>, String>> {
+        self.unit_file_diff_result.as_ref()
+    }
+
+    /// Starts a background read of the current remote unit file body, for the Edit-unit
+    /// before/after diff (Roadmap §3:126). Read-only — never called from the Apply path.
+    /// No-op (keeps any prior result) when a fetch is already in flight.
+    pub fn start_fetch_unit_file(&mut self, unit_name: &str) -> Result<(), String> {
+        if self.ssh_status != SshStatus::Connected {
+            return Err("No SSH connection.".to_owned());
+        }
+        if self.unit_file_diff_rx.is_some() {
+            return Ok(());
+        }
+        let name = ServiceName::new(unit_name).map_err(|e| e.message().to_owned())?;
+        let profile =
+            match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
+                Ok(profile) => profile,
+                Err(errors) => {
+                    self.connection_errors = errors;
+                    return Err("Connection profile is incomplete.".to_owned());
+                }
+            };
+
+        let (ftx, frx) = mpsc::channel();
+        self.unit_file_diff_rx = Some(frx);
+        self.unit_file_diff_result = None;
+        let client = self.ssh_client.clone();
+        let secrets = self.connection_secrets.clone();
+        thread::spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => return,
+            };
+            rt.block_on(async move {
+                let connect = build_connect_request(&profile, &secrets);
+                let session = match client.connect(&connect).await {
+                    Ok(session) => session,
+                    Err(error) => {
+                        let _ = ftx.send(Err(error.message().to_owned()));
+                        return;
+                    }
+                };
+                let result = crate::init::read_unit_file(&session, &name)
+                    .await
+                    .map_err(|e| e.message().to_owned());
+                let _ = session.disconnect().await;
+                let _ = ftx.send(result);
             });
         });
         Ok(())
@@ -4519,6 +9030,19 @@ impl ApplicationService {
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
                     self.unit_probe_rx = None;
+                }
+            }
+        }
+
+        if let Some(rx) = &self.unit_file_diff_rx {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.unit_file_diff_rx = None;
+                    self.unit_file_diff_result = Some(result);
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    self.unit_file_diff_rx = None;
                 }
             }
         }
@@ -5948,6 +10472,7 @@ impl ApplicationService {
         self.log_settings_draft = Some(settings);
         self.log_settings_error = None;
         self.log_settings_saved_flash = false;
+        self.log_settings_diff_preview = None;
         self.clear_current_operation();
         Ok(())
     }
@@ -5957,12 +10482,43 @@ impl ApplicationService {
         self.log_settings_draft = None;
         self.log_settings_error = None;
         self.log_settings_saved_flash = false;
+        self.log_settings_diff_preview = None;
         self.clear_current_operation();
     }
 
     /// Mutable access to the log-settings draft (edit mode only).
     pub fn log_settings_draft_mut(&mut self) -> Option<&mut LogSettings> {
         self.log_settings_draft.as_mut()
+    }
+
+    /// Last computed redacted structural diff preview for the log settings draft
+    /// (Roadmap §3:126), if `preview_log_settings_diff` was clicked since the last edit/save.
+    pub fn log_settings_diff_preview(&self) -> Option<&[crate::xray::JsonDiffEntry]> {
+        self.log_settings_diff_preview.as_deref()
+    }
+
+    /// Dry-runs the log settings save and stores a redacted structural diff preview, without
+    /// mutating the loaded config or touching the remote (Roadmap §3:126 — extends IB-L5
+    /// beyond inbounds; complements the existing typed `log_settings_change_summary`).
+    pub fn preview_log_settings_diff(&mut self) -> Result<(), String> {
+        let draft = self
+            .log_settings_draft
+            .clone()
+            .ok_or_else(|| "Not in edit mode.".to_owned())?;
+        validate_log_settings(&draft).map_err(|e| e.message())?;
+        let mut editable = self
+            .loaded_config
+            .editable()
+            .ok_or_else(|| "Configuration not loaded.".to_owned())?
+            .clone();
+        let request = UpdateLogSettingsRequest { settings: draft };
+        let outcome =
+            crate::xray::update_log_settings(&mut editable, request).map_err(|e| e.message())?;
+        self.log_settings_diff_preview = Some(crate::xray::redacted_json_diff_bytes(
+            &outcome.original_serialized,
+            &outcome.serialized,
+        ));
+        Ok(())
     }
 
     /// Borrowed log-settings draft.
@@ -6095,6 +10651,7 @@ impl ApplicationService {
                         self.log_settings_draft = None;
                         self.log_settings_error = None;
                         self.log_settings_saved_flash = true;
+                        self.log_settings_diff_preview = None;
                         self.stop_xray_log_follow();
                         self.xray_logs.entries.clear();
                         self.xray_logs.generation = self.xray_logs.generation.saturating_add(1);
@@ -6111,7 +10668,7 @@ impl ApplicationService {
                             detail = %technical,
                             "Xray log settings validation failed"
                         );
-                        let user_message = user_facing_log_settings_error(&error);
+                        let user_message = user_facing_config_modify_error(&error);
                         self.log_settings_error = Some(user_message.clone());
                         self.show_status_message(user_message);
                     }
@@ -6485,6 +11042,28 @@ impl ApplicationService {
         self.poll_inbound_mutation();
         self.poll_outbound_mutation();
         self.poll_confdir_file_mutation();
+        self.poll_backup_list();
+        self.poll_backup_content();
+        self.poll_backup_restore();
+        self.poll_api_read();
+        self.poll_api_mutation();
+        self.poll_stats_query();
+        self.poll_stats_sys_query();
+        self.poll_metrics_scrape();
+        self.poll_target_lookup();
+        self.poll_target_scan();
+        self.poll_api_settings_mutation();
+        self.poll_dns_settings_mutation();
+        self.poll_fakedns_settings_mutation();
+        self.poll_routing_settings_mutation();
+        self.poll_policy_settings_mutation();
+        self.poll_observatory_settings_mutation();
+        self.poll_burst_observatory_settings_mutation();
+        self.poll_stats_settings_mutation();
+        self.poll_metrics_settings_mutation();
+        self.poll_env_settings_mutation();
+        self.poll_version_settings_mutation();
+        self.poll_geodata_settings_mutation();
         self.poll_log_settings_mutation();
         self.poll_service_operation();
         self.poll_unit_operations();
@@ -6562,7 +11141,21 @@ impl ApplicationService {
             | CurrentOperation::GeneratingVlessEnc
             | CurrentOperation::FetchingCertPin
             | CurrentOperation::ReplacingInboundRawJson
-            | CurrentOperation::ReplacingOutboundRawJson => {}
+            | CurrentOperation::ReplacingOutboundRawJson
+            | CurrentOperation::RestoringBackup
+            | CurrentOperation::ManagingLiveApi { .. }
+            | CurrentOperation::SavingApiSettings
+            | CurrentOperation::SavingDnsSettings
+            | CurrentOperation::SavingFakeDnsSettings
+            | CurrentOperation::SavingRoutingSettings
+            | CurrentOperation::SavingPolicySettings
+            | CurrentOperation::SavingObservatorySettings
+            | CurrentOperation::SavingBurstObservatorySettings
+            | CurrentOperation::SavingStatsSettings
+            | CurrentOperation::SavingMetricsSettings
+            | CurrentOperation::SavingEnvSettings
+            | CurrentOperation::SavingVersionSettings
+            | CurrentOperation::SavingGeodataSettings => {}
         }
     }
 
@@ -6587,7 +11180,7 @@ impl Default for ApplicationService {
     }
 }
 
-fn user_facing_log_settings_error(error: &crate::xray::ConfigModifyError) -> String {
+fn user_facing_config_modify_error(error: &crate::xray::ConfigModifyError) -> String {
     use crate::xray::ConfigModifyErrorKind;
     match error.kind() {
         ConfigModifyErrorKind::BackupFailed => {
@@ -7484,6 +12077,7 @@ mod tests {
                 id: Some("11111111-1111-1111-1111-111111111111".to_owned()),
                 flow: None,
                 level: 0,
+                reverse: None,
             }))
             .expect("preview add");
 
@@ -7522,6 +12116,7 @@ mod tests {
                     email: "new@example.com".to_owned(),
                     flow: None,
                     level: 0,
+                    reverse: None,
                     expected_fingerprint: None,
                 },
             ))
@@ -7537,5 +12132,203 @@ mod tests {
         // Dry-run: the loaded config's client email is untouched.
         let clients = service.loaded_config.vless_clients();
         assert_eq!(clients[0].email.as_deref(), Some("old@example.com"));
+    }
+
+    #[test]
+    fn preview_replace_inbound_raw_json_diff_shows_change_without_mutating() {
+        let service = loaded_service_from_json(
+            "preview-inbound-raw-json",
+            r#"{
+                "inbounds":[{
+                    "tag":"vless-in",
+                    "protocol":"vless",
+                    "port":443,
+                    "settings":{"clients":[],"decryption":"none"}
+                }]
+            }"#,
+        );
+        let (_, fingerprint) = service.inbound_raw_json_view(0).expect("raw json view");
+        let entries = service
+            .preview_replace_inbound_raw_json_diff(
+                0,
+                r#"{"tag":"vless-in-renamed","protocol":"vless","port":443,"settings":{"clients":[],"decryption":"none"}}"#,
+                fingerprint,
+            )
+            .expect("preview raw json replace");
+        let joined = format!("{entries:?}");
+        assert!(joined.contains("vless-in-renamed"));
+
+        let inbound = &service.loaded_config.editable().unwrap().sections().inbounds()[0];
+        assert_eq!(
+            inbound.value().get("tag").and_then(|v| v.as_str()),
+            Some("vless-in")
+        );
+    }
+
+    #[test]
+    fn current_source_file_bytes_serializes_the_loaded_file() {
+        // Roadmap §3:127: this is the local ("current") side of the pre-restore diff — must
+        // match what's actually loaded, with no remote round trip.
+        let service = loaded_service_from_json(
+            "current-source-file-bytes",
+            r#"{"inbounds":[{"tag":"vless-in","protocol":"vless","port":443,"settings":{"clients":[],"decryption":"none"}}]}"#,
+        );
+        let bytes = service
+            .current_source_file_bytes("/etc/xray/config.json")
+            .expect("source file bytes");
+        let value: serde_json::Value = serde_json::from_slice(&bytes).expect("valid json");
+        assert_eq!(
+            value["inbounds"][0]["tag"].as_str(),
+            Some("vless-in")
+        );
+    }
+
+    #[test]
+    fn current_source_file_bytes_none_when_config_not_loaded() {
+        let service = service_with_temp_config("current-source-file-bytes-unloaded");
+        assert!(service.current_source_file_bytes("/etc/xray/config.json").is_none());
+    }
+
+    #[test]
+    fn backup_list_result_ignores_a_different_files_cached_result() {
+        // Roadmap §3:127: switching which file's listing is being viewed must not show a
+        // stale result from a previously listed file.
+        let mut service = service_with_outbound("backup-list-result-scoping");
+        service.backup_list_target = Some("/etc/xray/config.json".to_owned());
+        service.backup_list_result = Some(Ok(Vec::new()));
+        assert!(service.backup_list_result("/etc/xray/config.json").is_some());
+        assert!(service.backup_list_result("/etc/xray/other.json").is_none());
+    }
+
+    fn service_with_outbound(name: &str) -> ApplicationService {
+        loaded_service_from_json(
+            name,
+            r#"{
+                "inbounds":[],
+                "outbounds":[{"tag":"direct","protocol":"freedom","settings":{}}]
+            }"#,
+        )
+    }
+
+    #[test]
+    fn preview_outbound_shell_diff_add_does_not_mutate_loaded_config() {
+        // Roadmap §3:126: same dry-run contract as the inbound Shell Preview (IB-L5).
+        let mut service = service_with_outbound("preview-outbound-shell-add");
+        service.outbound_editor_session = Some(crate::app::outbound_ops::OutboundEditorSession {
+            outbound_index: usize::MAX,
+            outbound_ref: None,
+            general: crate::xray::OutboundGeneral {
+                tag: Some("new-freedom".to_owned()),
+                send_through: None,
+                proxy_settings: None,
+            },
+            settings: crate::xray::OutboundSettingsDraft::freedom_default(),
+            is_add: true,
+            diff_preview: None,
+        });
+
+        service
+            .preview_outbound_shell_diff()
+            .expect("preview add outbound shell");
+
+        let entries = service
+            .outbound_editor_session()
+            .and_then(|s| s.diff_preview.clone())
+            .expect("diff stored on session");
+        let joined = format!("{entries:?}");
+        assert!(joined.contains("new-freedom"));
+
+        // Dry-run: still only the one outbound from the loaded config.
+        assert_eq!(
+            service
+                .loaded_config
+                .editable()
+                .unwrap()
+                .sections()
+                .outbounds()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn preview_rename_outbound_tag_diff_shows_tag_change_without_mutating() {
+        let service = service_with_outbound("preview-rename-outbound");
+        let entries = service
+            .preview_rename_outbound_tag_diff(0, "renamed")
+            .expect("preview rename");
+        let tag_entry = entries
+            .iter()
+            .find(|e| e.path.ends_with("tag"))
+            .expect("tag change entry");
+        assert_eq!(tag_entry.after.as_deref(), Some("\"renamed\""));
+
+        let outbound = &service.loaded_config.editable().unwrap().sections().outbounds()[0];
+        assert_eq!(
+            outbound.value().get("tag").and_then(|v| v.as_str()),
+            Some("direct")
+        );
+    }
+
+    #[test]
+    fn preview_duplicate_outbound_diff_adds_a_copy_without_mutating() {
+        let service = service_with_outbound("preview-duplicate-outbound");
+        let entries = service
+            .preview_duplicate_outbound_diff(0)
+            .expect("preview duplicate");
+        assert!(entries.iter().any(|e| e.kind == crate::xray::JsonDiffKind::Added));
+
+        assert_eq!(
+            service
+                .loaded_config
+                .editable()
+                .unwrap()
+                .sections()
+                .outbounds()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn preview_replace_outbound_raw_json_diff_shows_change_without_mutating() {
+        let service = service_with_outbound("preview-outbound-raw-json");
+        let (_, fingerprint) = service.outbound_raw_json_view(0).expect("raw json view");
+        let entries = service
+            .preview_replace_outbound_raw_json_diff(
+                0,
+                r#"{"tag":"direct","protocol":"freedom","settings":{"domainStrategy":"UseIP"}}"#,
+                fingerprint,
+            )
+            .expect("preview raw json replace");
+        let joined = format!("{entries:?}");
+        assert!(joined.contains("UseIP"));
+
+        let outbound = &service.loaded_config.editable().unwrap().sections().outbounds()[0];
+        assert!(outbound.value()["settings"].get("domainStrategy").is_none());
+    }
+
+    #[test]
+    fn preview_duplicate_inbound_diff_adds_a_copy_without_mutating() {
+        let service = loaded_service_from_json(
+            "preview-duplicate-inbound",
+            r#"{
+                "inbounds":[{
+                    "tag":"vless-in",
+                    "protocol":"vless",
+                    "port":443,
+                    "settings":{"clients":[],"decryption":"none"}
+                }]
+            }"#,
+        );
+        let entries = service
+            .preview_duplicate_inbound_diff(0)
+            .expect("preview duplicate inbound");
+        assert!(entries.iter().any(|e| e.kind == crate::xray::JsonDiffKind::Added));
+
+        assert_eq!(
+            service.loaded_config.editable().unwrap().sections().inbounds().len(),
+            1
+        );
     }
 }

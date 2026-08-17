@@ -118,6 +118,29 @@ Layout:
 Deferred on this page: truncation, deletion, rotation, export, analysis.
 Log destination / level / DNS / mask editing lives on the separate Log Settings page.
 
+# API Settings (Roadmap §2.1:54)
+
+Page title: API Settings. Placed between BurstObservatory and Log Settings in the sidebar — the
+group of top-level root-section editors (Dns, FakeDns, Routing, Policy, Observatory,
+BurstObservatory, API Settings, Log Settings), not next to API Console (which is about operating
+an already-running Xray, not the config file).
+Edits the Xray top-level `api` object only (`tag` / `listen` / `services`) — not related to and
+not gating the separate API Console page (Roadmap §3:128), which already reads `api.listen`
+directly from the loaded config regardless of how it got there (this page or the Raw JSON escape
+hatch).
+Modes: View / Edit with Edit, Save, Cancel, Preview changes (redacted structural JSON diff, same
+widget as Log Settings / Inbound Shell Preview).
+Fields: `tag` and `listen` (single-line, blank = key omitted), `services` (checkboxes for the 5
+documented values — HandlerService / LoggerService / StatsService / RoutingService /
+ReflectionService — plus a "one per line" text box for unrecognized/future values; both edit the
+same list).
+The `api` object is not created by opening the page — only by Save, same "enable by saving"
+convention as Log Settings.
+View mode shows a note when `listen` is empty: the API is then only reachable by routing an
+inbound to `tag`, which this page does not wire automatically.
+Save uses the shared configuration modification pipeline (summary → backup → write → validate).
+After save: show restart/reload notice.
+
 # Log Settings
 Page title: Log Settings
 Edits the remote Xray top-level `log` object only (not Feldjäger application logs).
@@ -125,6 +148,8 @@ Modes: View / Edit with Edit, Save, Cancel.
 Sections: Access log, Error log, Additional log entries, Privacy.
 Supported fields: `access`, `error`, `loglevel`, `dnsLog`, `maskAddress`.
 Unknown nested fields and unsupported values are preserved.
+Edit mode shows a typed field-level Change summary plus an optional "Preview changes" button
+(redacted structural JSON diff, same widget as Inbound Shell Preview, Roadmap §3:126).
 Save uses the shared configuration modification pipeline (summary → backup → write → validate).
 After save: show restart/reload notice; invalidate Xray Logs source cache.
 Deferred: log rotation, journald/syslog, chmod/mkdir, truncate/delete, auto-restart,
@@ -254,10 +279,34 @@ Add Inbound:
 - Empty clients list is allowed on save
 - Same Preview changes + post-write `-test` path as Shell Save
 
+Import from Share URI (Roadmap §3:133):
+- "Import from Share URI" button next to "Add Inbound" opens a paste-a-link dialog (`vless://` /
+  `trojan://` / `hy2://`, `hysteria2://` accepted as an alias on import)
+- "Parse" shows a read-only preview (protocol / port / security / transport / credential / flow)
+  plus every warning about what a share link can't fully reproduce — REALITY's private key and
+  TLS certificate files are never in a client link (confirmed in the generation code), so those
+  always need separate setup after import; VLESS post-quantum `encryption` and hy2 `pinSHA256`
+  are parsed only to warn they exist, never applied anywhere
+- Two ways to apply the preview, picked per import:
+  - **Create new inbound** — opens Add Inbound pre-filled from the link (port, transport,
+    security mode + fields), same "every field stays freely editable, nothing is final until you
+    Save" contract as the existing presets (Roadmap §3:123); for REALITY this also fires
+    "Generate x25519" immediately, since the link's own public key can never be reused — a Status
+    Bar note repeats the credential to add afterward via the Users tab
+  - **Add user to existing inbound** — pick an already-configured inbound of the matching
+    protocol from a list; opens that inbound's Add User dialog (VLESS/Trojan/Hysteria) pre-filled
+    with the parsed UUID/password/auth, flow, and email — the same dialog Add User already uses,
+    just not starting from a blank/freshly-generated draft
+- hy2 `obfs=salamander`/`obfs-password` *is* fully reusable (a plain shared secret, not an
+  asymmetric key) and is imported into the new inbound's FinalMask UDP layer
+- hy2 port-hopping ranges (`443,5000-6000`) import only the first port when creating a new inbound
+  — the General tab's port field is scalar-only (Roadmap §3:118); configure the full range via the
+  Raw JSON editor afterward if needed
+
 Outbounds page (Roadmap §2.4:94, §2.4:95, §2.4:96):
 - Table: Tag, Protocol, Send Through, Summary, Source file; context menu Copy tag/protocol
 - "Add Outbound" is a menu button with three entries, **Freedom**, **Blackhole**, and **DNS**, each opening the Add editor for that protocol
-- Context menu **Edit** — enabled for Freedom, Blackhole, and DNS outbounds only ("Shell editing is available for Freedom, Blackhole, and DNS outbounds only" hover otherwise); **Delete** — any protocol (unchanged, §2.4:97); **Duplicate** — Freedom/Blackhole/DNS only, deep-copies with a unique `{tag}-copy[-N]` tag, fires immediately, no confirm dialog (§2.4:98); **Rename** — any protocol, opens a dialog with the current tag, a routing/balancer reference preview (computed locally before submit), and a text field for the new tag; renaming never blocks on stale references — it applies the rename and reports affected rules/selectors in the status message afterward (§2.4:99)
+- Context menu **Edit** — enabled for Freedom, Blackhole, and DNS outbounds only ("Shell editing is available for Freedom, Blackhole, and DNS outbounds only" hover otherwise); **Delete** — any protocol (unchanged, §2.4:97); **Duplicate** — Freedom/Blackhole/DNS only, deep-copies with a unique `{tag}-copy[-N]` tag; opens a confirm dialog with "Duplicate" / "Preview changes" (redacted JSON diff, Roadmap §3:126) / "Cancel" — no longer fires immediately (§2.4:98); **Rename** — any protocol, opens a dialog with the current tag, a routing/balancer reference preview (computed locally before submit), a text field for the new tag, and a "Preview changes" button (Roadmap §3:126); renaming never blocks on stale references — it applies the rename and reports affected rules/selectors in the status message afterward (§2.4:99); **Raw JSON** — any protocol, escape-hatch editor for the whole outbound object, with its own "Preview changes" button (§3:125, §3:126)
 - Editor (single pane, no tabs — none of the three protocols has Stream/Security/Sniffing/Users); title and Protocol-section label show the active protocol name:
   - General (shared by all three protocols): `tag` (editable on Add only; read-only label on Edit — use the context-menu **Rename** action instead, §2.4:99), `sendThrough`
   - Protocol (Freedom): `domainStrategy` (combo of the same presets as `streamSettings.sockopt.domainStrategy` + free text), `redirect` (`host:port`), `userLevel`
@@ -267,7 +316,7 @@ Outbounds page (Roadmap §2.4:94, §2.4:95, §2.4:96):
   - Protocol (DNS): `rewriteNetwork` combo (`tcp` | `udp` + free text) / `rewriteAddress` / `rewritePort` (1-65535) / `userLevel`; empty rewrite fields = unchanged (Xray leaves the query as-is)
     - `rules[]` ordered list (first match wins) — each entry: `action` combo (`direct` | `hijack` | `drop` | `return` + free text, required) / `qType` (free text — integer, or range/comma-list e.g. `11,13,15-17`) / `rCode` (0-65535, relevant for `return`) / `domain` multi-line box (one domain matcher per line; empty = matches all queries)
     - Add rule / Remove / Move up / Move down per entry — order is meaningful, same convention as the FinalMask layer-list editor
-  - Save (Add Outbound / Save) writes via a fingerprint-checked Shell Save on Edit; Cancel discards the session
+  - Save (Add Outbound / Save) writes via a fingerprint-checked Shell Save on Edit; "Preview changes" shows a redacted structural JSON diff before write (Roadmap §3:126, same widget as Inbound Shell Preview); Cancel discards the session
 - Delete dialog unchanged: confirm + "Deletion cannot be undone from the UI (restore from backup if needed)."
 
 Policy page (read-only; §21):
@@ -285,3 +334,143 @@ Config Files page (Roadmap §2.5:107):
 - **Add file** button opens a dialog with a filename field (hint: must end in `.json`; Xray merges confdir files in lexicographic order, e.g. `10-custom.json`); the new file is written empty (`{}`) — it changes nothing on its own
 - Context menu **Remove** — enabled only when the file is already empty (hard-blocked otherwise, hover shows what it still contains); confirm dialog, same "cannot be undone from the UI (restore from backup if needed)" wording as other Delete dialogs
 - After either action: "Configuration updated. Xray restart/reload required." — no automatic restart or reload is triggered (use the existing Reload action on the Service page)
+
+Backups page (Roadmap §3:127):
+- Lists every current Xray config source file (one row for a single-file install; every confdir member for a confdir install) — not the systemd unit file, which has its own before/after diff on the Service page's Edit unit dialog (Roadmap §3:126) instead
+- Per file: "List backups" fetches and shows a table of previously created backups (Created / Size / Restore) — not fetched automatically for every file on page load
+- "Restore" opens a confirm dialog: fetches the backup's content, shows a redacted structural JSON diff (same widget as everywhere else, Roadmap §3:126) against the currently loaded copy, then "Restore" / "Cancel"
+- Restore goes through the same backup → write → `xray run -test` → restore-on-failure pipeline as every other configuration change — restoring is itself reversible; on success the configuration is fully reloaded (Discover runs again)
+- Refused (not silently overwritten) if the remote file changed since the last Discover
+
+# API Console (Roadmap §3:128)
+
+Page title: API Console. Placed right after Service in the sidebar — both are about operating an
+already-running Xray, not its configuration file.
+Live `xray api` gRPC calls (HandlerService / RoutingService / LoggerService) against the running
+Xray process, via `api.listen`. **Nothing here is written to the configuration file** — a
+permanent warning banner says so at the top of the page, repeated in the Remove confirm dialog.
+Requires `api.listen` configured in the loaded config (no structured editor for the `api` section
+yet, §2.1:54 — the page explains how to add it through the Raw JSON escape hatch when absent)
+instead of an SSH connection alone.
+Header: resolved `api.listen` address, `api.services`, an amber info-warning (not blocking) when
+`HandlerService`/`RoutingService`/`LoggerService` is missing from `api.services`.
+Sections (collapsed by default): Logger (Restart Logger), Inbounds (live: List / Add JSON / Remove
+by tag), Outbounds (live: same shape), Inbound users (live: List / Count / Add JSON / Remove by
+email), Routing rules (live: List / Add JSON with Append / Remove by rule tag), Balancer (Info /
+Override selection), Source IP block (emergency route-to-outbound for one or more source IPs).
+Read-only calls (List/Info/Count) show raw monospaced output, the same treatment as Xray Logs
+bodies — not parsed into a table.
+Remove actions (inbound/outbound/user/rule) go through a shared confirm dialog restating that the
+change is live-only. Add / Override / Source IP block / Restart Logger run immediately, no
+confirm — same level as Add Inbound/Outbound Shell.
+
+# Statistics (Roadmap §3:129)
+
+Page title: Statistics. Placed right after API Console in the sidebar — both read the running
+Xray process live, via `api.listen`; this one reads `statsquery`/`statssys` specifically instead
+of the general HandlerService/RoutingService console. Same precondition as API Console
+(`api.listen` configured; the page explains the Raw JSON escape hatch when it's absent) and the
+same warn-don't-block treatment for a missing service (`StatsService` here, instead of
+Handler/Routing/Logger) — plus any `stats` ↔ `policy` ↔ `api` wiring warnings already computed for
+the Policy page (Roadmap §2.5:106), shown here too since they directly explain why a counter might
+read "No data yet".
+
+Refresh is manual only — a button per section, never a background timer — every click is one
+SSH-exec round trip on the remote host.
+
+**Traffic** section: "Refresh" fetches every counter in one `statsquery` call (no `-pattern`
+filter, no `-reset` — a passive dashboard must not zero counters another tool might also be
+polling) and groups them client-side by the documented `inbound>>>{tag}>>>traffic>>>{uplink|
+downlink}` / `outbound>>>...` naming convention. One row per known inbound/outbound tag × direction
+(Inbound tags first, then Outbound), each with the current value, a small sparkline of every
+sample fetched so far this session, and — once at least two samples exist with a gap of half a
+second or more — an average throughput since the previous sample. A tag with no matching counter
+yet (stats collection not enabled for it) still gets a row, showing "No data yet" instead of being
+hidden.
+
+**Other counters**: anything from the last response that isn't a known inbound/outbound tag —
+per-user (`user>>>{email}>>>...`) counters, or tags no longer in the loaded configuration — listed
+verbatim, collapsed by default, not charted.
+
+**System** section: a separate "Refresh" fetches `statssys` (process uptime, goroutine count, GC
+cycles/pause time, heap allocation figures) into a small table.
+
+# Metrics (Roadmap §3:130)
+
+Page title: Metrics. Placed right after Statistics in the sidebar. Reads the `metrics` HTTP
+endpoint (`/debug/vars` — Go's standard `expvar` JSON dump, **not** a Prometheus scrape target,
+despite the roadmap wording; confirmed against the upstream Go source) instead of the gRPC API —
+a different Xray config section (`metrics.listen`, not `api.listen`) and a different transport
+(SSH-execing `curl`, falling back to `wget` only when curl itself is absent from the remote host,
+rather than `xray api <subcommand>`). Same precondition pattern as API Console/Statistics
+(`metrics.listen` configured; the page explains the Raw JSON escape hatch when it's absent) plus
+the same `stats` ↔ `policy` ↔ `api` ↔ `metrics` wiring warnings shown on the Policy/Statistics
+pages (Roadmap §2.5:106). Unlike the `api`/`metrics` general reachability check (which treats a
+`tag` routed through an inbound as "reachable"), this page requires a literal `listen` address —
+Feldjäger's scrape only ever does a plain HTTP fetch, never acts as an Xray client dialed through
+routing.
+
+Refresh is manual only — one button, never a background timer — every click is one SSH-exec round
+trip on the remote host.
+
+**Traffic** section: same shape as the Statistics page's Traffic section (grouped by known
+inbound/outbound tag × direction, sparkline, throughput, "No data yet" rows) — reconstructed from
+the endpoint's nested `stats.{inbound,outbound,user}` object into the same counter-naming
+convention, and charted against its own separate sample history (not shared with the Statistics
+page, so refreshing one never perturbs the other's charts).
+
+**Observatory** section: live outbound health-check results (alive/dead, delay, last seen/tried,
+aggregate ping measurements) — data not available anywhere else in Feldjäger; the read-only
+Observatory page (Roadmap §23) only shows static `subjectSelector`/`probeUrl` configuration, never
+live probe results. Comes from the same single fetch as Traffic, at no extra SSH round trip.
+
+**Other counters**: same treatment as the Statistics page — counters that don't match a known
+inbound/outbound tag, listed verbatim, collapsed by default, not charted.
+
+**Runtime** section: a small subset of Go's default `memstats`/`cmdline` expvars (heap/GC figures,
+process argv) — visually similar to the Statistics page's System section but explicitly labelled
+as a different, smaller field set from a different source (`statssys` is a custom Xray RPC;
+`memstats` is Go's standard library default), so the two are never mistaken for the same data.
+
+# Target Lookup (Roadmap §3:131)
+
+Page title: Target Lookup. Placed at the end of the sidebar, right before Settings — a standalone
+utility, not a live-Xray-operations page like its neighbors above. **The only page in Feldjäger
+with no SSH precondition** and the only one that reaches the public internet from the operator's
+workstation instead of the managed host — a permanent notice on the page says so.
+
+Purpose: an authoring aid for picking or checking a REALITY `dest`, a TLS `serverName`, or a
+routing `domain` value — type a domain or IP and see which organization/ASN actually owns it
+(Team Cymru whois, `whois.cymru.com:43`), to help judge whether a candidate target is a plausible
+camouflage host before wiring it into a config. Forward lookup only (domain/IP → ASN) — not a
+reverse "find domains hosted on ASN X" search, which would duplicate mature external tools
+(bgp.he.net, Shodan, Censys) and has no comparable lightweight, free, no-signup data source.
+
+Layout: a single text field ("Domain or IP") + "Look up" button; below, once a lookup has run,
+"Results for: {host}" followed by a table (Resolved IP / ASN / AS Name / BGP Prefix / Country /
+Registry / Allocated) or an error message. An unrouted/private address (Team Cymru reports `NA`)
+shows a plain explanatory note instead of blank fields — never a parse error.
+
+## AS-range REALITY candidate scan (Roadmap §3:131 follow-up)
+
+Below the ASN lookup result: "Scan network for REALITY candidates" — probes every host in the
+BGP prefix from the result above (capped at 256 addresses) for a valid REALITY `dest`: reverse DNS
++ forward-resolve consistency (the direct fix for RealiTLScanner's classic failure mode — a
+certificate SAN domain that doesn't actually resolve back to the IP it was found on), then a
+TLS 1.3 handshake checking negotiated ALPN (`h2`/`http/1.1` — `h3` is QUIC/UDP-only and
+unobservable over a TCP handshake, out of scope) and key-exchange group (`X25519` or the
+post-quantum hybrid `X25519MLKEM768`). Invalid results are never shown — only fully valid rows.
+
+Runs entirely on the local machine, never through the managed SSH host — deliberately, so bulk
+scan traffic never originates from the production VPS (an explicit design decision: the point of
+running locally instead of via SSH-exec on the server is to keep this traffic off the box actually
+running paying Xray service). Enabled only when the current ASN result has a usable BGP prefix.
+Mandatory 10-second pause between probes as a courtesy to the network being scanned, independent of
+where the scan runs from — implemented as cancellable ~250ms increments so Stop responds quickly
+rather than waiting out a full pause.
+
+Progress shown live ("Checked N / capped total"; a note when the prefix is wider than the 256
+cap) with a Stop button while running; valid rows stream into a table (IP / Domain / cert-domain /
+ALPN / curve) as they're found, not only at the end. The scanned prefix and its results stay shown
+even if the user runs a new ASN lookup for a different host mid-scan or afterward — only starting a
+new scan replaces them.

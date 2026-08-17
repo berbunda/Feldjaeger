@@ -159,6 +159,12 @@ fn open_unit_form(ui: &Ui, service: &mut ApplicationService, create: bool) {
                 wanted_by: spec.wanted_by.clone(),
             };
             let preview = preview_from_form(&form).unwrap_or_default();
+            if !create {
+                // Fetch the current remote unit body for the before/after diff (Roadmap
+                // §3:126); read-only, never on the Apply path. Best-effort — Apply still works
+                // if the fetch fails.
+                let _ = service.start_fetch_unit_file(&form.unit_name);
+            }
             with_dialog_state(ui, |state| {
                 *state = ServiceDialogState {
                     mode: ServiceDialogMode::UnitForm,
@@ -212,6 +218,46 @@ fn form_to_spec(form: &UnitFormState) -> Result<UnitSpec, String> {
 fn preview_from_form(form: &UnitFormState) -> Result<String, String> {
     let spec = form_to_spec(form)?;
     preview_exec_start(&spec).map_err(|e| e.message())
+}
+
+/// Shows a before/after line diff of the unit file body for Edit mode (Roadmap §3:126) — Edit
+/// fully replaces the file, so this makes the "unmodeled keys will be dropped" warning above
+/// concrete instead of just a static sentence.
+fn show_unit_body_diff(ui: &mut Ui, service: &ApplicationService, form: &UnitFormState) {
+    match service.unit_file_diff_result() {
+        None => {
+            ui.label(
+                RichText::new("Fetching current unit file for comparison...")
+                    .size(12.0)
+                    .color(Color32::from_rgb(140, 140, 140)),
+            );
+        }
+        Some(Err(error)) => {
+            ui.label(
+                RichText::new(format!(
+                    "Could not read the current unit file for comparison: {error}"
+                ))
+                .size(12.0)
+                .color(Color32::from_rgb(210, 170, 40)),
+            );
+        }
+        Some(Ok(None)) => {
+            ui.label(
+                RichText::new(
+                    "No existing unit file found on the remote host — everything above will be newly created.",
+                )
+                .size(12.0)
+                .color(Color32::from_rgb(140, 140, 140)),
+            );
+        }
+        Some(Ok(Some(current))) => {
+            let new_body = form_to_spec(form)
+                .and_then(|spec| render_unit(&spec).map_err(|e| e.message()))
+                .unwrap_or_default();
+            let entries = crate::xray::redacted_json_diff_lines(current, &new_body);
+            super::json_diff_preview(ui, &entries);
+        }
+    }
 }
 
 fn show_summary(ui: &mut Ui, model: &ServicePageModel) {
@@ -385,7 +431,7 @@ fn show_confirm_dialog(ui: &mut Ui, service: &mut ApplicationService, operation:
     }
 }
 
-fn show_unit_form_dialog(ui: &mut Ui, _service: &mut ApplicationService) {
+fn show_unit_form_dialog(ui: &mut Ui, service: &mut ApplicationService) {
     let mut open = true;
     egui::Window::new("Unit file")
         .collapsible(false)
@@ -450,6 +496,11 @@ fn show_unit_form_dialog(ui: &mut Ui, _service: &mut ApplicationService) {
             ui.add_space(8.0);
             ui.label(RichText::new("ExecStart preview").strong());
             ui.label(RichText::new(&preview).monospace());
+
+            if !create {
+                ui.add_space(8.0);
+                show_unit_body_diff(ui, service, &form);
+            }
 
             let error = with_dialog_state(ui, |state| state.error.clone());
             if let Some(error) = error {

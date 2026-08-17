@@ -1,8 +1,29 @@
-//! Client share URI builders (`vless://` / `trojan://` / `hy2://`) for IB Share lake.
+//! Client share URI builders (`vless://` / `trojan://` / `hy2://`) for IB Share lake, plus the
+//! reverse direction — parsing a pasted share URI for Inbound import (Roadmap §3:133).
 //!
 //! Reality `publicKey` and VLESS client `encryption` are **never** read from
 //! server inbound JSON — callers must supply them from Generate ephemerals.
+//!
+//! **Import direction — what can and cannot round-trip.** A share URI is inherently a partial,
+//! one-way view of a server config: it was built from server data (see [`build_share_uri`]) that
+//! deliberately excludes anything secret, so parsing one back can only ever recover a subset of
+//! what a working inbound needs:
+//! - REALITY `pbk` (public key) is present, but the matching `privateKey` never is (see module
+//!   doc above) — an imported Reality link can prefill `sni`/`sid`/`fp`/`spx`, but the inbound
+//!   still needs a **freshly generated** keypair, which makes the original link's `pbk` unusable
+//!   afterward. Confirmed with the user as the intended behavior (Roadmap §3:133).
+//! - TLS certificate files are never encoded in a link (only `sni`/`alpn`/`allowInsecure`) — an
+//!   imported TLS inbound still needs `certificateFile`/`keyFile` configured separately.
+//! - VLESS `encryption` (post-quantum ML-KEM client encryption), when present and not `"none"`,
+//!   is parsed but intentionally **not** applied to the new inbound's `decryption` — same
+//!   category of problem as the Reality private key (the server-side secret half is never in the
+//!   client's link) — surfaced as an import warning instead.
+//! - hy2 `pinSHA256` is a pure client-side pinning value with no corresponding server config
+//!   field at all — parsed only to warn that it exists, never written anywhere.
+//! - hy2 `obfs=salamander`/`obfs-password` *is* a plain shared secret (both sides must already
+//!   agree on it) and *is* fully reusable — imported into `streamSettings.finalmask.udp[]`.
 
+use std::collections::HashMap;
 use std::fmt;
 
 /// Transport encoded into share query `type=` (+ nested params).
@@ -505,6 +526,275 @@ fn hex_digit(n: u8) -> char {
     })
 }
 
+/// Percent-decodes a URI component. Malformed `%` escapes (not followed by two hex digits) are
+/// passed through literally rather than rejected — links pasted from other tools are trusted
+/// input the user typed/pasted themselves, not attacker-controlled wire data; being lenient here
+/// matches this project's general "prefer compatibility over convenience" stance (`rules.md`).
+pub fn pct_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+// ─── Import: parsing a pasted share URI ────────────────────────────────────────
+
+/// Everything recoverable from parsing a client share URI (see module doc for what's
+/// deliberately *not* recoverable). Reuses [`ShareSecurity`]/[`ShareTransport`] directly — the
+/// same types [`build_share_uri`] consumes — so downstream import code interprets exactly the
+/// same shapes it already knows how to render.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedShareUri {
+    /// VLESS, Trojan, or Hysteria.
+    pub protocol: ShareProtocol,
+    /// UUID (VLESS) / password (Trojan) / auth (Hysteria) — percent-decoded userinfo.
+    pub user_id: String,
+    /// Host from the authority section — informational only; import never writes this anywhere
+    /// (it's the address *clients* use to reach the server, not something to set as `listen`).
+    pub host: String,
+    /// First/primary port, when parseable.
+    pub port: Option<u16>,
+    /// Raw hy2 "port hopping" segment (`"443,5000-6000"`) when the port section contained a
+    /// comma. `None` for VLESS/Trojan (never has hop syntax) and for a plain hy2 port.
+    pub port_hop: Option<String>,
+    /// Fragment (`#…`), percent-decoded.
+    pub remark: Option<String>,
+    /// VLESS `flow` query, when non-empty.
+    pub flow: Option<String>,
+    /// VLESS `encryption` query, when present — kept only so callers can warn that it isn't
+    /// imported (see module doc), never applied to a new inbound's `decryption`.
+    pub encryption: Option<String>,
+    /// none | tls | reality.
+    pub security: ShareSecurity,
+    /// Stream type. For Hysteria this is always [`ShareTransport::Tcp`] as a placeholder — hy2
+    /// links carry no `type=` query at all, so this field is meaningless for that protocol and
+    /// import code must not read it there.
+    pub transport: ShareTransport,
+    /// hy2 `obfs-password`, only when `obfs=salamander` was present — the one Hysteria security
+    /// param that *is* fully reusable (see module doc).
+    pub obfs_salamander_password: Option<String>,
+    /// hy2 `pinSHA256`, kept only to warn it exists — no server-side field to import it into.
+    pub pin_sha256: Option<String>,
+}
+
+/// Parses a `vless://`, `trojan://`, or `hy2://`/`hysteria2://` share URI.
+///
+/// Accepts `hysteria2://` as an alias for `hy2://` on import (but never emits it) since that's
+/// the scheme name many other Hysteria2 panels/tools use.
+pub fn parse_share_uri(input: &str) -> Result<ParsedShareUri, ShareUriError> {
+    let input = input.trim();
+    let (scheme, rest) = input
+        .split_once("://")
+        .ok_or_else(|| ShareUriError::new("Not a share URI (missing `scheme://`)."))?;
+    let protocol = match scheme.to_ascii_lowercase().as_str() {
+        "vless" => ShareProtocol::Vless,
+        "trojan" => ShareProtocol::Trojan,
+        "hy2" | "hysteria2" | "hysteria" => ShareProtocol::Hysteria,
+        other => {
+            return Err(ShareUriError::new(format!(
+                "Unsupported scheme `{other}://` (expected vless / trojan / hy2)."
+            )));
+        }
+    };
+
+    let (before_fragment, fragment) = match rest.split_once('#') {
+        Some((a, b)) => (a, Some(pct_decode(b))),
+        None => (rest, None),
+    };
+    let (authority_and_userinfo, query_str) = match before_fragment.split_once('?') {
+        Some((a, b)) => (a, b),
+        None => (before_fragment, ""),
+    };
+    let (userinfo, authority) = authority_and_userinfo
+        .rsplit_once('@')
+        .ok_or_else(|| ShareUriError::new("Missing credential before `@` in share URI."))?;
+    let user_id = pct_decode(userinfo);
+    if user_id.trim().is_empty() {
+        return Err(ShareUriError::new("Empty credential in share URI."));
+    }
+
+    let (host, port_section) = split_host_port(authority)?;
+
+    let mut port: Option<u16> = None;
+    let mut port_hop: Option<String> = None;
+    if let Some(section) = port_section {
+        let section = section.trim();
+        if section.contains(',') {
+            port_hop = Some(section.to_owned());
+            port = section
+                .split([',', '-'])
+                .next()
+                .and_then(|first| first.trim().parse().ok());
+        } else {
+            port = section.parse().ok();
+        }
+    }
+
+    let query = parse_query(query_str);
+
+    Ok(match protocol {
+        ShareProtocol::Hysteria => parse_hy2_fields(user_id, host, port, port_hop, fragment, &query),
+        _ => parse_vless_trojan_fields(protocol, user_id, host, port, fragment, &query),
+    })
+}
+
+fn split_host_port(authority: &str) -> Result<(String, Option<&str>), ShareUriError> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, after) = rest
+            .split_once(']')
+            .ok_or_else(|| ShareUriError::new("Unterminated IPv6 literal in share URI host."))?;
+        return Ok((host.to_owned(), after.strip_prefix(':')));
+    }
+    match authority.split_once(':') {
+        Some((host, port)) => Ok((host.to_owned(), Some(port))),
+        None => Ok((authority.to_owned(), None)),
+    }
+}
+
+fn parse_query(query_str: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for pair in query_str.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        map.insert(pct_decode(key), pct_decode(value));
+    }
+    map
+}
+
+fn parse_vless_trojan_fields(
+    protocol: ShareProtocol,
+    user_id: String,
+    host: String,
+    port: Option<u16>,
+    remark: Option<String>,
+    query: &HashMap<String, String>,
+) -> ParsedShareUri {
+    let security = match query.get("security").map(|s| s.to_ascii_lowercase()).as_deref() {
+        Some("reality") => ShareSecurity::Reality {
+            public_key: query.get("pbk").cloned().unwrap_or_default(),
+            short_id: query.get("sid").cloned().unwrap_or_default(),
+            server_name: query.get("sni").cloned().unwrap_or_default(),
+            fingerprint: query.get("fp").cloned().unwrap_or_default(),
+            spider_x: query.get("spx").cloned().unwrap_or_default(),
+            mldsa65_verify: query.get("pqv").cloned(),
+        },
+        Some("tls") => ShareSecurity::Tls {
+            server_name: query.get("sni").cloned(),
+            insecure: query_flag(query, "allowInsecure") || query_flag(query, "insecure"),
+            alpn: split_alpn(query.get("alpn")),
+        },
+        _ => ShareSecurity::None,
+    };
+
+    let transport = match query.get("type").map(String::as_str) {
+        Some("xhttp") | Some("splithttp") => ShareTransport::Xhttp {
+            path: query.get("path").cloned().unwrap_or_default(),
+            host: query.get("host").cloned(),
+            mode: query.get("mode").cloned(),
+            extra: query.get("extra").cloned(),
+        },
+        Some("grpc") => ShareTransport::Grpc {
+            service_name: query.get("serviceName").cloned().unwrap_or_default(),
+        },
+        Some("ws") | Some("websocket") => ShareTransport::Ws {
+            path: query.get("path").cloned().unwrap_or_default(),
+            host: query.get("host").cloned(),
+        },
+        Some("kcp") | Some("mkcp") => ShareTransport::Kcp,
+        _ => ShareTransport::Tcp,
+    };
+
+    ParsedShareUri {
+        protocol,
+        user_id,
+        host,
+        port,
+        port_hop: None,
+        remark,
+        flow: query.get("flow").cloned().filter(|s| !s.is_empty()),
+        encryption: query.get("encryption").cloned().filter(|s| !s.is_empty()),
+        security,
+        transport,
+        obfs_salamander_password: None,
+        pin_sha256: None,
+    }
+}
+
+fn parse_hy2_fields(
+    user_id: String,
+    host: String,
+    port: Option<u16>,
+    port_hop: Option<String>,
+    remark: Option<String>,
+    query: &HashMap<String, String>,
+) -> ParsedShareUri {
+    let security = ShareSecurity::Tls {
+        server_name: query.get("sni").cloned(),
+        insecure: query_flag(query, "insecure"),
+        alpn: Vec::new(),
+    };
+    let obfs_salamander_password = query
+        .get("obfs")
+        .is_some_and(|v| v.eq_ignore_ascii_case("salamander"))
+        .then(|| query.get("obfs-password").cloned())
+        .flatten()
+        .filter(|s| !s.is_empty());
+
+    ParsedShareUri {
+        protocol: ShareProtocol::Hysteria,
+        user_id,
+        host,
+        port,
+        port_hop,
+        remark,
+        flow: None,
+        encryption: None,
+        security,
+        transport: ShareTransport::Tcp,
+        obfs_salamander_password,
+        pin_sha256: query.get("pinSHA256").cloned().filter(|s| !s.is_empty()),
+    }
+}
+
+fn query_flag(query: &HashMap<String, String>, key: &str) -> bool {
+    query.get(key).is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+}
+
+fn split_alpn(value: Option<&String>) -> Vec<String> {
+    value
+        .map(|v| {
+            v.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,5 +1133,186 @@ mod tests {
         assert!(uri.contains("sni=sni.example"));
         assert!(!uri.contains("allowInsecure"));
         assert!(!uri.contains("alpn="));
+    }
+
+    // ─── Import: parse_share_uri ────────────────────────────────────────────
+
+    #[test]
+    fn pct_decode_round_trips_pct_encode() {
+        let original = "p@ss word/with?special#chars";
+        assert_eq!(pct_decode(&pct_encode(original)), original);
+    }
+
+    #[test]
+    fn pct_decode_passes_through_malformed_escape() {
+        assert_eq!(pct_decode("100%-off"), "100%-off");
+    }
+
+    #[test]
+    fn parses_vless_reality_round_trip() {
+        let uri = build_share_uri(&reality_tcp_vless()).expect("uri");
+        let parsed = parse_share_uri(&uri).expect("parse");
+        assert_eq!(parsed.protocol, ShareProtocol::Vless);
+        assert_eq!(parsed.user_id, "11111111-1111-1111-1111-111111111111");
+        assert_eq!(parsed.host, "203.0.113.10");
+        assert_eq!(parsed.port, Some(443));
+        assert_eq!(parsed.flow.as_deref(), Some("xtls-rprx-vision"));
+        assert_eq!(parsed.encryption.as_deref(), Some("none"));
+        assert_eq!(parsed.remark.as_deref(), Some("demo"));
+        assert_eq!(parsed.transport, ShareTransport::Tcp);
+        match parsed.security {
+            ShareSecurity::Reality {
+                public_key,
+                short_id,
+                server_name,
+                fingerprint,
+                spider_x,
+                ..
+            } => {
+                assert_eq!(public_key, "RGhjWSrEM-rYV-nrfeDNswssqctjn8GFalDEuEcII1c");
+                assert_eq!(short_id, "abcd");
+                assert_eq!(server_name, "www.example.com");
+                assert_eq!(fingerprint, "chrome");
+                assert_eq!(spider_x, "/");
+            }
+            other => panic!("expected Reality, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_vless_tls_ws_round_trip() {
+        let uri = build_share_uri(&ShareUriRequest {
+            protocol: ShareProtocol::Vless,
+            user_id: "u".to_owned(),
+            address: "h".to_owned(),
+            port: 443,
+            remark: None,
+            flow: None,
+            encryption: "none".to_owned(),
+            security: ShareSecurity::Tls {
+                server_name: Some("sni.example".to_owned()),
+                insecure: true,
+                alpn: vec!["h2".to_owned(), "http/1.1".to_owned()],
+            },
+            transport: ShareTransport::Ws {
+                path: "/ray?ed=2048".to_owned(),
+                host: Some("example.com".to_owned()),
+            },
+            port_hop: None,
+            obfs_salamander_password: None,
+            pin_sha256: None,
+        })
+        .expect("uri");
+        let parsed = parse_share_uri(&uri).expect("parse");
+        match parsed.security {
+            ShareSecurity::Tls {
+                server_name,
+                insecure,
+                alpn,
+            } => {
+                assert_eq!(server_name.as_deref(), Some("sni.example"));
+                assert!(insecure);
+                assert_eq!(alpn, vec!["h2".to_owned(), "http/1.1".to_owned()]);
+            }
+            other => panic!("expected Tls, got {other:?}"),
+        }
+        match parsed.transport {
+            ShareTransport::Ws { path, host } => {
+                assert_eq!(path, "/ray?ed=2048");
+                assert_eq!(host.as_deref(), Some("example.com"));
+            }
+            other => panic!("expected Ws, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_trojan_none_grpc() {
+        let parsed = parse_share_uri(
+            "trojan://p%40ss@example.com:8443?security=none&type=grpc&serviceName=svc#remark",
+        )
+        .expect("parse");
+        assert_eq!(parsed.protocol, ShareProtocol::Trojan);
+        assert_eq!(parsed.user_id, "p@ss");
+        assert_eq!(parsed.security, ShareSecurity::None);
+        assert_eq!(parsed.remark.as_deref(), Some("remark"));
+        match parsed.transport {
+            ShareTransport::Grpc { service_name } => assert_eq!(service_name, "svc"),
+            other => panic!("expected Grpc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hy2_with_obfs_and_pin_and_hop() {
+        let uri = "hy2://secret-auth@203.0.113.10:443,5000-6000?obfs=salamander&obfs-password=cat&sni=www.example.com&insecure=1&pinSHA256=deadbeef#hy";
+        let parsed = parse_share_uri(uri).expect("parse");
+        assert_eq!(parsed.protocol, ShareProtocol::Hysteria);
+        assert_eq!(parsed.user_id, "secret-auth");
+        assert_eq!(parsed.port, Some(443));
+        assert_eq!(parsed.port_hop.as_deref(), Some("443,5000-6000"));
+        assert_eq!(parsed.obfs_salamander_password.as_deref(), Some("cat"));
+        assert_eq!(parsed.pin_sha256.as_deref(), Some("deadbeef"));
+        assert_eq!(parsed.remark.as_deref(), Some("hy"));
+        match parsed.security {
+            ShareSecurity::Tls {
+                server_name,
+                insecure,
+                ..
+            } => {
+                assert_eq!(server_name.as_deref(), Some("www.example.com"));
+                assert!(insecure);
+            }
+            other => panic!("expected Tls, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_hysteria2_scheme_alias() {
+        let parsed = parse_share_uri("hysteria2://auth@host:443").expect("parse");
+        assert_eq!(parsed.protocol, ShareProtocol::Hysteria);
+    }
+
+    #[test]
+    fn parses_ipv6_host() {
+        let parsed = parse_share_uri("vless://u@[2001:db8::1]:443?security=none").expect("parse");
+        assert_eq!(parsed.host, "2001:db8::1");
+        assert_eq!(parsed.port, Some(443));
+    }
+
+    #[test]
+    fn rejects_unsupported_scheme() {
+        let error = parse_share_uri("ss://foo@host:443").unwrap_err();
+        assert!(error.detail().contains("Unsupported scheme"));
+    }
+
+    #[test]
+    fn rejects_missing_scheme_separator() {
+        let error = parse_share_uri("not a uri at all").unwrap_err();
+        assert!(error.detail().contains("scheme"));
+    }
+
+    #[test]
+    fn rejects_missing_userinfo() {
+        let error = parse_share_uri("vless://host:443?security=none").unwrap_err();
+        assert!(error.detail().contains('@'));
+    }
+
+    #[test]
+    fn rejects_empty_credential() {
+        let error = parse_share_uri("vless://@host:443").unwrap_err();
+        assert!(error.detail().contains("Empty credential"));
+    }
+
+    #[test]
+    fn defaults_to_none_security_and_tcp_transport_when_absent() {
+        let parsed = parse_share_uri("vless://u@host:443").expect("parse");
+        assert_eq!(parsed.security, ShareSecurity::None);
+        assert_eq!(parsed.transport, ShareTransport::Tcp);
+    }
+
+    #[test]
+    fn plain_scalar_port_has_no_hop() {
+        let parsed = parse_share_uri("hy2://auth@host:443").expect("parse");
+        assert_eq!(parsed.port, Some(443));
+        assert!(parsed.port_hop.is_none());
     }
 }

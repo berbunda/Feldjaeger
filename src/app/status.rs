@@ -129,6 +129,38 @@ pub enum CurrentOperation {
     SavingLogSettings,
     /// Validating Xray log settings before save.
     ValidatingLogSettings,
+    /// Validating / saving Xray top-level `api` settings (Roadmap §2.1:54).
+    SavingApiSettings,
+    /// Validating / saving Xray top-level `dns` settings (Roadmap §2.1:46).
+    SavingDnsSettings,
+    /// Validating / saving Xray top-level `fakedns` settings (Roadmap §2.1:47).
+    SavingFakeDnsSettings,
+    /// Validating / saving Xray top-level `routing` settings (Roadmap §2.1:48).
+    SavingRoutingSettings,
+    /// Validating / saving Xray top-level `policy` settings (Roadmap §2.1:49).
+    SavingPolicySettings,
+    /// Validating / saving Xray top-level `observatory` settings (Roadmap §2.1:50).
+    SavingObservatorySettings,
+    /// Validating / saving Xray top-level `burstObservatory` settings (Roadmap §2.1:51).
+    SavingBurstObservatorySettings,
+    /// Validating / saving Xray top-level `stats` settings (Roadmap §2.1:52).
+    SavingStatsSettings,
+    /// Validating / saving Xray top-level `metrics` settings (Roadmap §2.1:53).
+    SavingMetricsSettings,
+    /// Validating / saving Xray top-level `env` settings (Roadmap §2.1:55).
+    SavingEnvSettings,
+    /// Validating / saving Xray top-level `version` settings (Roadmap §2.1:56).
+    SavingVersionSettings,
+    /// Validating / saving Xray top-level `geodata` settings (Roadmap §2.1:57).
+    SavingGeodataSettings,
+    /// Restoring a config source file from a previously created backup (Roadmap §3:127).
+    RestoringBackup,
+    /// Running a live `xray api` gRPC operation (Roadmap §3:128) — affects only the running
+    /// Xray process, never the configuration file.
+    ManagingLiveApi {
+        /// Status Bar text for the in-flight call (e.g. "Adding live inbound(s)...").
+        text: String,
+    },
 }
 
 impl CurrentOperation {
@@ -171,6 +203,20 @@ impl CurrentOperation {
             Self::ManagingXrayLogs { text } => text.clone(),
             Self::SavingLogSettings => "Saving log settings...".to_owned(),
             Self::ValidatingLogSettings => "Validating log settings...".to_owned(),
+            Self::RestoringBackup => "Restoring backup...".to_owned(),
+            Self::ManagingLiveApi { text } => text.clone(),
+            Self::SavingApiSettings => "Saving API settings...".to_owned(),
+            Self::SavingDnsSettings => "Saving DNS settings...".to_owned(),
+            Self::SavingFakeDnsSettings => "Saving FakeDNS settings...".to_owned(),
+            Self::SavingRoutingSettings => "Saving routing settings...".to_owned(),
+            Self::SavingPolicySettings => "Saving policy settings...".to_owned(),
+            Self::SavingObservatorySettings => "Saving Observatory settings...".to_owned(),
+            Self::SavingBurstObservatorySettings => "Saving BurstObservatory settings...".to_owned(),
+            Self::SavingStatsSettings => "Saving stats settings...".to_owned(),
+            Self::SavingMetricsSettings => "Saving metrics settings...".to_owned(),
+            Self::SavingEnvSettings => "Saving env settings...".to_owned(),
+            Self::SavingVersionSettings => "Saving version settings...".to_owned(),
+            Self::SavingGeodataSettings => "Saving geodata settings...".to_owned(),
         }
     }
 
@@ -207,7 +253,21 @@ impl CurrentOperation {
             | Self::ManagingWarp { .. }
             | Self::ManagingXrayLogs { .. }
             | Self::SavingLogSettings
-            | Self::ValidatingLogSettings => OperationProgress::Indeterminate,
+            | Self::ValidatingLogSettings
+            | Self::RestoringBackup
+            | Self::ManagingLiveApi { .. }
+            | Self::SavingApiSettings
+            | Self::SavingDnsSettings
+            | Self::SavingFakeDnsSettings
+            | Self::SavingRoutingSettings
+            | Self::SavingPolicySettings
+            | Self::SavingObservatorySettings
+            | Self::SavingBurstObservatorySettings
+            | Self::SavingStatsSettings
+            | Self::SavingMetricsSettings
+            | Self::SavingEnvSettings
+            | Self::SavingVersionSettings
+            | Self::SavingGeodataSettings => OperationProgress::Indeterminate,
             Self::UploadingConfig { progress }
             | Self::RestartingXray { progress }
             | Self::CreatingBackup { progress } => *progress,

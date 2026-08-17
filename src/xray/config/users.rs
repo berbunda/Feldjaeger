@@ -29,6 +29,10 @@ pub struct VlessClientSummary {
     pub email: Option<String>,
     /// Optional XTLS `flow` (for example `xtls-rprx-vision`).
     pub flow: Option<String>,
+    /// `reverse.tag`, when this client registers a VLESS-native reverse proxy portal (Roadmap
+    /// §2.1:58). Shallow — sniffing sub-fields are not surfaced in the summary, same
+    /// full-editor-vs-summary split already used elsewhere (e.g. `ObservatorySummary`).
+    pub reverse_tag: Option<String>,
 }
 
 /// Read-only summary of one Trojan inbound client.
@@ -167,6 +171,14 @@ pub fn extract_inbound_clients(sections: &XrayConfigSections) -> Vec<InboundClie
         for (client_index, client) in client_objects(inbound.value()).into_iter().enumerate() {
             match protocol {
                 InboundClientProtocol::Vless => {
+                    let reverse_tag = client
+                        .get("reverse")
+                        .and_then(Value::as_object)
+                        .and_then(|r| r.get("tag"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned);
                     clients.push(InboundClientSummary::Vless(VlessClientSummary {
                         inbound_index,
                         inbound_tag: inbound_tag.clone(),
@@ -175,6 +187,7 @@ pub fn extract_inbound_clients(sections: &XrayConfigSections) -> Vec<InboundClie
                         id: string_field(client, "id"),
                         email: string_field(client, "email"),
                         flow: string_field(client, "flow"),
+                        reverse_tag,
                     }));
                 }
                 InboundClientProtocol::Trojan => {

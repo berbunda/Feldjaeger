@@ -6,6 +6,8 @@ use crate::app::{
     CurrentOperation, OperationProgress, SshStatus, StatusSeverity, StatusSnapshot, XrayStatus,
 };
 
+use super::about;
+
 /// Fixed height of the Status Bar in logical points.
 pub const STATUS_BAR_HEIGHT: f32 = 28.0;
 
@@ -17,6 +19,8 @@ pub fn show(ui: &mut Ui, status: &StatusSnapshot) {
     ui.horizontal_centered(|ui| {
         ui.set_min_height(STATUS_BAR_HEIGHT);
 
+        about::trigger(ui);
+        ui.separator();
         show_current_operation(ui, &status.operation);
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

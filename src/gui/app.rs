@@ -3,6 +3,7 @@
 use crate::app::ApplicationService;
 use crate::storage::{WindowPosition, WindowSize};
 
+use super::about;
 use super::navigation::Page;
 use super::sidebar;
 use super::status_bar;
@@ -76,6 +77,8 @@ impl eframe::App for FeldjaegerApp {
                 status_bar::show(ui, &self.service.status_snapshot());
             });
 
+        about::show(ui);
+
         let sidebar_width = self.service.ui_config().sidebar_width;
         let previous_page = self.page;
         let sidebar_response = egui::Panel::left("sidebar")
@@ -123,6 +126,18 @@ pub fn run() -> eframe::Result {
     eframe::run_native(
         "Feldjäger",
         options,
-        Box::new(move |_cc| Ok(Box::new(FeldjaegerApp::new(service)))),
+        Box::new(move |cc| {
+            // The default egui Proportional font family (Ubuntu-Light + emoji fallbacks)
+            // has no glyphs for geometric shapes like ▲/▼/▾, which the UI uses for sort
+            // and dropdown indicators. "Hack" (bundled but only wired to Monospace by
+            // default) does have them, so append it as a fallback for Proportional text.
+            let mut fonts = egui::FontDefinitions::default();
+            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                family.push("Hack".to_owned());
+            }
+            cc.egui_ctx.set_fonts(fonts);
+
+            Ok(Box::new(FeldjaegerApp::new(service)))
+        }),
     )
 }

@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 use crate::xray::config::inbound_clients::{
     HysteriaClient, InboundClient, InboundClientProtocol, TrojanClient, VlessClient,
 };
+use crate::xray::config::reverse_proxy::parse_reverse;
 use crate::xray::config::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 use crate::xray::secret::SecretString;
 
@@ -36,12 +37,14 @@ fn parse_vless(object: &Map<String, Value>) -> ConfigModifyResult<VlessClient> {
     let email = optional_string(object, "email");
     let flow = optional_string(object, "flow");
     let level = optional_level(object)?;
+    let reverse = parse_reverse(object.get("reverse"));
     let extras = extras_map(object, VlessClient::KNOWN_KEYS);
     Ok(VlessClient {
         id,
         email,
         flow,
         level,
+        reverse,
         extras,
     })
 }

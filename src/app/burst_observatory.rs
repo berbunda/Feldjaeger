@@ -4,7 +4,10 @@
 
 use crate::app::inbounds::{LoadedConfigSnapshot, display_optional_str, display_source_file};
 use crate::app::status::SshStatus;
-use crate::xray::{BurstObservatorySummary, BurstPingConfigSummary, DiscoveryState};
+use crate::xray::{
+    BurstObservatorySettings, BurstObservatorySummary, BurstPingConfigSummary, DiscoveryState,
+    burst_observatory_settings_change_summary,
+};
 
 /// High-level state shown by the Burst Observatory page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +28,18 @@ pub enum BurstObservatoryPageState {
     ConfigurationLoaded,
     /// Supported configuration loaded with non-fatal warnings.
     ConfigurationContainsWarnings,
+    /// In-memory draft is being edited (Roadmap §2.1:51).
+    EditMode,
+    /// Draft failed local validation.
+    ValidationError,
+    /// Remote save is in progress.
+    Saving,
+    /// Last save succeeded (transient before returning to view).
+    Saved,
+    /// Last save failed (classified error shown separately).
+    SaveFailed,
+    /// Top-level `burstObservatory` value is not a JSON object.
+    MalformedBurstObservatoryObject,
 }
 
 impl BurstObservatoryPageState {
@@ -47,6 +62,18 @@ impl BurstObservatoryPageState {
             Self::ConfigurationContainsWarnings => {
                 "Configuration loaded with warnings. Review the details below."
             }
+            Self::EditMode => {
+                "Editing BurstObservatory settings. Changes are not saved until you click Save."
+            }
+            Self::ValidationError => {
+                "BurstObservatory settings validation failed. Fix the highlighted fields."
+            }
+            Self::Saving => "Saving BurstObservatory settings...",
+            Self::Saved => "BurstObservatory settings updated.",
+            Self::SaveFailed => "Failed to save BurstObservatory settings.",
+            Self::MalformedBurstObservatoryObject => {
+                "Malformed burstObservatory object in the remote configuration."
+            }
         }
     }
 
@@ -62,7 +89,9 @@ impl BurstObservatoryPageState {
     }
 }
 
-/// Read-only model consumed by the Burst Observatory GUI.
+/// View **and** edit model consumed by the Burst Observatory GUI (Roadmap §2.1:51). Browsing
+/// uses [`BurstObservatorySummary`] as before; editing uses the typed [`BurstObservatorySettings`]
+/// — the same coexistence pattern already used by Routing/Policy/Observatory (§52/§53/§54).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BurstObservatoryPageModel {
     /// Coarse lifecycle/content state.
@@ -71,6 +100,14 @@ pub struct BurstObservatoryPageModel {
     pub summary: Option<BurstObservatorySummary>,
     /// Global and local non-fatal warnings.
     pub warnings: Vec<String>,
+    /// Settings currently displayed by the edit form (loaded or draft).
+    pub burst_observatory_settings: BurstObservatorySettings,
+    /// Whether the UI is in edit mode with an in-memory draft.
+    pub editing: bool,
+    /// Change summary lines when editing (loaded → draft).
+    pub change_summary: Vec<String>,
+    /// Last classified save/validation error for the page.
+    pub error_message: Option<String>,
 }
 
 /// Derives the page state from connection, discovery, and configuration.
@@ -114,22 +151,74 @@ pub fn derive_burst_observatory_page_state(
     }
 }
 
-/// Builds a Burst Observatory page model.
+/// Builds the Burst Observatory page model (browsing + edit, Roadmap §2.1:51).
+///
+/// `draft`/`saving`/`error_message`/`saved_flash` mirror [`super::dns::build_dns_page_model`]'s
+/// parameters exactly; when `draft` is `None` the page behaves exactly as the read-only version
+/// did — same precedence order as Routing/Policy/Observatory (§52/§53/§54): Saving > Saved >
+/// (error while editing = ValidationError) > (error while not editing = SaveFailed) > Malformed >
+/// EditMode > the browsing state already computed by [`derive_burst_observatory_page_state`].
 pub fn build_burst_observatory_page_model(
     ssh: SshStatus,
     discovery: &DiscoveryState,
     config: &LoadedConfigSnapshot,
+    draft: Option<&BurstObservatorySettings>,
+    saving: bool,
+    error_message: Option<String>,
+    saved_flash: bool,
 ) -> BurstObservatoryPageModel {
+    let mut state = derive_burst_observatory_page_state(ssh, discovery, config);
     let summary = config.burst_observatory().cloned();
     let mut warnings = Vec::new();
     if let Some(summary) = summary.as_ref() {
         warnings.extend(config.warnings().iter().cloned());
         warnings.extend(summary.warnings.iter().cloned());
     }
+
+    let mut burst_observatory_settings = BurstObservatorySettings::defaults();
+    let mut editing = false;
+    let mut change_summary = Vec::new();
+
+    if let Some(editable) = config.editable() {
+        let loaded = editable.burst_observatory_settings();
+        let malformed = loaded
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("Malformed burstObservatory object"));
+
+        editing = draft.is_some();
+        burst_observatory_settings = draft.cloned().unwrap_or_else(|| loaded.clone());
+        change_summary = if let Some(draft) = draft {
+            burst_observatory_settings_change_summary(&loaded, draft)
+        } else {
+            Vec::new()
+        };
+
+        state = if saving {
+            BurstObservatoryPageState::Saving
+        } else if saved_flash {
+            BurstObservatoryPageState::Saved
+        } else if error_message.is_some() && editing {
+            BurstObservatoryPageState::ValidationError
+        } else if error_message.is_some() {
+            BurstObservatoryPageState::SaveFailed
+        } else if malformed {
+            BurstObservatoryPageState::MalformedBurstObservatoryObject
+        } else if editing {
+            BurstObservatoryPageState::EditMode
+        } else {
+            state
+        };
+    }
+
     BurstObservatoryPageModel {
-        state: derive_burst_observatory_page_state(ssh, discovery, config),
+        state,
         summary,
         warnings,
+        burst_observatory_settings,
+        editing,
+        change_summary,
+        error_message,
     }
 }
 
@@ -317,6 +406,10 @@ mod tests {
             SshStatus::Connected,
             &succeeded(),
             &loaded(Some(warned)),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(
             model.state,

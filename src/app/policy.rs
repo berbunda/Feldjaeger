@@ -5,8 +5,8 @@
 use crate::app::inbounds::{LoadedConfigSnapshot, MISSING_FIELD, display_source_file};
 use crate::app::status::SshStatus;
 use crate::xray::{
-    DiscoveryState, PolicySummary, SystemPolicySummary, UserPolicySummary, cmp_policy_level,
-    stats_wiring_warnings,
+    DiscoveryState, PolicySettings, PolicySummary, SystemPolicySummary, UserPolicySummary,
+    cmp_policy_level, policy_settings_change_summary, stats_wiring_warnings,
 };
 
 /// Columns that support sorting on the Policy levels table.
@@ -53,6 +53,18 @@ pub enum PolicyPageState {
     ConfigurationLoaded,
     /// Configuration loaded with non-fatal warnings.
     ConfigurationContainsWarnings,
+    /// In-memory draft is being edited (Roadmap §2.1:49).
+    EditMode,
+    /// Draft failed local validation.
+    ValidationError,
+    /// Remote save is in progress.
+    Saving,
+    /// Last save succeeded (transient before returning to view).
+    Saved,
+    /// Last save failed (classified error shown separately).
+    SaveFailed,
+    /// Top-level `policy` value is not a JSON object.
+    MalformedPolicyObject,
 }
 
 impl PolicyPageState {
@@ -74,6 +86,14 @@ impl PolicyPageState {
             Self::ConfigurationContainsWarnings => {
                 "Configuration loaded with warnings. Review the details below."
             }
+            Self::EditMode => {
+                "Editing policy settings. Changes are not saved until you click Save."
+            }
+            Self::ValidationError => "Policy settings validation failed. Fix the highlighted fields.",
+            Self::Saving => "Saving policy settings...",
+            Self::Saved => "Policy settings updated.",
+            Self::SaveFailed => "Failed to save policy settings.",
+            Self::MalformedPolicyObject => "Malformed policy object in the remote configuration.",
         }
     }
 
@@ -94,7 +114,9 @@ impl PolicyPageState {
     }
 }
 
-/// Read-only model exposed to the Policy page.
+/// View **and** edit model exposed to the Policy page (Roadmap §2.1:49). Browsing (table,
+/// selection, sort) uses [`PolicySummary`]/[`UserPolicySummary`] as before; editing uses the
+/// typed [`PolicySettings`] — the same coexistence pattern already used by Routing (§52).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyPageModel {
     /// Coarse page state.
@@ -112,6 +134,14 @@ pub struct PolicyPageModel {
     pub wiring_warnings: Vec<String>,
     /// Active sort settings.
     pub sort: PolicySort,
+    /// Settings currently displayed by the edit form (loaded or draft).
+    pub policy_settings: PolicySettings,
+    /// Whether the UI is in edit mode with an in-memory draft.
+    pub editing: bool,
+    /// Change summary lines when editing (loaded → draft).
+    pub change_summary: Vec<String>,
+    /// Last classified save/validation error for the page.
+    pub error_message: Option<String>,
 }
 
 /// Derives the Policy page state from connection, discovery, and config state.
@@ -150,14 +180,24 @@ pub fn derive_policy_page_state(
     }
 }
 
-/// Builds the read-only Policy page model.
+/// Builds the Policy page model (browsing + edit, Roadmap §2.1:49).
+///
+/// `draft`/`saving`/`error_message`/`saved_flash` mirror [`super::dns::build_dns_page_model`]'s
+/// parameters exactly; when `draft` is `None` the page behaves exactly as the read-only version
+/// did — same precedence order as Routing (§52): Saving > Saved > (error while editing =
+/// ValidationError) > (error while not editing = SaveFailed) > Malformed > EditMode > the
+/// browsing state already computed by [`derive_policy_page_state`].
 pub fn build_policy_page_model(
     ssh: SshStatus,
     discovery: &DiscoveryState,
     config: &LoadedConfigSnapshot,
     sort: PolicySort,
+    draft: Option<&PolicySettings>,
+    saving: bool,
+    error_message: Option<String>,
+    saved_flash: bool,
 ) -> PolicyPageModel {
-    let state = derive_policy_page_state(ssh, discovery, config);
+    let mut state = derive_policy_page_state(ssh, discovery, config);
     let summary = config.policy().cloned();
     let mut rows = summary
         .as_ref()
@@ -168,6 +208,43 @@ pub fn build_policy_page_model(
         .editable()
         .map(|editable| stats_wiring_warnings(editable.sections()))
         .unwrap_or_default();
+
+    let mut policy_settings = PolicySettings::defaults();
+    let mut editing = false;
+    let mut change_summary = Vec::new();
+
+    if let Some(editable) = config.editable() {
+        let loaded = editable.policy_settings();
+        let malformed = loaded
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("Malformed policy object"));
+
+        editing = draft.is_some();
+        policy_settings = draft.cloned().unwrap_or_else(|| loaded.clone());
+        change_summary = if let Some(draft) = draft {
+            policy_settings_change_summary(&loaded, draft)
+        } else {
+            Vec::new()
+        };
+
+        state = if saving {
+            PolicyPageState::Saving
+        } else if saved_flash {
+            PolicyPageState::Saved
+        } else if error_message.is_some() && editing {
+            PolicyPageState::ValidationError
+        } else if error_message.is_some() {
+            PolicyPageState::SaveFailed
+        } else if malformed {
+            PolicyPageState::MalformedPolicyObject
+        } else if editing {
+            PolicyPageState::EditMode
+        } else {
+            state
+        };
+    }
+
     PolicyPageModel {
         state,
         summary,
@@ -175,6 +252,10 @@ pub fn build_policy_page_model(
         warnings: config.warnings().to_vec(),
         wiring_warnings,
         sort,
+        policy_settings,
+        editing,
+        change_summary,
+        error_message,
     }
 }
 
@@ -397,6 +478,10 @@ mod tests {
             &succeeded(),
             &loaded(None, Vec::new()),
             PolicySort::by_level(),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, PolicyPageState::PolicySectionMissing);
         assert_eq!(model.state.message(), "Policy section is not configured.");
@@ -414,6 +499,10 @@ mod tests {
             &succeeded(),
             &loaded(Some(summary), Vec::new()),
             PolicySort::by_level(),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, PolicyPageState::NoUserPolicies);
     }
@@ -497,6 +586,10 @@ mod tests {
             &succeeded(),
             &loaded(Some(summary), Vec::new()),
             PolicySort::by_level(),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, PolicyPageState::NoUserPolicies);
         assert!(model.state.shows_policy());
@@ -563,6 +656,10 @@ mod tests {
             &succeeded(),
             &LoadedConfigSnapshot::NotLoaded,
             PolicySort::by_level(),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, PolicyPageState::ConfigurationNotLoaded);
     }
@@ -598,6 +695,10 @@ mod tests {
             &succeeded(),
             &loaded(Some(summary), vec!["dns warning".to_owned()]),
             PolicySort::by_level(),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, PolicyPageState::ConfigurationContainsWarnings);
         assert!(model.state.shows_table());
@@ -615,6 +716,10 @@ mod tests {
             &succeeded(),
             &loaded(Some(summary), Vec::new()),
             PolicySort::by_level(),
+            None,
+            false,
+            None,
+            false,
         );
         assert!(model.wiring_warnings.is_empty());
     }
@@ -627,6 +732,10 @@ mod tests {
             &succeeded(),
             &loaded_with_editable(editable),
             PolicySort::by_level(),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.wiring_warnings.len(), 1);
         assert!(model.wiring_warnings[0].contains("stats"));
@@ -641,6 +750,10 @@ mod tests {
             &succeeded(),
             &loaded_with_editable(editable),
             PolicySort::by_level(),
+            None,
+            false,
+            None,
+            false,
         );
         assert!(model.wiring_warnings.is_empty());
     }

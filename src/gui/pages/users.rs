@@ -61,6 +61,8 @@ fn flow_combo(ui: &mut Ui, id_salt: &str, flow: &mut VlessFlowChoice) {
         });
 }
 
+use super::{ReverseDraftFields, reverse_fields_edit};
+
 /// Protocol-specific dialog draft (Approach B / eng 5A — no Option-soup UI state).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 enum ClientDialogDraft {
@@ -72,6 +74,9 @@ enum ClientDialogDraft {
         uuid: String,
         flow: VlessFlowChoice,
         level: u32,
+        /// VLESS-native reverse proxy portal registration (Roadmap §2.1:58); checkbox-driven
+        /// presence — see [`ReverseDraftFields`].
+        reverse: ReverseDraftFields,
         error: Option<String>,
         /// Redacted JSON diff from the last "Preview changes" click (Roadmap §3:120).
         diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
@@ -85,6 +90,9 @@ enum ClientDialogDraft {
         /// Set when config had a flow value outside the allowed list.
         unsupported_flow_hint: Option<String>,
         level: u32,
+        /// VLESS-native reverse proxy portal registration (Roadmap §2.1:58); checkbox-driven
+        /// presence — see [`ReverseDraftFields`].
+        reverse: ReverseDraftFields,
         expected_fingerprint: String,
         error: Option<String>,
         /// Redacted JSON diff from the last "Preview changes" click (Roadmap §3:120).
@@ -699,7 +707,7 @@ fn show_table(ui: &mut Ui, service: &mut ApplicationService, rows: &[UserSummary
     let selected_key = selected_row_key(ui);
 
     egui::Grid::new("users_table")
-        .num_columns(5)
+        .num_columns(6)
         .striped(true)
         .spacing([16.0, 6.0])
         .min_col_width(80.0)
@@ -707,6 +715,9 @@ fn show_table(ui: &mut Ui, service: &mut ApplicationService, rows: &[UserSummary
             sortable_header(ui, service, "Email", UsersSortColumn::Email, sort.column);
             sortable_header(ui, service, "UUID / ID", UsersSortColumn::Uuid, sort.column);
             ui.strong("Flow");
+            ui.strong("Reverse tag").on_hover_text(
+                "VLESS-native reverse proxy portal registration (Roadmap §2.1:58); — = ordinary client",
+            );
             ui.strong("Inbound tag");
             ui.strong("Source file");
             ui.end_row();
@@ -724,6 +735,7 @@ fn show_table(ui: &mut Ui, service: &mut ApplicationService, rows: &[UserSummary
                 }
                 cell_with_menu(ui, service, row, &display.id, busy);
                 cell_with_menu(ui, service, row, &display.flow, busy);
+                cell_with_menu(ui, service, row, &display.reverse_tag, busy);
                 cell_with_menu(ui, service, row, &display.inbound_tag, busy);
                 cell_with_menu(ui, service, row, display.source_file, busy);
                 ui.end_row();
@@ -1550,6 +1562,36 @@ fn open_add_dialog(ui: &Ui, inbound_index: usize) {
             uuid: generate_client_uuid(),
             flow: VlessFlowChoice::None,
             level: 0,
+            reverse: ReverseDraftFields::default(),
+            error: None,
+            diff_preview: None,
+        };
+    });
+}
+
+/// Opens Add VLESS pre-filled from an imported share URI (Roadmap §3:133) — same dialog as
+/// [`open_add_dialog`], just with parsed values instead of a fresh UUID/blank fields. `flow_wire`
+/// is the raw `flow=` query value; unrecognized/absent values fall back to `None`, same as the
+/// Edit dialog's "unsupported flow" handling.
+pub(crate) fn open_add_dialog_prefilled(
+    ui: &Ui,
+    inbound_index: usize,
+    email: String,
+    uuid: String,
+    flow_wire: Option<&str>,
+) {
+    let flow = match flow_wire {
+        Some("xtls-rprx-vision") => VlessFlowChoice::XtlsRprxVision,
+        _ => VlessFlowChoice::None,
+    };
+    with_dialog_draft(ui, |draft| {
+        *draft = ClientDialogDraft::AddVless {
+            inbound_index,
+            email,
+            uuid,
+            flow,
+            level: 0,
+            reverse: ReverseDraftFields::default(),
             error: None,
             diff_preview: None,
         };
@@ -1561,6 +1603,12 @@ fn open_edit_dialog(ui: &Ui, service: &ApplicationService, row: &UserSummary) {
         None => (VlessFlowChoice::None, None),
         Some("xtls-rprx-vision") => (VlessFlowChoice::XtlsRprxVision, None),
         Some(other) => (VlessFlowChoice::None, Some(other.to_owned())),
+    };
+    let reverse = ReverseDraftFields {
+        enabled: row.reverse_tag.is_some(),
+        tag: row.reverse_tag.clone().unwrap_or_default(),
+        sniffing_enabled: false,
+        sniffing_dest_override: Vec::new(),
     };
     let fingerprint = match service.client_fingerprint(row.inbound_index, row.client_index) {
         Ok(value) => value,
@@ -1574,6 +1622,7 @@ fn open_edit_dialog(ui: &Ui, service: &ApplicationService, row: &UserSummary) {
                     flow,
                     unsupported_flow_hint: unsupported_flow_hint.clone(),
                     level: 0,
+                    reverse: reverse.clone(),
                     expected_fingerprint: String::new(),
                     error: Some(message),
                     diff_preview: None,
@@ -1591,6 +1640,7 @@ fn open_edit_dialog(ui: &Ui, service: &ApplicationService, row: &UserSummary) {
             flow,
             unsupported_flow_hint,
             level: 0,
+            reverse,
             expected_fingerprint: fingerprint,
             error: None,
             diff_preview: None,
@@ -1643,6 +1693,20 @@ fn open_add_trojan_dialog(ui: &Ui, inbound_index: usize) {
             inbound_index,
             email: String::new(),
             password: String::new(),
+            level: 0,
+            error: None,
+            diff_preview: None,
+        };
+    });
+}
+
+/// Opens Add Trojan pre-filled from an imported share URI (Roadmap §3:133).
+pub(crate) fn open_add_trojan_dialog_prefilled(ui: &Ui, inbound_index: usize, email: String, password: String) {
+    with_dialog_draft(ui, |draft| {
+        *draft = ClientDialogDraft::AddTrojan {
+            inbound_index,
+            email,
+            password,
             level: 0,
             error: None,
             diff_preview: None,
@@ -1710,6 +1774,20 @@ fn open_delete_trojan_dialog(
             email_label: row.email.clone().unwrap_or_else(|| MISSING_FIELD.to_owned()),
             expected_fingerprint: fingerprint,
             error: None,
+        };
+    });
+}
+
+/// Opens Add Hysteria pre-filled from an imported share URI (Roadmap §3:133).
+pub(crate) fn open_add_hysteria_dialog_prefilled(ui: &Ui, inbound_index: usize, email: String, auth: String) {
+    with_dialog_draft(ui, |draft| {
+        *draft = ClientDialogDraft::AddHysteria {
+            inbound_index,
+            email,
+            auth,
+            level: 0,
+            error: None,
+            diff_preview: None,
         };
     });
 }
@@ -1885,13 +1963,14 @@ fn show_add_dialog(ui: &mut Ui, service: &mut ApplicationService) {
         .default_width(420.0)
         .open(&mut open)
         .show(ui.ctx(), |ui| {
-            let (mut email, mut uuid, mut flow, mut level_text, error, diff_preview) =
+            let (mut email, mut uuid, mut flow, mut level_text, mut reverse, error, diff_preview) =
                 with_dialog_draft(ui, |draft| {
                     let ClientDialogDraft::AddVless {
                         email,
                         uuid,
                         flow,
                         level,
+                        reverse,
                         error,
                         diff_preview,
                         ..
@@ -1902,6 +1981,7 @@ fn show_add_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                             String::new(),
                             VlessFlowChoice::None,
                             "0".to_owned(),
+                            ReverseDraftFields::default(),
                             None,
                             None,
                         );
@@ -1911,6 +1991,7 @@ fn show_add_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         uuid.clone(),
                         *flow,
                         level.to_string(),
+                        reverse.clone(),
                         error.clone(),
                         diff_preview.clone(),
                     )
@@ -1932,6 +2013,8 @@ fn show_add_dialog(ui: &mut Ui, service: &mut ApplicationService) {
             ui.add_space(6.0);
             ui.label("Level");
             ui.add(egui::TextEdit::singleline(&mut level_text).desired_width(80.0));
+            ui.add_space(6.0);
+            reverse_fields_edit(ui, "add_user_reverse_sniffing", &mut reverse);
 
             if let Some(error) = &error {
                 ui.add_space(8.0);
@@ -1960,6 +2043,7 @@ fn show_add_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                             id: Some(uuid.clone()),
                             flow: flow.to_request(),
                             level,
+                            reverse: reverse.to_reverse(),
                         };
                         match service.start_add_user(request) {
                             Ok(()) => close_dialog(ui),
@@ -1989,6 +2073,7 @@ fn show_add_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                             id: Some(uuid.clone()),
                             flow: flow.to_request(),
                             level,
+                            reverse: reverse.to_reverse(),
                         });
                         match service.preview_add_user_diff(request) {
                             Ok(entries) => with_dialog_draft(ui, |draft| {
@@ -2016,6 +2101,7 @@ fn show_add_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                     uuid: u,
                     flow: f,
                     level,
+                    reverse: r,
                     ..
                 } = draft
                 {
@@ -2023,6 +2109,7 @@ fn show_add_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                     *u = uuid;
                     *f = flow;
                     *level = level_text.trim().parse::<u32>().unwrap_or(*level);
+                    *r = reverse;
                 }
             });
         });
@@ -2040,14 +2127,23 @@ fn show_edit_dialog(ui: &mut Ui, service: &mut ApplicationService) {
         .default_width(420.0)
         .open(&mut open)
         .show(ui.ctx(), |ui| {
-            let (mut email, uuid, mut flow, mut level_text, unsupported_hint, error, diff_preview) =
-                with_dialog_draft(ui, |draft| {
+            let (
+                mut email,
+                uuid,
+                mut flow,
+                mut level_text,
+                mut reverse,
+                unsupported_hint,
+                error,
+                diff_preview,
+            ) = with_dialog_draft(ui, |draft| {
                     let ClientDialogDraft::EditVless {
                         email,
                         uuid,
                         flow,
                         unsupported_flow_hint,
                         level,
+                        reverse,
                         error,
                         diff_preview,
                         ..
@@ -2058,6 +2154,7 @@ fn show_edit_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                             String::new(),
                             VlessFlowChoice::None,
                             "0".to_owned(),
+                            ReverseDraftFields::default(),
                             None,
                             None,
                             None,
@@ -2068,6 +2165,7 @@ fn show_edit_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         uuid.clone(),
                         *flow,
                         level.to_string(),
+                        reverse.clone(),
                         unsupported_flow_hint.clone(),
                         error.clone(),
                         diff_preview.clone(),
@@ -2102,6 +2200,8 @@ fn show_edit_dialog(ui: &mut Ui, service: &mut ApplicationService) {
             ui.add_space(6.0);
             ui.label("Level");
             ui.add(egui::TextEdit::singleline(&mut level_text).desired_width(80.0));
+            ui.add_space(6.0);
+            reverse_fields_edit(ui, "edit_user_reverse_sniffing", &mut reverse);
 
             if let Some(error) = &error {
                 ui.add_space(8.0);
@@ -2143,6 +2243,7 @@ fn show_edit_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                             email: email.clone(),
                             flow: flow.to_request(),
                             level,
+                            reverse: reverse.to_reverse(),
                             expected_fingerprint: Some(fingerprint),
                         };
                         match service.start_update_user(request) {
@@ -2186,6 +2287,7 @@ fn show_edit_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                             email: email.clone(),
                             flow: flow.to_request(),
                             level,
+                            reverse: reverse.to_reverse(),
                             expected_fingerprint: Some(fingerprint),
                         });
                         match service.preview_update_user_diff(request) {
@@ -2213,12 +2315,14 @@ fn show_edit_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                     email: e,
                     flow: f,
                     level,
+                    reverse: r,
                     ..
                 } = draft
                 {
                     *e = email;
                     *f = flow;
                     *level = level_text.trim().parse::<u32>().unwrap_or(*level);
+                    *r = reverse;
                 }
             });
         });

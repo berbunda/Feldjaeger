@@ -17,6 +17,7 @@ use crate::xray::OutboundSummary;
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     service.tick_outbounds_page_status();
     show_delete_outbound_dialog(ui, service);
+    show_duplicate_outbound_dialog(ui, service);
     show_rename_outbound_dialog(ui, service);
     show_raw_json_outbound_dialog(ui, service);
 
@@ -73,6 +74,19 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
                 }
                 if ui.button("DNS").clicked() {
                     if let Err(e) = service.begin_add_outbound_dns() {
+                        service.show_status_message(e);
+                    }
+                    ui.close();
+                }
+                if ui
+                    .button("VLESS")
+                    .on_hover_text(
+                        "Bridge side of VLESS-native reverse proxy, or a plain forward outbound \
+                         — https://xtls.github.io/en/document/level-2/vless_reverse.html",
+                    )
+                    .clicked()
+                {
+                    if let Err(e) = service.begin_add_outbound_vless() {
                         service.show_status_message(e);
                     }
                     ui.close();
@@ -189,11 +203,15 @@ fn show_outbound_context_menu(
         let busy = service.is_outbound_mutation_busy();
         let edit_ok = matches!(
             row.kind(),
-            OutboundKind::Freedom | OutboundKind::Blackhole | OutboundKind::Dns
+            OutboundKind::Freedom | OutboundKind::Blackhole | OutboundKind::Dns | OutboundKind::Vless
         );
         if ui
             .add_enabled(edit_ok && !busy, egui::Button::new("Edit"))
-            .on_disabled_hover_text("Shell editing is available for Freedom, Blackhole, and DNS outbounds only")
+            .on_disabled_hover_text(
+                "Shell editing is available for Freedom, Blackhole, DNS, and VLESS (flat settings \
+                 form) outbounds only — a VLESS outbound using the legacy vnext[] array must be \
+                 edited via Raw JSON",
+            )
             .clicked()
         {
             if let Err(e) = service.begin_edit_outbound_shell(row.index) {
@@ -224,18 +242,24 @@ fn show_outbound_context_menu(
 
         let duplicate_ok = matches!(
             row.kind(),
-            OutboundKind::Freedom | OutboundKind::Blackhole | OutboundKind::Dns
+            OutboundKind::Freedom | OutboundKind::Blackhole | OutboundKind::Dns | OutboundKind::Vless
         );
         if ui
             .add_enabled(duplicate_ok && !busy, egui::Button::new("Duplicate"))
             .on_disabled_hover_text(
-                "Duplicate is available for Freedom, Blackhole, and DNS outbounds only",
+                "Duplicate is available for Freedom, Blackhole, DNS, and VLESS outbounds only",
             )
             .clicked()
         {
-            if let Err(error) = service.start_duplicate_outbound(row.index) {
-                service.show_status_message(error);
-            }
+            set_pending_outbound_duplicate(
+                ui,
+                PendingOutboundDuplicate {
+                    index: row.index,
+                    tag: row.tag.clone().unwrap_or_else(|| MISSING_FIELD.to_owned()),
+                    error: None,
+                    diff_preview: None,
+                },
+            );
             ui.close();
         }
 
@@ -253,6 +277,7 @@ fn show_outbound_context_menu(
                     draft: current_tag,
                     references: service.outbound_tag_reference_preview(row.index),
                     error: None,
+                    diff_preview: None,
                 },
             );
             ui.close();
@@ -273,6 +298,7 @@ fn show_outbound_context_menu(
                         text,
                         expected_fingerprint,
                         error: None,
+                        diff_preview: None,
                     },
                 );
             }
@@ -374,12 +400,110 @@ fn show_delete_outbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
 }
 
 #[derive(Clone)]
+struct PendingOutboundDuplicate {
+    index: usize,
+    tag: String,
+    error: Option<String>,
+    /// Last redacted structural diff preview (Roadmap §3:126); stale until re-clicked.
+    diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
+}
+
+fn pending_outbound_duplicate_id() -> egui::Id {
+    egui::Id::new("outbounds_pending_duplicate")
+}
+
+fn pending_outbound_duplicate(ui: &Ui) -> Option<PendingOutboundDuplicate> {
+    ui.ctx()
+        .data(|d| d.get_temp::<PendingOutboundDuplicate>(pending_outbound_duplicate_id()))
+}
+
+fn set_pending_outbound_duplicate(ui: &Ui, pending: PendingOutboundDuplicate) {
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(pending_outbound_duplicate_id(), pending));
+}
+
+fn clear_pending_outbound_duplicate(ui: &Ui) {
+    ui.ctx()
+        .data_mut(|d| d.remove::<PendingOutboundDuplicate>(pending_outbound_duplicate_id()));
+}
+
+fn show_duplicate_outbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
+    let Some(mut pending) = pending_outbound_duplicate(ui) else {
+        return;
+    };
+    let mut open = true;
+    let mut closed = false;
+    egui::Window::new("Duplicate outbound")
+        .collapsible(false)
+        .resizable(false)
+        .default_width(400.0)
+        .open(&mut open)
+        .show(ui.ctx(), |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "Duplicate outbound «{}»? A copy with a unique tag is added to the same source file.",
+                    pending.tag
+                ))
+                .size(14.0),
+            );
+            if let Some(error) = &pending.error {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(error.clone())
+                        .size(14.0)
+                        .color(Color32::from_rgb(200, 60, 60)),
+                );
+            }
+            if let Some(entries) = pending.diff_preview.clone() {
+                ui.add_space(8.0);
+                super::json_diff_preview(ui, &entries);
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                let busy = service.is_outbound_mutation_busy();
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Duplicate"))
+                    .clicked()
+                {
+                    match service.start_duplicate_outbound(pending.index) {
+                        Ok(()) => closed = true,
+                        Err(message) => pending.error = Some(message),
+                    }
+                }
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Preview changes"))
+                    .clicked()
+                {
+                    match service.preview_duplicate_outbound_diff(pending.index) {
+                        Ok(entries) => {
+                            pending.diff_preview = Some(entries);
+                            pending.error = None;
+                        }
+                        Err(message) => pending.error = Some(message),
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    closed = true;
+                }
+            });
+        });
+
+    if closed || !open {
+        clear_pending_outbound_duplicate(ui);
+    } else {
+        set_pending_outbound_duplicate(ui, pending);
+    }
+}
+
+#[derive(Clone)]
 struct PendingOutboundRename {
     index: usize,
     current_tag: String,
     draft: String,
     references: Vec<String>,
     error: Option<String>,
+    /// Last redacted structural diff preview (Roadmap §3:126); stale until re-clicked.
+    diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
 }
 
 fn pending_outbound_rename_id() -> egui::Id {
@@ -438,6 +562,10 @@ fn show_rename_outbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         .color(Color32::from_rgb(200, 60, 60)),
                 );
             }
+            if let Some(entries) = pending.diff_preview.clone() {
+                ui.add_space(8.0);
+                super::json_diff_preview(ui, &entries);
+            }
             ui.add_space(12.0);
             ui.horizontal(|ui| {
                 let busy = service.is_outbound_mutation_busy();
@@ -450,6 +578,20 @@ fn show_rename_outbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         .start_rename_outbound_tag(pending.index, pending.draft.trim().to_owned())
                     {
                         Ok(()) => closed = true,
+                        Err(message) => pending.error = Some(message),
+                    }
+                }
+                if ui
+                    .add_enabled(can_submit, egui::Button::new("Preview changes"))
+                    .clicked()
+                {
+                    match service
+                        .preview_rename_outbound_tag_diff(pending.index, pending.draft.trim())
+                    {
+                        Ok(entries) => {
+                            pending.diff_preview = Some(entries);
+                            pending.error = None;
+                        }
                         Err(message) => pending.error = Some(message),
                     }
                 }
@@ -477,6 +619,8 @@ struct RawJsonOutboundEditState {
     text: String,
     expected_fingerprint: String,
     error: Option<String>,
+    /// Last redacted structural diff preview (Roadmap §3:126); stale until re-clicked.
+    diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
 }
 
 fn raw_json_outbound_id() -> egui::Id {
@@ -531,6 +675,10 @@ fn show_raw_json_outbound_dialog(ui: &mut Ui, service: &mut ApplicationService) 
                 );
                 ui.add_space(4.0);
             }
+            if let Some(entries) = state.diff_preview.clone() {
+                super::json_diff_preview(ui, &entries);
+                ui.add_space(4.0);
+            }
             egui::ScrollArea::vertical()
                 .max_height(360.0)
                 .show(ui, |ui| {
@@ -554,6 +702,22 @@ fn show_raw_json_outbound_dialog(ui: &mut Ui, service: &mut ApplicationService) 
                         Err(message) => state.error = Some(message),
                     }
                 }
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Preview changes"))
+                    .clicked()
+                {
+                    match service.preview_replace_outbound_raw_json_diff(
+                        state.index,
+                        &state.text,
+                        state.expected_fingerprint.clone(),
+                    ) {
+                        Ok(entries) => {
+                            state.diff_preview = Some(entries);
+                            state.error = None;
+                        }
+                        Err(message) => state.error = Some(message),
+                    }
+                }
                 if ui.button("Cancel").clicked() {
                     closed = true;
                 }
@@ -574,6 +738,7 @@ fn outbound_protocol_label(settings: &OutboundSettingsDraft) -> &'static str {
         OutboundSettingsDraft::Freedom { .. } => "Freedom",
         OutboundSettingsDraft::Blackhole { .. } => "Blackhole",
         OutboundSettingsDraft::Dns { .. } => "DNS",
+        OutboundSettingsDraft::Vless(_) => "VLESS",
     }
 }
 
@@ -599,6 +764,7 @@ fn show_outbound_editor_pane(ui: &mut Ui, service: &mut ApplicationService) {
         Some(OutboundSettingsDraft::Freedom { .. }) => show_freedom_settings_edit(ui, service),
         Some(OutboundSettingsDraft::Blackhole { .. }) => show_blackhole_settings_edit(ui, service),
         Some(OutboundSettingsDraft::Dns { .. }) => show_dns_settings_edit(ui, service),
+        Some(OutboundSettingsDraft::Vless(_)) => show_vless_settings_edit(ui, service),
         None => {}
     }
     ui.add_space(8.0);
@@ -619,10 +785,29 @@ fn show_outbound_editor_pane(ui: &mut Ui, service: &mut ApplicationService) {
                 service.show_status_message(e);
             }
         }
+        if ui
+            .add_enabled(!busy, egui::Button::new("Preview changes"))
+            .clicked()
+        {
+            if let Err(e) = service.preview_outbound_shell_diff() {
+                service.show_status_message(e);
+            }
+        }
         if ui.button("Cancel").clicked() {
             service.cancel_outbound_editor_session();
         }
     });
+    show_outbound_diff_preview(ui, service);
+}
+
+fn show_outbound_diff_preview(ui: &mut Ui, service: &ApplicationService) {
+    let Some(entries) = service
+        .outbound_editor_session()
+        .and_then(|s| s.diff_preview.clone())
+    else {
+        return;
+    };
+    super::json_diff_preview(ui, &entries);
 }
 
 fn show_outbound_general_edit(ui: &mut Ui, service: &mut ApplicationService, is_add: bool) {
@@ -654,6 +839,39 @@ fn show_outbound_general_edit(ui: &mut Ui, service: &mut ApplicationService, is_
 
     general.tag = Some(tag);
     general.send_through = Some(send_through);
+
+    ui.add_space(6.0);
+    let mut chain_enabled = general.proxy_settings.is_some();
+    if ui
+        .checkbox(&mut chain_enabled, "proxySettings (chain through another outbound)")
+        .on_hover_text(
+            "Dials this outbound's connection through another outbound's dialer first — any \
+             protocol, not VLESS-specific",
+        )
+        .changed()
+    {
+        general.proxy_settings = if chain_enabled {
+            Some(crate::app::ProxySettingsDraft::default())
+        } else {
+            None
+        };
+    }
+    if let Some(proxy_settings) = &mut general.proxy_settings {
+        egui::Grid::new("outbound_proxy_settings_edit_grid")
+            .num_columns(2)
+            .spacing([16.0, 6.0])
+            .show(ui, |ui| {
+                ui.label("proxySettings.tag");
+                ui.text_edit_singleline(&mut proxy_settings.tag)
+                    .on_hover_text("Outbound tag to chain through");
+                ui.end_row();
+
+                ui.label("transportLayer");
+                ui.checkbox(&mut proxy_settings.transport_layer, "")
+                    .on_hover_text("Reuse only the transport connection from the target outbound");
+                ui.end_row();
+            });
+    }
 }
 
 fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
@@ -988,4 +1206,60 @@ fn show_dns_rules_edit(ui: &mut Ui, rules: &mut Vec<DnsRuleDraft>) {
             extras: Default::default(),
         });
     }
+}
+
+/// VLESS outbound Protocol tab — bridge side of VLESS-native reverse proxy, or a plain forward
+/// outbound (Roadmap §2.1:58). Flat `settings` form only (`address`/`port`/`id`/`encryption`/
+/// `flow`/`reverse`) — no transport/security tab here, deliberately narrower than the eventual
+/// full "Outbounds Shell: VLESS (+ stream/security matrix)" backlog item (Roadmap §4.2).
+fn show_vless_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
+    let Some(session) = service.outbound_editor_session_mut() else {
+        return;
+    };
+    let crate::app::OutboundSettingsDraft::Vless(settings) = &mut session.settings else {
+        return;
+    };
+    let mut reverse = super::ReverseDraftFields::from_reverse(settings.reverse.as_ref());
+
+    egui::Grid::new("vless_outbound_settings_edit_grid")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("address");
+            ui.text_edit_singleline(&mut settings.address)
+                .on_hover_text("Server this outbound dials (required)");
+            ui.end_row();
+
+            ui.label("port");
+            ui.text_edit_singleline(&mut settings.port)
+                .on_hover_text("1-65535 (required)");
+            ui.end_row();
+
+            ui.label("id");
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut settings.id).desired_width(300.0))
+                    .on_hover_text("UUID matching a clients[] entry on the far end (required)");
+                if ui.button("Generate").clicked() {
+                    settings.id = crate::app::generate_client_uuid();
+                }
+            });
+            ui.end_row();
+
+            ui.label("flow");
+            ui.text_edit_singleline(&mut settings.flow)
+                .on_hover_text("e.g. xtls-rprx-vision; empty = key absent");
+            ui.end_row();
+
+            ui.label("encryption");
+            ui.text_edit_singleline(&mut settings.encryption)
+                .on_hover_text(
+                    "VLESS post-quantum encryption string (matches the inbound's decryption); \
+                     empty = key absent",
+                );
+            ui.end_row();
+        });
+
+    ui.add_space(6.0);
+    super::reverse_fields_edit(ui, "vless_outbound_reverse_sniffing", &mut reverse);
+    settings.reverse = reverse.to_reverse();
 }

@@ -2,7 +2,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use feldjaeger_ssh::{RemotePath, SshSession};
+use feldjaeger_ssh::{RemoteCommand, RemotePath, SshSession};
 use tracing::{info, warn};
 
 use super::ConfigBackup;
@@ -144,6 +144,89 @@ impl BackupManager {
         Ok(())
     }
 
+    /// Lists previously created backups for `original_path`, newest first (Roadmap §3:127 —
+    /// Rollback UI). Read-only: a single remote `find` in the resolved backup directory,
+    /// matching this manager's own naming convention (`{file_name}.feldjaeger.bak.{timestamp}`).
+    /// Entries whose filename doesn't parse as `<size>\t<name>` with a numeric trailing
+    /// timestamp are silently skipped (defensive against a foreign file that happens to match
+    /// the glob, or a `find` implementation without GNU `-printf` support).
+    pub async fn list_backups<S: SshSession>(
+        &self,
+        session: &S,
+        original_path: &RemotePath,
+    ) -> AppResult<Vec<ConfigBackup>> {
+        let file_name = remote_file_name(original_path)?;
+        let dir = match &self.options.backup_dir {
+            Some(backup_dir) => backup_dir.as_str().to_owned(),
+            None => remote_parent_dir(original_path)?.to_owned(),
+        };
+        let prefix = format!("{file_name}{BACKUP_SUFFIX}.");
+        let pattern = format!("{prefix}*");
+
+        let command = RemoteCommand::new(
+            "find",
+            vec![
+                dir.clone(),
+                "-maxdepth".to_owned(),
+                "1".to_owned(),
+                "-type".to_owned(),
+                "f".to_owned(),
+                "-name".to_owned(),
+                pattern,
+                "-printf".to_owned(),
+                "%s\t%f\n".to_owned(),
+            ],
+        )
+        .map_err(app_error_from_ssh)?;
+
+        info!(
+            target: "remote",
+            host = %session.profile().host,
+            user = %session.profile().username,
+            dir = %dir,
+            original = %original_path.as_str(),
+            "listing remote config backups"
+        );
+
+        let result = session.exec(&command).await.map_err(app_error_from_ssh)?;
+        if result.exit_code != 0 {
+            let detail = String::from_utf8_lossy(&result.stderr);
+            return Err(AppError::new(format!(
+                "failed to list backups in {dir}: {}",
+                detail.trim()
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&result.stdout);
+        let mut backups = Vec::new();
+        for line in stdout.lines() {
+            let Some((size_str, name)) = line.split_once('\t') else {
+                continue;
+            };
+            let Ok(size_bytes) = size_str.parse::<usize>() else {
+                continue;
+            };
+            let Some(timestamp_str) = name.strip_prefix(&prefix) else {
+                continue;
+            };
+            let Ok(created_at_unix) = timestamp_str.parse::<u64>() else {
+                continue;
+            };
+            let Ok(backup_path) = join_remote_path(&dir, name) else {
+                continue;
+            };
+            backups.push(ConfigBackup::new(
+                original_path.clone(),
+                backup_path,
+                created_at_unix,
+                size_bytes,
+            ));
+        }
+        backups.sort_by_key(|backup| std::cmp::Reverse(backup.created_at_unix));
+
+        Ok(backups)
+    }
+
     /// Computes the backup path for an original file without performing I/O.
     pub fn resolve_backup_path(
         &self,
@@ -253,6 +336,7 @@ mod tests {
     struct MockSession {
         profile: ConnectionProfile,
         files: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+        exec_result: Arc<Mutex<Option<feldjaeger_ssh::ExecResult>>>,
     }
 
     impl MockSession {
@@ -260,7 +344,17 @@ mod tests {
             Self {
                 profile: ConnectionProfile::new("127.0.0.1", 22, "admin"),
                 files: Arc::new(Mutex::new(files)),
+                exec_result: Arc::new(Mutex::new(None)),
             }
+        }
+
+        fn with_exec_stdout(self, stdout: &str) -> Self {
+            *self.exec_result.lock().unwrap() = Some(feldjaeger_ssh::ExecResult {
+                stdout: stdout.as_bytes().to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            });
+            self
         }
     }
 
@@ -345,9 +439,10 @@ mod tests {
             _command: &feldjaeger_ssh::RemoteCommand,
         ) -> impl Future<Output = feldjaeger_ssh::SshResult<feldjaeger_ssh::ExecResult>> + Send
         {
-            future::ready(Err(feldjaeger_ssh::SshError::new(
-                "exec not supported in mock session",
-            )))
+            let result = self.exec_result.lock().unwrap().clone().ok_or_else(|| {
+                feldjaeger_ssh::SshError::new("exec not supported in mock session")
+            });
+            future::ready(result)
         }
 
     fn exec_with_stdin(
@@ -482,5 +577,46 @@ mod tests {
             .expect_err("size mismatch should fail");
 
         assert!(error.message().contains("backup size mismatch"));
+    }
+
+    #[tokio::test]
+    async fn list_backups_parses_and_sorts_newest_first() {
+        // Roadmap §3:127: Rollback UI needs a listing of previously created backups.
+        let original = path("/etc/xray/config.json");
+        let session = MockSession::new(HashMap::new()).with_exec_stdout(
+            "15\tconfig.json.feldjaeger.bak.1700000000\n\
+             20\tconfig.json.feldjaeger.bak.1700000100\n\
+             not-a-number\tconfig.json.feldjaeger.bak.bogus\n\
+             10\tunrelated.json.feldjaeger.bak.1700000050\n",
+        );
+        let manager = BackupManager::new();
+
+        let backups = manager
+            .list_backups(&session, &original)
+            .await
+            .expect("list should succeed");
+
+        // The "unrelated.json" line matches a different original file's naming and the
+        // "bogus" timestamp line is unparseable — both must be skipped, not just the target.
+        assert_eq!(backups.len(), 2);
+        assert_eq!(backups[0].created_at_unix, 1_700_000_100);
+        assert_eq!(backups[0].size_bytes, 20);
+        assert_eq!(
+            backups[0].backup_path.as_str(),
+            "/etc/xray/config.json.feldjaeger.bak.1700000100"
+        );
+        assert_eq!(backups[1].created_at_unix, 1_700_000_000);
+        assert_eq!(backups[0].original_path, original);
+    }
+
+    #[tokio::test]
+    async fn list_backups_empty_when_none_found() {
+        let session = MockSession::new(HashMap::new()).with_exec_stdout("");
+        let manager = BackupManager::new();
+        let backups = manager
+            .list_backups(&session, &path("/etc/xray/config.json"))
+            .await
+            .expect("list should succeed");
+        assert!(backups.is_empty());
     }
 }

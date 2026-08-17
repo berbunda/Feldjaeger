@@ -33,6 +33,8 @@ pub struct OutboundEditorSession {
     pub settings: OutboundSettingsDraft,
     /// `true` when this is an Add Outbound flow (not editing existing).
     pub is_add: bool,
+    /// Last redacted structural diff preview (Roadmap §3:126); cleared when drafts change.
+    pub diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
 }
 
 /// Kind of outbound mutation in flight.

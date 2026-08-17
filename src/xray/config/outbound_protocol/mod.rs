@@ -15,6 +15,9 @@ use serde_json::{Map, Value};
 
 use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 
+mod vless;
+pub use vless::VlessOutboundSettings;
+
 /// Documented `settings.noises[].type` values (free text also accepted).
 pub const FREEDOM_NOISE_TYPES: &[&str] = &["rand", "str", "hex", "base64"];
 
@@ -28,8 +31,17 @@ pub const DNS_RULE_ACTIONS: &[&str] = &["direct", "hijack", "drop", "return"];
 pub const DNS_REWRITE_NETWORKS: &[&str] = &["tcp", "udp"];
 
 /// Outbound protocols currently reachable through the Outbound Shell (Add/Edit).
+///
+/// VLESS is included here for the button-enabled check on the Outbounds table; whether a
+/// *specific* existing VLESS outbound is actually shell-editable additionally depends on its
+/// `settings` shape — [`parse_outbound_settings`] returns `None` (same "not supported" signal as
+/// any other unrecognized shape) for the legacy `vnext[]` form, see
+/// [`vless::is_legacy_vnext_form`].
 pub fn is_shell_editable_protocol(protocol: &str) -> bool {
-    matches!(protocol.trim().to_ascii_lowercase().as_str(), "freedom" | "blackhole" | "dns")
+    matches!(
+        protocol.trim().to_ascii_lowercase().as_str(),
+        "freedom" | "blackhole" | "dns" | "vless"
+    )
 }
 
 /// Freedom `settings.fragment` (packet fragmentation for DPI evasion).
@@ -115,6 +127,9 @@ pub enum OutboundSettingsDraft {
         /// `settings.rules[]`, evaluated in order (first match wins); empty = key absent.
         rules: Vec<DnsRuleDraft>,
     },
+    /// VLESS: bridge side of the VLESS-native reverse proxy, or a plain forward outbound
+    /// (Roadmap §2.1:58). Flat `settings` form only — see [`vless::is_legacy_vnext_form`].
+    Vless(VlessOutboundSettings),
 }
 
 impl OutboundSettingsDraft {
@@ -147,6 +162,11 @@ impl OutboundSettingsDraft {
             rules: Vec::new(),
         }
     }
+
+    /// Default for Add VLESS.
+    pub fn vless_default() -> Self {
+        Self::Vless(VlessOutboundSettings::default_draft())
+    }
 }
 
 /// Reads a Protocol draft from an outbound object, when the protocol is shell-editable.
@@ -160,6 +180,7 @@ pub fn parse_outbound_settings(outbound: &Value) -> Option<OutboundSettingsDraft
         "freedom" => Some(parse_freedom_settings(outbound)),
         "blackhole" => Some(parse_blackhole_settings(outbound)),
         "dns" => Some(parse_dns_settings(outbound)),
+        "vless" => vless::parse_vless_outbound_settings(outbound).map(OutboundSettingsDraft::Vless),
         _ => None,
     }
 }
@@ -321,6 +342,9 @@ pub fn apply_outbound_settings(
             user_level,
             rules,
         } => apply_dns_settings(outbound, rewrite_network, rewrite_address, rewrite_port, *user_level, rules),
+        OutboundSettingsDraft::Vless(settings) => {
+            vless::apply_vless_outbound_settings(outbound, settings)
+        }
     }
 }
 

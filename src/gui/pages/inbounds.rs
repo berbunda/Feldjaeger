@@ -6,7 +6,7 @@
 use egui::{Color32, ComboBox, RichText, Sense, Ui};
 
 use crate::app::{
-    ApplicationService, InboundClientProtocol, InboundEditorSession, InboundGeneral,
+    ApplicationService, ImportPreview, InboundClientProtocol, InboundEditorSession, InboundGeneral,
     InboundProtocolDraft, InboundShareMaterial, InboundsPageState, InboundsSortColumn,
     InboundSecurityMode, KNOWN_DEST_OVERRIDE, MISSING_FIELD,
     SniffingSettings, StreamMethod, allowed_security_modes,
@@ -19,7 +19,8 @@ use crate::xray::{
     ALPN_PRESETS, CERT_USAGE_PRESETS, CURVE_PRESETS, FINGERPRINT_PRESETS, FallbackDest,
     FallbackDestKind, FallbackObject, FinalMaskLayerDraft, InboundStreamDraft, InboundSummary,
     KCP_MTU_MAX, KCP_MTU_MIN, KCP_TTI_MAX,
-    KCP_TTI_MIN, KcpStreamSettings, SockoptDraft, TCP_FINALMASK_TYPES, TLS_VERSION_PRESETS,
+    KCP_TTI_MIN, KcpStreamSettings, ShareSecurity, ShareTransport, SockoptDraft,
+    TCP_FINALMASK_TYPES, TLS_VERSION_PRESETS,
     TPROXY_MODES, TUNNEL_NETWORKS, TcpFastOpenDraft,
     UDP_FINALMASK_TYPES, CertificateDraft,
     TlsSettingsDraft, XHTTP_DOWNLOAD_SECURITIES, XHTTP_MODES, XHTTP_MODE_DEFAULT, XHTTP_PADDING_METHODS,
@@ -503,6 +504,13 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
                 service.show_status_message(e);
             }
         }
+        if !adding
+            && ui
+                .add_enabled(!busy, egui::Button::new("Import from Share URI"))
+                .clicked()
+        {
+            set_pending_inbound_import(ui, PendingInboundImport::default());
+        }
     });
     ui.add_space(4.0);
 
@@ -520,6 +528,8 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     }
 
     show_delete_inbound_dialog(ui, service);
+    show_duplicate_inbound_dialog(ui, service);
+    show_import_dialog(ui, service);
     super::show_help_dialog(ui);
 }
 
@@ -4346,6 +4356,9 @@ struct RawJsonEditState {
     text: String,
     expected_fingerprint: String,
     error: Option<String>,
+    /// Last redacted structural diff preview (Roadmap §3:126); cleared only by re-clicking
+    /// Preview — same "stale until re-computed" semantics as Shell Save Preview (IB-L5).
+    diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
 }
 
 fn raw_json_edit_id() -> egui::Id {
@@ -4404,6 +4417,33 @@ fn show_inbound_raw_json_tab(ui: &mut Ui, service: &mut ApplicationService, row:
                 }
             }
             if ui
+                .add_enabled(!busy, egui::Button::new("Preview changes"))
+                .clicked()
+                && let Some(state) = raw_json_edit_state(ui)
+            {
+                match service.preview_replace_inbound_raw_json_diff(
+                    state.inbound_index,
+                    &state.text,
+                    state.expected_fingerprint.clone(),
+                ) {
+                    Ok(entries) => set_raw_json_edit_state(
+                        ui,
+                        RawJsonEditState {
+                            diff_preview: Some(entries),
+                            error: None,
+                            ..state
+                        },
+                    ),
+                    Err(message) => set_raw_json_edit_state(
+                        ui,
+                        RawJsonEditState {
+                            error: Some(message),
+                            ..state
+                        },
+                    ),
+                }
+            }
+            if ui
                 .add_enabled(!busy, egui::Button::new("Cancel"))
                 .clicked()
             {
@@ -4419,6 +4459,7 @@ fn show_inbound_raw_json_tab(ui: &mut Ui, service: &mut ApplicationService, row:
                     text,
                     expected_fingerprint,
                     error: None,
+                    diff_preview: None,
                 },
             );
         }
@@ -4433,6 +4474,10 @@ fn show_inbound_raw_json_tab(ui: &mut Ui, service: &mut ApplicationService, row:
                     .size(13.0)
                     .color(Color32::from_rgb(200, 60, 60)),
             );
+            ui.add_space(4.0);
+        }
+        if let Some(entries) = state.diff_preview.clone() {
+            super::json_diff_preview(ui, &entries);
             ui.add_space(4.0);
         }
         egui::ScrollArea::vertical()
@@ -4729,12 +4774,444 @@ fn show_inbound_context_menu(
             )
             .clicked()
         {
-            if let Err(error) = service.start_duplicate_inbound(row.index) {
-                service.show_status_message(error);
-            }
+            set_pending_inbound_duplicate(
+                ui,
+                PendingInboundDuplicate {
+                    index: row.index,
+                    tag: row.tag.clone().unwrap_or_else(|| MISSING_FIELD.to_owned()),
+                    error: None,
+                    diff_preview: None,
+                },
+            );
             ui.close();
         }
     });
+}
+
+#[derive(Clone)]
+struct PendingInboundDuplicate {
+    index: usize,
+    tag: String,
+    error: Option<String>,
+    /// Last redacted structural diff preview (Roadmap §3:126); stale until re-clicked.
+    diff_preview: Option<Vec<crate::xray::JsonDiffEntry>>,
+}
+
+fn pending_inbound_duplicate_id() -> egui::Id {
+    egui::Id::new("inbounds_pending_duplicate")
+}
+
+fn pending_inbound_duplicate(ui: &Ui) -> Option<PendingInboundDuplicate> {
+    ui.ctx()
+        .data(|d| d.get_temp::<PendingInboundDuplicate>(pending_inbound_duplicate_id()))
+}
+
+fn set_pending_inbound_duplicate(ui: &Ui, pending: PendingInboundDuplicate) {
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(pending_inbound_duplicate_id(), pending));
+}
+
+fn clear_pending_inbound_duplicate(ui: &Ui) {
+    ui.ctx()
+        .data_mut(|d| d.remove::<PendingInboundDuplicate>(pending_inbound_duplicate_id()));
+}
+
+fn show_duplicate_inbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
+    let Some(mut pending) = pending_inbound_duplicate(ui) else {
+        return;
+    };
+    let mut open = true;
+    let mut closed = false;
+    egui::Window::new("Duplicate inbound")
+        .collapsible(false)
+        .resizable(false)
+        .default_width(400.0)
+        .open(&mut open)
+        .show(ui.ctx(), |ui| {
+            ui.label(
+                RichText::new(format!(
+                    "Duplicate inbound «{}»? A copy with a unique tag is added to the same source file.",
+                    pending.tag
+                ))
+                .size(14.0),
+            );
+            if let Some(error) = &pending.error {
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new(error.clone())
+                        .size(14.0)
+                        .color(Color32::from_rgb(200, 60, 60)),
+                );
+            }
+            if let Some(entries) = pending.diff_preview.clone() {
+                ui.add_space(8.0);
+                super::json_diff_preview(ui, &entries);
+            }
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                let busy = service.is_inbound_shell_mutation_busy();
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Duplicate"))
+                    .clicked()
+                {
+                    match service.start_duplicate_inbound(pending.index) {
+                        Ok(()) => closed = true,
+                        Err(message) => pending.error = Some(message),
+                    }
+                }
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Preview changes"))
+                    .clicked()
+                {
+                    match service.preview_duplicate_inbound_diff(pending.index) {
+                        Ok(entries) => {
+                            pending.diff_preview = Some(entries);
+                            pending.error = None;
+                        }
+                        Err(message) => pending.error = Some(message),
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    closed = true;
+                }
+            });
+        });
+
+    if closed || !open {
+        clear_pending_inbound_duplicate(ui);
+    } else {
+        set_pending_inbound_duplicate(ui, pending);
+    }
+}
+
+// ─── Import from Share URI (Roadmap §3:133) ─────────────────────────────────
+
+#[derive(Clone, Default)]
+struct PendingInboundImport {
+    uri_text: String,
+    preview: Option<ImportPreview>,
+    error: Option<String>,
+    /// Inbound index picked from the "add to existing" list, when that mode is used.
+    target_inbound: Option<usize>,
+}
+
+fn pending_inbound_import_id() -> egui::Id {
+    egui::Id::new("inbounds_pending_import")
+}
+
+fn pending_inbound_import(ui: &Ui) -> Option<PendingInboundImport> {
+    ui.ctx()
+        .data(|d| d.get_temp::<PendingInboundImport>(pending_inbound_import_id()))
+}
+
+fn set_pending_inbound_import(ui: &Ui, pending: PendingInboundImport) {
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(pending_inbound_import_id(), pending));
+}
+
+fn clear_pending_inbound_import(ui: &Ui) {
+    ui.ctx()
+        .data_mut(|d| d.remove::<PendingInboundImport>(pending_inbound_import_id()));
+}
+
+/// Wire `protocol` string matching [`InboundSummary::protocol`], for filtering the "add to
+/// existing inbound" picker to inbounds the imported credential could actually work with.
+fn import_protocol_wire(protocol: InboundClientProtocol) -> &'static str {
+    match protocol {
+        InboundClientProtocol::Vless => "vless",
+        InboundClientProtocol::Trojan => "trojan",
+        InboundClientProtocol::Hysteria => "hysteria",
+        InboundClientProtocol::Tunnel => "tunnel",
+    }
+}
+
+fn show_import_dialog(ui: &mut Ui, service: &mut ApplicationService) {
+    let Some(mut pending) = pending_inbound_import(ui) else {
+        return;
+    };
+    let mut open = true;
+    let mut closed = false;
+    egui::Window::new("Import from Share URI")
+        .collapsible(false)
+        .resizable(false)
+        .default_width(480.0)
+        .open(&mut open)
+        .show(ui.ctx(), |ui| {
+            ui.label(
+                RichText::new(
+                    "Paste a vless:// / trojan:// / hy2:// (or hysteria2://) link. Only what the \
+                     link actually carries can be imported — REALITY's private key and TLS \
+                     certificates are never in a client link, so those still need to be \
+                     generated/configured separately after import.",
+                )
+                .size(12.0)
+                .color(Color32::from_rgb(140, 140, 140)),
+            );
+            ui.add_space(6.0);
+            ui.text_edit_multiline(&mut pending.uri_text);
+            if let Some(error) = &pending.error {
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new(error.clone())
+                        .size(13.0)
+                        .color(Color32::from_rgb(200, 60, 60)),
+                );
+            }
+            ui.add_space(8.0);
+            if ui.button("Parse").clicked() {
+                match service.preview_inbound_import(pending.uri_text.trim()) {
+                    Ok(preview) => {
+                        pending.error = None;
+                        pending.target_inbound = None;
+                        pending.preview = Some(preview);
+                    }
+                    Err(message) => {
+                        pending.error = Some(message);
+                        pending.preview = None;
+                    }
+                }
+            }
+
+            let Some(preview) = pending.preview.clone() else {
+                return;
+            };
+
+            ui.add_space(10.0);
+            ui.separator();
+            egui::Grid::new("inbound_import_preview_grid")
+                .num_columns(2)
+                .spacing([16.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Protocol:");
+                    ui.label(import_protocol_wire(preview.protocol));
+                    ui.end_row();
+                    ui.label("Port:");
+                    ui.label(preview.port.map(|p| p.to_string()).unwrap_or_else(|| MISSING_FIELD.to_owned()));
+                    ui.end_row();
+                    ui.label("Security:");
+                    ui.label(&preview.security_summary);
+                    ui.end_row();
+                    ui.label("Transport:");
+                    ui.label(&preview.transport_summary);
+                    ui.end_row();
+                    ui.label("Credential:");
+                    ui.label(&preview.user_id);
+                    ui.end_row();
+                    if let Some(flow) = &preview.flow {
+                        ui.label("Flow:");
+                        ui.label(flow);
+                        ui.end_row();
+                    }
+                });
+
+            for warning in &preview.warnings {
+                ui.label(
+                    RichText::new(warning.clone())
+                        .size(12.0)
+                        .color(Color32::from_rgb(210, 170, 40)),
+                );
+            }
+
+            ui.add_space(10.0);
+            ui.separator();
+            ui.strong("Create new inbound");
+            ui.label(
+                RichText::new(
+                    "Opens Add Inbound pre-filled from the link above. Add the client \
+                     afterward via the Users tab (credential shown above).",
+                )
+                .size(11.0)
+                .color(Color32::from_rgb(140, 140, 140)),
+            );
+            if ui.button("Create new inbound").clicked() {
+                apply_import_to_new_inbound(ui, service, &preview);
+                closed = true;
+            }
+
+            ui.add_space(10.0);
+            ui.strong("Add user to existing inbound");
+            let candidates: Vec<(usize, String)> = service
+                .inbounds_page_model()
+                .rows
+                .iter()
+                .filter(|row| row.protocol.as_deref() == Some(import_protocol_wire(preview.protocol)))
+                .map(|row| (row.index, row.tag.clone().unwrap_or_else(|| MISSING_FIELD.to_owned())))
+                .collect();
+            if candidates.is_empty() {
+                ui.label(
+                    RichText::new(format!(
+                        "No existing {} inbounds to add this user to.",
+                        import_protocol_wire(preview.protocol)
+                    ))
+                    .size(12.0)
+                    .color(Color32::from_rgb(140, 140, 140)),
+                );
+            } else {
+                ui.horizontal(|ui| {
+                    let selected_label = pending
+                        .target_inbound
+                        .and_then(|idx| candidates.iter().find(|(i, _)| *i == idx))
+                        .map(|(_, tag)| tag.clone())
+                        .unwrap_or_else(|| "Choose inbound…".to_owned());
+                    ComboBox::from_id_salt("inbound_import_target")
+                        .selected_text(selected_label)
+                        .show_ui(ui, |ui| {
+                            for (index, tag) in &candidates {
+                                ui.selectable_value(&mut pending.target_inbound, Some(*index), tag);
+                            }
+                        });
+                    if ui
+                        .add_enabled(pending.target_inbound.is_some(), egui::Button::new("Add user"))
+                        .clicked()
+                        && let Some(target) = pending.target_inbound
+                    {
+                        service.set_selected_users_inbound(target);
+                        set_detail_tab(ui, InboundDetailTab::Users);
+                        match preview.protocol {
+                            InboundClientProtocol::Vless => users::open_add_dialog_prefilled(
+                                ui,
+                                target,
+                                preview.email_hint.clone(),
+                                preview.user_id.clone(),
+                                preview.flow.as_deref(),
+                            ),
+                            InboundClientProtocol::Trojan => users::open_add_trojan_dialog_prefilled(
+                                ui,
+                                target,
+                                preview.email_hint.clone(),
+                                preview.user_id.clone(),
+                            ),
+                            InboundClientProtocol::Hysteria => users::open_add_hysteria_dialog_prefilled(
+                                ui,
+                                target,
+                                preview.email_hint.clone(),
+                                preview.user_id.clone(),
+                            ),
+                            InboundClientProtocol::Tunnel => {}
+                        }
+                        closed = true;
+                    }
+                });
+            }
+
+            ui.add_space(10.0);
+            if ui.button("Cancel").clicked() {
+                closed = true;
+            }
+        });
+
+    if closed || !open {
+        clear_pending_inbound_import(ui);
+    } else {
+        set_pending_inbound_import(ui, pending);
+    }
+}
+
+/// Applies an import preview onto a fresh Add Inbound session — mirrors `apply_inbound_preset`
+/// (Roadmap §3:123): every field stays freely editable afterward, nothing here is final until
+/// the user clicks the form's own "Add Inbound" Save button.
+fn apply_import_to_new_inbound(ui: &Ui, service: &mut ApplicationService, preview: &ImportPreview) {
+    set_protocol_picker(ui, preview.protocol);
+    if service.begin_add_inbound(preview.protocol).is_err() {
+        return;
+    }
+
+    let parsed = &preview.parsed;
+    let mut needs_x25519 = false;
+
+    if let Some(session) = service.inbound_editor_session_mut() {
+        if let Some(port) = parsed.port {
+            session.general.port = Some(u64::from(port));
+        }
+
+        if let Some(security) = &mut session.security {
+            match &parsed.security {
+                ShareSecurity::None => {
+                    security.mode = InboundSecurityMode::None;
+                }
+                ShareSecurity::Tls {
+                    server_name,
+                    insecure,
+                    alpn,
+                } => {
+                    security.mode = InboundSecurityMode::Tls;
+                    if let Some(sni) = server_name.as_deref().filter(|s| !s.is_empty()) {
+                        security.tls.server_name = sni.to_owned();
+                    }
+                    security.tls.allow_insecure = *insecure;
+                    if !alpn.is_empty() {
+                        security.tls.alpn = alpn.clone();
+                    }
+                }
+                ShareSecurity::Reality {
+                    server_name,
+                    short_id,
+                    ..
+                } => {
+                    security.mode = InboundSecurityMode::Reality;
+                    if !server_name.is_empty() {
+                        security.reality.server_names = vec![server_name.clone()];
+                    }
+                    if !short_id.is_empty() {
+                        security.reality.short_ids = vec![short_id.clone()];
+                    }
+                    needs_x25519 = true;
+                }
+            }
+        }
+
+        if preview.protocol != InboundClientProtocol::Hysteria {
+            match &parsed.transport {
+                ShareTransport::Tcp => {}
+                ShareTransport::Xhttp { path, host, mode, .. } => {
+                    session.stream.method = Some(StreamMethod::Xhttp);
+                    session.stream.xhttp.core.path = path.clone();
+                    if let Some(host) = host {
+                        session.stream.xhttp.core.host = host.clone();
+                    }
+                    if let Some(mode) = mode {
+                        session.stream.xhttp.core.mode = mode.clone();
+                    }
+                }
+                ShareTransport::Grpc { service_name } => {
+                    session.stream.method = Some(StreamMethod::Grpc);
+                    session.stream.grpc.service_name = service_name.clone();
+                }
+                ShareTransport::Ws { path, host } => {
+                    session.stream.method = Some(StreamMethod::Ws);
+                    session.stream.ws.path = path.clone();
+                    if let Some(host) = host {
+                        session.stream.ws.host = host.clone();
+                    }
+                }
+                ShareTransport::Kcp => {
+                    session.stream.method = Some(StreamMethod::Mkcp);
+                }
+            }
+        } else if let Some(password) = &parsed.obfs_salamander_password {
+            session.stream.finalmask_udp = vec![FinalMaskLayerDraft {
+                layer_type: "salamander".to_owned(),
+                settings: serde_json::json!({ "password": password }),
+            }];
+            session.stream.write_finalmask_udp = true;
+        }
+    }
+
+    if needs_x25519 {
+        let _ = service.start_generate_x25519();
+    }
+
+    let credential_label = match preview.protocol {
+        InboundClientProtocol::Vless => "UUID",
+        InboundClientProtocol::Trojan => "password",
+        InboundClientProtocol::Hysteria => "auth",
+        InboundClientProtocol::Tunnel => "credential",
+    };
+    service.show_status_message(format!(
+        "Inbound draft created from import. Save it, then add the user via the Users tab — \
+         {credential_label}: {}",
+        preview.user_id
+    ));
 }
 
 #[derive(Clone)]

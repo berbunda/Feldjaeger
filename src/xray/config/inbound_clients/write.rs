@@ -5,6 +5,7 @@ use serde_json::{Map, Value};
 use crate::xray::config::inbound_clients::{
     HysteriaClient, InboundClient, TrojanClient, VlessClient, SecretFieldDraft,
 };
+use crate::xray::config::reverse_proxy::reverse_to_value;
 use crate::xray::secret::SecretString;
 
 /// Writes a typed client to a JSON object (known fields + extras).
@@ -29,6 +30,9 @@ fn write_vless(client: &VlessClient) -> Value {
     }
     if client.level != 0 {
         object.insert("level".to_owned(), Value::Number(client.level.into()));
+    }
+    if let Some(reverse) = &client.reverse {
+        object.insert("reverse".to_owned(), reverse_to_value(reverse));
     }
     merge_extras(&mut object, &client.extras);
     Value::Object(object)

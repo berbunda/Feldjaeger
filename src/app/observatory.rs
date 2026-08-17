@@ -4,7 +4,9 @@
 
 use crate::app::inbounds::{LoadedConfigSnapshot, display_optional_str, display_source_file};
 use crate::app::status::SshStatus;
-use crate::xray::{DiscoveryState, ObservatorySummary};
+use crate::xray::{
+    DiscoveryState, ObservatorySettings, ObservatorySummary, observatory_settings_change_summary,
+};
 
 /// High-level state shown by the Observatory page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +25,18 @@ pub enum ObservatoryPageState {
     ConfigurationLoaded,
     /// Configuration loaded with non-fatal warnings.
     ConfigurationContainsWarnings,
+    /// In-memory draft is being edited (Roadmap §2.1:50).
+    EditMode,
+    /// Draft failed local validation.
+    ValidationError,
+    /// Remote save is in progress.
+    Saving,
+    /// Last save succeeded (transient before returning to view).
+    Saved,
+    /// Last save failed (classified error shown separately).
+    SaveFailed,
+    /// Top-level `observatory` value is not a JSON object.
+    MalformedObservatoryObject,
 }
 
 impl ObservatoryPageState {
@@ -44,6 +58,18 @@ impl ObservatoryPageState {
             Self::ConfigurationContainsWarnings => {
                 "Configuration loaded with warnings. Review the details below."
             }
+            Self::EditMode => {
+                "Editing Observatory settings. Changes are not saved until you click Save."
+            }
+            Self::ValidationError => {
+                "Observatory settings validation failed. Fix the highlighted fields."
+            }
+            Self::Saving => "Saving Observatory settings...",
+            Self::Saved => "Observatory settings updated.",
+            Self::SaveFailed => "Failed to save Observatory settings.",
+            Self::MalformedObservatoryObject => {
+                "Malformed observatory object in the remote configuration."
+            }
         }
     }
 
@@ -58,7 +84,9 @@ impl ObservatoryPageState {
     }
 }
 
-/// Read-only model exposed to the Observatory page.
+/// View **and** edit model exposed to the Observatory page (Roadmap §2.1:50). Browsing uses
+/// [`ObservatorySummary`] as before; editing uses the typed [`ObservatorySettings`] — the same
+/// coexistence pattern already used by Routing/Policy (§52/§53).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObservatoryPageModel {
     /// Coarse page state.
@@ -67,6 +95,14 @@ pub struct ObservatoryPageModel {
     pub summary: Option<ObservatorySummary>,
     /// Combined non-fatal warnings (config + Observatory-specific).
     pub warnings: Vec<String>,
+    /// Settings currently displayed by the edit form (loaded or draft).
+    pub observatory_settings: ObservatorySettings,
+    /// Whether the UI is in edit mode with an in-memory draft.
+    pub editing: bool,
+    /// Change summary lines when editing (loaded → draft).
+    pub change_summary: Vec<String>,
+    /// Last classified save/validation error for the page.
+    pub error_message: Option<String>,
 }
 
 /// Derives the Observatory page state from connection, discovery, and config state.
@@ -110,12 +146,23 @@ pub fn derive_observatory_page_state(
     }
 }
 
-/// Builds the read-only Observatory page model.
+/// Builds the Observatory page model (browsing + edit, Roadmap §2.1:50).
+///
+/// `draft`/`saving`/`error_message`/`saved_flash` mirror [`super::dns::build_dns_page_model`]'s
+/// parameters exactly; when `draft` is `None` the page behaves exactly as the read-only version
+/// did — same precedence order as Routing/Policy (§52/§53): Saving > Saved > (error while editing
+/// = ValidationError) > (error while not editing = SaveFailed) > Malformed > EditMode > the
+/// browsing state already computed by [`derive_observatory_page_state`].
 pub fn build_observatory_page_model(
     ssh: SshStatus,
     discovery: &DiscoveryState,
     config: &LoadedConfigSnapshot,
+    draft: Option<&ObservatorySettings>,
+    saving: bool,
+    error_message: Option<String>,
+    saved_flash: bool,
 ) -> ObservatoryPageModel {
+    let mut state = derive_observatory_page_state(ssh, discovery, config);
     let summary = config.observatory().cloned();
     let mut warnings = Vec::new();
     if summary.is_some() {
@@ -124,10 +171,51 @@ pub fn build_observatory_page_model(
             warnings.extend(summary.warnings.iter().cloned());
         }
     }
+
+    let mut observatory_settings = ObservatorySettings::defaults();
+    let mut editing = false;
+    let mut change_summary = Vec::new();
+
+    if let Some(editable) = config.editable() {
+        let loaded = editable.observatory_settings();
+        let malformed = loaded
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("Malformed observatory object"));
+
+        editing = draft.is_some();
+        observatory_settings = draft.cloned().unwrap_or_else(|| loaded.clone());
+        change_summary = if let Some(draft) = draft {
+            observatory_settings_change_summary(&loaded, draft)
+        } else {
+            Vec::new()
+        };
+
+        state = if saving {
+            ObservatoryPageState::Saving
+        } else if saved_flash {
+            ObservatoryPageState::Saved
+        } else if error_message.is_some() && editing {
+            ObservatoryPageState::ValidationError
+        } else if error_message.is_some() {
+            ObservatoryPageState::SaveFailed
+        } else if malformed {
+            ObservatoryPageState::MalformedObservatoryObject
+        } else if editing {
+            ObservatoryPageState::EditMode
+        } else {
+            state
+        };
+    }
+
     ObservatoryPageModel {
-        state: derive_observatory_page_state(ssh, discovery, config),
+        state,
         summary,
         warnings,
+        observatory_settings,
+        editing,
+        change_summary,
+        error_message,
     }
 }
 
@@ -211,6 +299,10 @@ mod tests {
             SshStatus::Disconnected,
             &DiscoveryState::Idle,
             &LoadedConfigSnapshot::None,
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, ObservatoryPageState::NoSshConnection);
     }
@@ -221,6 +313,10 @@ mod tests {
             SshStatus::Connected,
             &DiscoveryState::Idle,
             &LoadedConfigSnapshot::None,
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, ObservatoryPageState::XrayNotDiscovered);
     }
@@ -231,6 +327,10 @@ mod tests {
             SshStatus::Connected,
             &succeeded(),
             &LoadedConfigSnapshot::NotLoaded,
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, ObservatoryPageState::ConfigurationNotLoaded);
         assert!(model.state.message().contains("Configuration not loaded"));
@@ -242,6 +342,10 @@ mod tests {
             SshStatus::Connected,
             &succeeded(),
             &loaded(None, Vec::new()),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, ObservatoryPageState::ObservatorySectionMissing);
         assert_eq!(
@@ -261,6 +365,10 @@ mod tests {
                 Some(summary("/etc/xray/config.json", &[], Vec::new())),
                 Vec::new(),
             ),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, ObservatoryPageState::NoSubjectSelectors);
         assert!(model.state.shows_observatory());
@@ -275,6 +383,10 @@ mod tests {
                 Some(summary("/etc/xray/config.json", &["proxy"], Vec::new())),
                 Vec::new(),
             ),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(one.state, ObservatoryPageState::ConfigurationLoaded);
         assert_eq!(one.summary.as_ref().unwrap().subject_selectors, ["proxy"]);
@@ -313,6 +425,10 @@ mod tests {
             SshStatus::Connected,
             &succeeded(),
             &loaded(Some(summary), Vec::new()),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(
             model.state,
@@ -334,6 +450,10 @@ mod tests {
                 )),
                 Vec::new(),
             ),
+            None,
+            false,
+            None,
+            false,
         );
         assert_eq!(model.state, ObservatoryPageState::NoSubjectSelectors);
         assert_eq!(model.warnings, ["`subjectSelector` is empty."]);

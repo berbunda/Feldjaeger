@@ -37,6 +37,28 @@ pub enum ConfigModifyErrorKind {
     MalformedLogObject,
     /// A log field contains an unsupported value that blocks the requested edit.
     UnsupportedLogValue,
+    /// Top-level `dns` value is not a JSON object (Roadmap §2.1:46).
+    MalformedDnsObject,
+    /// Top-level `fakedns` value is neither a JSON object nor an array of objects (Roadmap §2.1:47).
+    MalformedFakeDnsObject,
+    /// Top-level `routing` value is not a JSON object (Roadmap §2.1:48).
+    MalformedRoutingObject,
+    /// Top-level `policy` value is not a JSON object (Roadmap §2.1:49).
+    MalformedPolicyObject,
+    /// Top-level `observatory` value is not a JSON object (Roadmap §2.1:50).
+    MalformedObservatoryObject,
+    /// Top-level `burstObservatory` value is not a JSON object (Roadmap §2.1:51).
+    MalformedBurstObservatoryObject,
+    /// Top-level `stats` value is not a JSON object (Roadmap §2.1:52).
+    MalformedStatsObject,
+    /// Top-level `metrics` value is not a JSON object (Roadmap §2.1:53).
+    MalformedMetricsObject,
+    /// Top-level `env` value is not a JSON object (Roadmap §2.1:55).
+    MalformedEnvObject,
+    /// Top-level `version` value is not a JSON object (Roadmap §2.1:56).
+    MalformedVersionObject,
+    /// Top-level `geodata` value is not a JSON object (Roadmap §2.1:57).
+    MalformedGeodataObject,
     /// Access/error file path failed validation.
     InvalidFilePath,
     /// Custom `maskAddress` format is invalid.
@@ -70,6 +92,17 @@ impl ConfigModifyErrorKind {
             Self::EmailConflict => "Validation failed",
             Self::MalformedLogObject => "Malformed log object",
             Self::UnsupportedLogValue => "Unsupported log value",
+            Self::MalformedDnsObject => "Malformed dns object",
+            Self::MalformedFakeDnsObject => "Malformed fakedns section",
+            Self::MalformedRoutingObject => "Malformed routing object",
+            Self::MalformedPolicyObject => "Malformed policy object",
+            Self::MalformedObservatoryObject => "Malformed observatory object",
+            Self::MalformedBurstObservatoryObject => "Malformed burstObservatory object",
+            Self::MalformedStatsObject => "Malformed stats object",
+            Self::MalformedMetricsObject => "Malformed metrics object",
+            Self::MalformedEnvObject => "Malformed env object",
+            Self::MalformedVersionObject => "Malformed version object",
+            Self::MalformedGeodataObject => "Malformed geodata object",
             Self::InvalidFilePath => "Invalid file path",
             Self::InvalidMaskFormat => "Invalid mask format",
             Self::ConfigurationChangedRemotely => "Configuration changed remotely",

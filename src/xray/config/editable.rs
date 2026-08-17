@@ -8,7 +8,21 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
+use super::api_settings::{ApiSettings, api_settings_from_section};
+use super::dns_settings::{DnsSettings, dns_settings_from_section};
+use super::fakedns_settings::{FakeDnsSettings, fakedns_settings_from_section};
+use super::burst_observatory_settings::{
+    BurstObservatorySettings, burst_observatory_settings_from_section,
+};
+use super::env_settings::{EnvSettings, env_settings_from_section};
+use super::version_settings::{VersionSettings, version_settings_from_section};
+use super::geodata_settings::{GeodataSettings, geodata_settings_from_section};
 use super::log_settings::{LogSettings, log_settings_from_section};
+use super::metrics_settings::{MetricsSettings, metrics_settings_from_section};
+use super::observatory_settings::{ObservatorySettings, observatory_settings_from_section};
+use super::policy_settings::{PolicySettings, policy_settings_from_section};
+use super::routing_settings::{RoutingSettings, routing_settings_from_section};
+use super::stats_settings::{StatsSettings, stats_settings_from_section};
 use super::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 use super::sections::XrayConfigSections;
 use super::serialize::serialize_json_value;
@@ -157,6 +171,66 @@ impl EditableXrayConfig {
         log_settings_from_section(self.sections.log())
     }
 
+    /// Typed `api` settings derived from the current sections (Roadmap §2.1:54).
+    pub fn api_settings(&self) -> ApiSettings {
+        api_settings_from_section(self.sections.api())
+    }
+
+    /// Typed `dns` settings derived from the current sections (Roadmap §2.1:46).
+    pub fn dns_settings(&self) -> DnsSettings {
+        dns_settings_from_section(self.sections.dns())
+    }
+
+    /// Typed `fakedns` settings derived from the current sections (Roadmap §2.1:47).
+    pub fn fakedns_settings(&self) -> FakeDnsSettings {
+        fakedns_settings_from_section(self.sections.fakedns())
+    }
+
+    /// Typed `routing` settings derived from the current sections (Roadmap §2.1:48).
+    pub fn routing_settings(&self) -> RoutingSettings {
+        routing_settings_from_section(self.sections.routing())
+    }
+
+    /// Typed `policy` settings derived from the current sections (Roadmap §2.1:49).
+    pub fn policy_settings(&self) -> PolicySettings {
+        policy_settings_from_section(self.sections.policy())
+    }
+
+    /// Typed `observatory` settings derived from the current sections (Roadmap §2.1:50).
+    pub fn observatory_settings(&self) -> ObservatorySettings {
+        observatory_settings_from_section(self.sections.observatory())
+    }
+
+    /// Typed `metrics` settings derived from the current sections (Roadmap §2.1:53).
+    pub fn metrics_settings(&self) -> MetricsSettings {
+        metrics_settings_from_section(self.sections.metrics())
+    }
+
+    /// Typed `env` settings derived from the current sections (Roadmap §2.1:55).
+    pub fn env_settings(&self) -> EnvSettings {
+        env_settings_from_section(self.sections.env())
+    }
+
+    /// Typed `version` settings derived from the current sections (Roadmap §2.1:56).
+    pub fn version_settings(&self) -> VersionSettings {
+        version_settings_from_section(self.sections.version())
+    }
+
+    /// Typed `geodata` settings derived from the current sections (Roadmap §2.1:57).
+    pub fn geodata_settings(&self) -> GeodataSettings {
+        geodata_settings_from_section(self.sections.geodata())
+    }
+
+    /// Typed `burstObservatory` settings derived from the current sections (Roadmap §2.1:51).
+    pub fn burst_observatory_settings(&self) -> BurstObservatorySettings {
+        burst_observatory_settings_from_section(self.sections.burst_observatory())
+    }
+
+    /// Typed `stats` settings derived from the current sections (Roadmap §2.1:52).
+    pub fn stats_settings(&self) -> StatsSettings {
+        stats_settings_from_section(self.sections.stats())
+    }
+
     /// Applies `op` to the `log` object, creating it when absent, then syncs the file root.
     ///
     /// When the section is missing, a target file is chosen: the sole file root when there
@@ -214,6 +288,730 @@ impl EditableXrayConfig {
                 )
             })?;
             object.insert("log".to_owned(), merged);
+        }
+
+        Ok((source_file, result))
+    }
+
+    /// Applies `op` to the `api` object, creating it when absent, then syncs the file root
+    /// (Roadmap §2.1:54). Mirrors [`with_log_mut`](Self::with_log_mut); the `api` object is not
+    /// created merely by opening the API Settings page — only when this method runs during a
+    /// save.
+    pub fn with_api_mut<F, R>(&mut self, op: F) -> ConfigModifyResult<(String, R)>
+    where
+        F: FnOnce(&mut Value) -> ConfigModifyResult<R>,
+    {
+        let source_file = if let Some(section) = self.sections.api() {
+            section.source_file().to_owned()
+        } else {
+            resolve_api_target_file(&self.file_roots)?
+        };
+
+        let result = {
+            if self.sections.api().is_none() {
+                let value = Value::Object(serde_json::Map::new());
+                self.sections
+                    .set_api(Some(SourcedSection::new(source_file.clone(), value)));
+            }
+
+            let section = self.sections_mut().api_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "api section missing after create".to_owned(),
+                )
+            })?;
+            op(section.value_mut())?
+        };
+
+        let merged = self
+            .sections
+            .api()
+            .map(|section| section.value().clone())
+            .ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "api section missing after edit".to_owned(),
+                )
+            })?;
+
+        {
+            let root = self.file_roots.get_mut(&source_file).ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    format!("source file root missing: {source_file}"),
+                )
+            })?;
+            let object = root.as_object_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "config root must be a JSON object".to_owned(),
+                )
+            })?;
+            object.insert("api".to_owned(), merged);
+        }
+
+        Ok((source_file, result))
+    }
+
+    /// Applies `op` to the `dns` object, creating it when absent, then syncs the file root
+    /// (Roadmap §2.1:46). Mirrors [`with_log_mut`](Self::with_log_mut)/[`with_api_mut`](Self::with_api_mut);
+    /// the `dns` object is not created merely by opening the DNS page — only when this method
+    /// runs during a save.
+    pub fn with_dns_mut<F, R>(&mut self, op: F) -> ConfigModifyResult<(String, R)>
+    where
+        F: FnOnce(&mut Value) -> ConfigModifyResult<R>,
+    {
+        let source_file = if let Some(section) = self.sections.dns() {
+            section.source_file().to_owned()
+        } else {
+            resolve_dns_target_file(&self.file_roots)?
+        };
+
+        let result = {
+            if self.sections.dns().is_none() {
+                let value = Value::Object(serde_json::Map::new());
+                self.sections
+                    .set_dns(Some(SourcedSection::new(source_file.clone(), value)));
+            }
+
+            let section = self.sections_mut().dns_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "dns section missing after create".to_owned(),
+                )
+            })?;
+            op(section.value_mut())?
+        };
+
+        let merged = self
+            .sections
+            .dns()
+            .map(|section| section.value().clone())
+            .ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "dns section missing after edit".to_owned(),
+                )
+            })?;
+
+        {
+            let root = self.file_roots.get_mut(&source_file).ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    format!("source file root missing: {source_file}"),
+                )
+            })?;
+            let object = root.as_object_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "config root must be a JSON object".to_owned(),
+                )
+            })?;
+            object.insert("dns".to_owned(), merged);
+        }
+
+        Ok((source_file, result))
+    }
+
+    /// Applies `op` to the `fakedns` value, creating it (as `Value::Null`, immediately replaced by
+    /// `op`) when absent, then syncs the file root (Roadmap §2.1:47). Unlike
+    /// [`with_log_mut`](Self::with_log_mut)/[`with_dns_mut`](Self::with_dns_mut), the section is
+    /// not always a JSON object — `op` (typically [`super::apply_fakedns_settings_to_value`])
+    /// replaces the whole value wholesale (object for one pool, array otherwise), so there is no
+    /// "must already be an object" precondition here. The `fakedns` value is not created merely by
+    /// opening the FakeDNS page — only when this method runs during a save.
+    pub fn with_fakedns_mut<F, R>(&mut self, op: F) -> ConfigModifyResult<(String, R)>
+    where
+        F: FnOnce(&mut Value) -> ConfigModifyResult<R>,
+    {
+        let source_file = if let Some(section) = self.sections.fakedns() {
+            section.source_file().to_owned()
+        } else {
+            resolve_fakedns_target_file(&self.file_roots)?
+        };
+
+        let result = {
+            if self.sections.fakedns().is_none() {
+                self.sections
+                    .set_fakedns(Some(SourcedSection::new(source_file.clone(), Value::Null)));
+            }
+
+            let section = self.sections_mut().fakedns_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "fakedns section missing after create".to_owned(),
+                )
+            })?;
+            op(section.value_mut())?
+        };
+
+        let merged = self
+            .sections
+            .fakedns()
+            .map(|section| section.value().clone())
+            .ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "fakedns section missing after edit".to_owned(),
+                )
+            })?;
+
+        {
+            let root = self.file_roots.get_mut(&source_file).ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    format!("source file root missing: {source_file}"),
+                )
+            })?;
+            let object = root.as_object_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "config root must be a JSON object".to_owned(),
+                )
+            })?;
+            object.insert("fakedns".to_owned(), merged);
+        }
+
+        Ok((source_file, result))
+    }
+
+    /// Applies `op` to the `routing` object, creating it when absent, then syncs the file root
+    /// (Roadmap §2.1:48). Mirrors [`with_dns_mut`](Self::with_dns_mut) — `routing` is always an
+    /// object (unlike `fakedns`, which may also be an array), so this follows the same
+    /// "must already be an object" shape. The `routing` object is not created merely by opening
+    /// the Routing page — only when this method runs during a save.
+    pub fn with_routing_mut<F, R>(&mut self, op: F) -> ConfigModifyResult<(String, R)>
+    where
+        F: FnOnce(&mut Value) -> ConfigModifyResult<R>,
+    {
+        let source_file = if let Some(section) = self.sections.routing() {
+            section.source_file().to_owned()
+        } else {
+            resolve_routing_target_file(&self.file_roots)?
+        };
+
+        let result = {
+            if self.sections.routing().is_none() {
+                let value = Value::Object(serde_json::Map::new());
+                self.sections
+                    .set_routing(Some(SourcedSection::new(source_file.clone(), value)));
+            }
+
+            let section = self.sections_mut().routing_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "routing section missing after create".to_owned(),
+                )
+            })?;
+            op(section.value_mut())?
+        };
+
+        let merged = self
+            .sections
+            .routing()
+            .map(|section| section.value().clone())
+            .ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "routing section missing after edit".to_owned(),
+                )
+            })?;
+
+        {
+            let root = self.file_roots.get_mut(&source_file).ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    format!("source file root missing: {source_file}"),
+                )
+            })?;
+            let object = root.as_object_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "config root must be a JSON object".to_owned(),
+                )
+            })?;
+            object.insert("routing".to_owned(), merged);
+        }
+
+        Ok((source_file, result))
+    }
+
+    /// Applies `op` to the `policy` object, creating it when absent, then syncs the file root
+    /// (Roadmap §2.1:49). Mirrors [`with_dns_mut`](Self::with_dns_mut) — `policy` is always an
+    /// object. The `policy` object is not created merely by opening the Policy page — only when
+    /// this method runs during a save.
+    pub fn with_policy_mut<F, R>(&mut self, op: F) -> ConfigModifyResult<(String, R)>
+    where
+        F: FnOnce(&mut Value) -> ConfigModifyResult<R>,
+    {
+        let source_file = if let Some(section) = self.sections.policy() {
+            section.source_file().to_owned()
+        } else {
+            resolve_policy_target_file(&self.file_roots)?
+        };
+
+        let result = {
+            if self.sections.policy().is_none() {
+                let value = Value::Object(serde_json::Map::new());
+                self.sections
+                    .set_policy(Some(SourcedSection::new(source_file.clone(), value)));
+            }
+
+            let section = self.sections_mut().policy_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "policy section missing after create".to_owned(),
+                )
+            })?;
+            op(section.value_mut())?
+        };
+
+        let merged = self
+            .sections
+            .policy()
+            .map(|section| section.value().clone())
+            .ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "policy section missing after edit".to_owned(),
+                )
+            })?;
+
+        {
+            let root = self.file_roots.get_mut(&source_file).ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    format!("source file root missing: {source_file}"),
+                )
+            })?;
+            let object = root.as_object_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "config root must be a JSON object".to_owned(),
+                )
+            })?;
+            object.insert("policy".to_owned(), merged);
+        }
+
+        Ok((source_file, result))
+    }
+
+    /// Applies `op` to the `observatory` object, creating it when absent, then syncs the file
+    /// root (Roadmap §2.1:50). Mirrors [`with_dns_mut`](Self::with_dns_mut) — `observatory` is
+    /// always an object. The `observatory` object is not created merely by opening the
+    /// Observatory page — only when this method runs during a save.
+    pub fn with_observatory_mut<F, R>(&mut self, op: F) -> ConfigModifyResult<(String, R)>
+    where
+        F: FnOnce(&mut Value) -> ConfigModifyResult<R>,
+    {
+        let source_file = if let Some(section) = self.sections.observatory() {
+            section.source_file().to_owned()
+        } else {
+            resolve_observatory_target_file(&self.file_roots)?
+        };
+
+        let result = {
+            if self.sections.observatory().is_none() {
+                let value = Value::Object(serde_json::Map::new());
+                self.sections
+                    .set_observatory(Some(SourcedSection::new(source_file.clone(), value)));
+            }
+
+            let section = self.sections_mut().observatory_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "observatory section missing after create".to_owned(),
+                )
+            })?;
+            op(section.value_mut())?
+        };
+
+        let merged = self
+            .sections
+            .observatory()
+            .map(|section| section.value().clone())
+            .ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "observatory section missing after edit".to_owned(),
+                )
+            })?;
+
+        {
+            let root = self.file_roots.get_mut(&source_file).ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    format!("source file root missing: {source_file}"),
+                )
+            })?;
+            let object = root.as_object_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "config root must be a JSON object".to_owned(),
+                )
+            })?;
+            object.insert("observatory".to_owned(), merged);
+        }
+
+        Ok((source_file, result))
+    }
+
+    /// Applies `op` to the `metrics` object, creating it when absent, then syncs the file root
+    /// (Roadmap §2.1:53). Mirrors [`with_api_mut`](Self::with_api_mut) — `metrics` is always an
+    /// object, always exists once created (unlike `stats`, §2.1:52, which can be removed
+    /// entirely). The `metrics` object is not created merely by opening the Metrics Settings page
+    /// — only when this method runs during a save.
+    pub fn with_metrics_mut<F, R>(&mut self, op: F) -> ConfigModifyResult<(String, R)>
+    where
+        F: FnOnce(&mut Value) -> ConfigModifyResult<R>,
+    {
+        let source_file = if let Some(section) = self.sections.metrics() {
+            section.source_file().to_owned()
+        } else {
+            resolve_metrics_target_file(&self.file_roots)?
+        };
+
+        let result = {
+            if self.sections.metrics().is_none() {
+                let value = Value::Object(serde_json::Map::new());
+                self.sections
+                    .set_metrics(Some(SourcedSection::new(source_file.clone(), value)));
+            }
+
+            let section = self.sections_mut().metrics_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "metrics section missing after create".to_owned(),
+                )
+            })?;
+            op(section.value_mut())?
+        };
+
+        let merged = self
+            .sections
+            .metrics()
+            .map(|section| section.value().clone())
+            .ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "metrics section missing after edit".to_owned(),
+                )
+            })?;
+
+        {
+            let root = self.file_roots.get_mut(&source_file).ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    format!("source file root missing: {source_file}"),
+                )
+            })?;
+            let object = root.as_object_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "config root must be a JSON object".to_owned(),
+                )
+            })?;
+            object.insert("metrics".to_owned(), merged);
+        }
+
+        Ok((source_file, result))
+    }
+
+    /// Applies `op` to the `env` object, creating it when absent, then syncs the file root
+    /// (Roadmap §2.1:55). Mirrors [`with_api_mut`](Self::with_api_mut) — `env` is always an
+    /// object, always exists once created (unlike `stats`, §2.1:52). The `env` object is not
+    /// created merely by opening the Env Settings page — only when this method runs during a
+    /// save.
+    pub fn with_env_mut<F, R>(&mut self, op: F) -> ConfigModifyResult<(String, R)>
+    where
+        F: FnOnce(&mut Value) -> ConfigModifyResult<R>,
+    {
+        let source_file = if let Some(section) = self.sections.env() {
+            section.source_file().to_owned()
+        } else {
+            resolve_env_target_file(&self.file_roots)?
+        };
+
+        let result = {
+            if self.sections.env().is_none() {
+                let value = Value::Object(serde_json::Map::new());
+                self.sections
+                    .set_env(Some(SourcedSection::new(source_file.clone(), value)));
+            }
+
+            let section = self.sections_mut().env_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "env section missing after create".to_owned(),
+                )
+            })?;
+            op(section.value_mut())?
+        };
+
+        let merged = self
+            .sections
+            .env()
+            .map(|section| section.value().clone())
+            .ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "env section missing after edit".to_owned(),
+                )
+            })?;
+
+        {
+            let root = self.file_roots.get_mut(&source_file).ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    format!("source file root missing: {source_file}"),
+                )
+            })?;
+            let object = root.as_object_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "config root must be a JSON object".to_owned(),
+                )
+            })?;
+            object.insert("env".to_owned(), merged);
+        }
+
+        Ok((source_file, result))
+    }
+
+    /// Applies `op` to the `version` object, creating it when absent, then syncs the file root
+    /// (Roadmap §2.1:56). Mirrors [`with_api_mut`](Self::with_api_mut) — `version` is always an
+    /// object, always exists once created (unlike `stats`, §2.1:52). The `version` object is not
+    /// created merely by opening the Version Settings page — only when this method runs during a
+    /// save.
+    pub fn with_version_mut<F, R>(&mut self, op: F) -> ConfigModifyResult<(String, R)>
+    where
+        F: FnOnce(&mut Value) -> ConfigModifyResult<R>,
+    {
+        let source_file = if let Some(section) = self.sections.version() {
+            section.source_file().to_owned()
+        } else {
+            resolve_version_target_file(&self.file_roots)?
+        };
+
+        let result = {
+            if self.sections.version().is_none() {
+                let value = Value::Object(serde_json::Map::new());
+                self.sections
+                    .set_version(Some(SourcedSection::new(source_file.clone(), value)));
+            }
+
+            let section = self.sections_mut().version_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "version section missing after create".to_owned(),
+                )
+            })?;
+            op(section.value_mut())?
+        };
+
+        let merged = self
+            .sections
+            .version()
+            .map(|section| section.value().clone())
+            .ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "version section missing after edit".to_owned(),
+                )
+            })?;
+
+        {
+            let root = self.file_roots.get_mut(&source_file).ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    format!("source file root missing: {source_file}"),
+                )
+            })?;
+            let object = root.as_object_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "config root must be a JSON object".to_owned(),
+                )
+            })?;
+            object.insert("version".to_owned(), merged);
+        }
+
+        Ok((source_file, result))
+    }
+
+    /// Applies `op` to the `geodata` object, creating it when absent, then syncs the file root
+    /// (Roadmap §2.1:57). Mirrors [`with_api_mut`](Self::with_api_mut) — `geodata` is always an
+    /// object, always exists once created (unlike `stats`, §2.1:52). The `geodata` object is not
+    /// created merely by opening the GeoData Settings page — only when this method runs during a
+    /// save.
+    pub fn with_geodata_mut<F, R>(&mut self, op: F) -> ConfigModifyResult<(String, R)>
+    where
+        F: FnOnce(&mut Value) -> ConfigModifyResult<R>,
+    {
+        let source_file = if let Some(section) = self.sections.geodata() {
+            section.source_file().to_owned()
+        } else {
+            resolve_geodata_target_file(&self.file_roots)?
+        };
+
+        let result = {
+            if self.sections.geodata().is_none() {
+                let value = Value::Object(serde_json::Map::new());
+                self.sections
+                    .set_geodata(Some(SourcedSection::new(source_file.clone(), value)));
+            }
+
+            let section = self.sections_mut().geodata_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "geodata section missing after create".to_owned(),
+                )
+            })?;
+            op(section.value_mut())?
+        };
+
+        let merged = self
+            .sections
+            .geodata()
+            .map(|section| section.value().clone())
+            .ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "geodata section missing after edit".to_owned(),
+                )
+            })?;
+
+        {
+            let root = self.file_roots.get_mut(&source_file).ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    format!("source file root missing: {source_file}"),
+                )
+            })?;
+            let object = root.as_object_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "config root must be a JSON object".to_owned(),
+                )
+            })?;
+            object.insert("geodata".to_owned(), merged);
+        }
+
+        Ok((source_file, result))
+    }
+
+    /// Applies `op` to the `burstObservatory` object, creating it when absent, then syncs the
+    /// file root (Roadmap §2.1:51). Mirrors [`with_dns_mut`](Self::with_dns_mut) —
+    /// `burstObservatory` is always an object. The `burstObservatory` object is not created
+    /// merely by opening the BurstObservatory page — only when this method runs during a save.
+    pub fn with_burst_observatory_mut<F, R>(&mut self, op: F) -> ConfigModifyResult<(String, R)>
+    where
+        F: FnOnce(&mut Value) -> ConfigModifyResult<R>,
+    {
+        let source_file = if let Some(section) = self.sections.burst_observatory() {
+            section.source_file().to_owned()
+        } else {
+            resolve_burst_observatory_target_file(&self.file_roots)?
+        };
+
+        let result = {
+            if self.sections.burst_observatory().is_none() {
+                let value = Value::Object(serde_json::Map::new());
+                self.sections
+                    .set_burst_observatory(Some(SourcedSection::new(source_file.clone(), value)));
+            }
+
+            let section = self.sections_mut().burst_observatory_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "burstObservatory section missing after create".to_owned(),
+                )
+            })?;
+            op(section.value_mut())?
+        };
+
+        let merged = self
+            .sections
+            .burst_observatory()
+            .map(|section| section.value().clone())
+            .ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "burstObservatory section missing after edit".to_owned(),
+                )
+            })?;
+
+        {
+            let root = self.file_roots.get_mut(&source_file).ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    format!("source file root missing: {source_file}"),
+                )
+            })?;
+            let object = root.as_object_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "config root must be a JSON object".to_owned(),
+                )
+            })?;
+            object.insert("burstObservatory".to_owned(), merged);
+        }
+
+        Ok((source_file, result))
+    }
+
+    /// Applies `op` to the `stats` value, letting it decide the key's fate entirely (Roadmap
+    /// §2.1:52). Unlike every other `with_*_mut` in this module, `stats` is not always an
+    /// object: `StatsObject` has no documented fields (see `stats_settings.rs` module docs), and
+    /// its only meaningful state is presence vs. absence, so `op` receives `&mut Option<Value>`
+    /// rather than `&mut Value` — setting it to `None` **removes** the key from the config
+    /// entirely (rather than leaving an object with no fields set, the way e.g. `dns` never gets
+    /// removed once created). The `stats` value is not created merely by opening the Stats
+    /// Settings page — only when this method runs during a save.
+    pub fn with_stats_mut<F, R>(&mut self, op: F) -> ConfigModifyResult<(String, R)>
+    where
+        F: FnOnce(&mut Option<Value>) -> ConfigModifyResult<R>,
+    {
+        let source_file = if let Some(section) = self.sections.stats() {
+            section.source_file().to_owned()
+        } else {
+            resolve_stats_target_file(&self.file_roots)?
+        };
+
+        let mut value = self.sections.stats().map(|section| section.value().clone());
+        let result = op(&mut value)?;
+
+        match &value {
+            Some(new_value) => {
+                self.sections
+                    .set_stats(Some(SourcedSection::new(source_file.clone(), new_value.clone())));
+            }
+            None => {
+                self.sections.set_stats(None);
+            }
+        }
+
+        {
+            let root = self.file_roots.get_mut(&source_file).ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    format!("source file root missing: {source_file}"),
+                )
+            })?;
+            let object = root.as_object_mut().ok_or_else(|| {
+                ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "config root must be a JSON object".to_owned(),
+                )
+            })?;
+            match value {
+                Some(new_value) => {
+                    object.insert("stats".to_owned(), new_value);
+                }
+                None => {
+                    object.remove("stats");
+                }
+            }
         }
 
         Ok((source_file, result))
@@ -1122,6 +1920,248 @@ fn resolve_log_target_file(file_roots: &BTreeMap<String, Value>) -> ConfigModify
     if let Some(path) = file_roots
         .keys()
         .find(|path| path.to_ascii_lowercase().contains("log"))
+    {
+        return Ok(path.clone());
+    }
+    Ok(file_roots.keys().next().expect("non-empty").clone())
+}
+
+fn resolve_api_target_file(file_roots: &BTreeMap<String, Value>) -> ConfigModifyResult<String> {
+    if file_roots.is_empty() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "no configuration files available to host an api section".to_owned(),
+        ));
+    }
+    if file_roots.len() == 1 {
+        return Ok(file_roots.keys().next().expect("len == 1").clone());
+    }
+    // Prefer an existing file whose name suggests API ownership.
+    if let Some(path) = file_roots
+        .keys()
+        .find(|path| path.to_ascii_lowercase().contains("api"))
+    {
+        return Ok(path.clone());
+    }
+    Ok(file_roots.keys().next().expect("non-empty").clone())
+}
+
+fn resolve_dns_target_file(file_roots: &BTreeMap<String, Value>) -> ConfigModifyResult<String> {
+    if file_roots.is_empty() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "no configuration files available to host a dns section".to_owned(),
+        ));
+    }
+    if file_roots.len() == 1 {
+        return Ok(file_roots.keys().next().expect("len == 1").clone());
+    }
+    // Prefer an existing file whose name suggests DNS ownership.
+    if let Some(path) = file_roots
+        .keys()
+        .find(|path| path.to_ascii_lowercase().contains("dns"))
+    {
+        return Ok(path.clone());
+    }
+    Ok(file_roots.keys().next().expect("non-empty").clone())
+}
+
+fn resolve_fakedns_target_file(file_roots: &BTreeMap<String, Value>) -> ConfigModifyResult<String> {
+    if file_roots.is_empty() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "no configuration files available to host a fakedns section".to_owned(),
+        ));
+    }
+    if file_roots.len() == 1 {
+        return Ok(file_roots.keys().next().expect("len == 1").clone());
+    }
+    // Prefer an existing file whose name suggests FakeDNS ownership.
+    if let Some(path) = file_roots
+        .keys()
+        .find(|path| path.to_ascii_lowercase().contains("fakedns"))
+    {
+        return Ok(path.clone());
+    }
+    Ok(file_roots.keys().next().expect("non-empty").clone())
+}
+
+fn resolve_routing_target_file(file_roots: &BTreeMap<String, Value>) -> ConfigModifyResult<String> {
+    if file_roots.is_empty() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "no configuration files available to host a routing section".to_owned(),
+        ));
+    }
+    if file_roots.len() == 1 {
+        return Ok(file_roots.keys().next().expect("len == 1").clone());
+    }
+    // Prefer an existing file whose name suggests routing ownership.
+    if let Some(path) = file_roots
+        .keys()
+        .find(|path| path.to_ascii_lowercase().contains("routing"))
+    {
+        return Ok(path.clone());
+    }
+    Ok(file_roots.keys().next().expect("non-empty").clone())
+}
+
+fn resolve_policy_target_file(file_roots: &BTreeMap<String, Value>) -> ConfigModifyResult<String> {
+    if file_roots.is_empty() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "no configuration files available to host a policy section".to_owned(),
+        ));
+    }
+    if file_roots.len() == 1 {
+        return Ok(file_roots.keys().next().expect("len == 1").clone());
+    }
+    // Prefer an existing file whose name suggests policy ownership.
+    if let Some(path) = file_roots
+        .keys()
+        .find(|path| path.to_ascii_lowercase().contains("policy"))
+    {
+        return Ok(path.clone());
+    }
+    Ok(file_roots.keys().next().expect("non-empty").clone())
+}
+
+fn resolve_observatory_target_file(file_roots: &BTreeMap<String, Value>) -> ConfigModifyResult<String> {
+    if file_roots.is_empty() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "no configuration files available to host an observatory section".to_owned(),
+        ));
+    }
+    if file_roots.len() == 1 {
+        return Ok(file_roots.keys().next().expect("len == 1").clone());
+    }
+    // Prefer an existing file whose name suggests observatory ownership.
+    if let Some(path) = file_roots
+        .keys()
+        .find(|path| path.to_ascii_lowercase().contains("observatory"))
+    {
+        return Ok(path.clone());
+    }
+    Ok(file_roots.keys().next().expect("non-empty").clone())
+}
+
+fn resolve_burst_observatory_target_file(
+    file_roots: &BTreeMap<String, Value>,
+) -> ConfigModifyResult<String> {
+    if file_roots.is_empty() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "no configuration files available to host a burstObservatory section".to_owned(),
+        ));
+    }
+    if file_roots.len() == 1 {
+        return Ok(file_roots.keys().next().expect("len == 1").clone());
+    }
+    // Prefer an existing file whose name suggests burstObservatory ownership.
+    if let Some(path) = file_roots
+        .keys()
+        .find(|path| path.to_ascii_lowercase().contains("burst"))
+    {
+        return Ok(path.clone());
+    }
+    Ok(file_roots.keys().next().expect("non-empty").clone())
+}
+
+fn resolve_stats_target_file(file_roots: &BTreeMap<String, Value>) -> ConfigModifyResult<String> {
+    if file_roots.is_empty() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "no configuration files available to host a stats section".to_owned(),
+        ));
+    }
+    if file_roots.len() == 1 {
+        return Ok(file_roots.keys().next().expect("len == 1").clone());
+    }
+    // Prefer an existing file whose name suggests stats ownership.
+    if let Some(path) = file_roots
+        .keys()
+        .find(|path| path.to_ascii_lowercase().contains("stats"))
+    {
+        return Ok(path.clone());
+    }
+    Ok(file_roots.keys().next().expect("non-empty").clone())
+}
+
+fn resolve_metrics_target_file(file_roots: &BTreeMap<String, Value>) -> ConfigModifyResult<String> {
+    if file_roots.is_empty() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "no configuration files available to host a metrics section".to_owned(),
+        ));
+    }
+    if file_roots.len() == 1 {
+        return Ok(file_roots.keys().next().expect("len == 1").clone());
+    }
+    // Prefer an existing file whose name suggests metrics ownership.
+    if let Some(path) = file_roots
+        .keys()
+        .find(|path| path.to_ascii_lowercase().contains("metrics"))
+    {
+        return Ok(path.clone());
+    }
+    Ok(file_roots.keys().next().expect("non-empty").clone())
+}
+
+fn resolve_env_target_file(file_roots: &BTreeMap<String, Value>) -> ConfigModifyResult<String> {
+    if file_roots.is_empty() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "no configuration files available to host an env section".to_owned(),
+        ));
+    }
+    if file_roots.len() == 1 {
+        return Ok(file_roots.keys().next().expect("len == 1").clone());
+    }
+    // Prefer an existing file whose name suggests env ownership.
+    if let Some(path) = file_roots
+        .keys()
+        .find(|path| path.to_ascii_lowercase().contains("env"))
+    {
+        return Ok(path.clone());
+    }
+    Ok(file_roots.keys().next().expect("non-empty").clone())
+}
+
+fn resolve_geodata_target_file(file_roots: &BTreeMap<String, Value>) -> ConfigModifyResult<String> {
+    if file_roots.is_empty() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "no configuration files available to host a geodata section".to_owned(),
+        ));
+    }
+    if file_roots.len() == 1 {
+        return Ok(file_roots.keys().next().expect("len == 1").clone());
+    }
+    // Prefer an existing file whose name suggests geodata ownership.
+    if let Some(path) = file_roots
+        .keys()
+        .find(|path| path.to_ascii_lowercase().contains("geodata"))
+    {
+        return Ok(path.clone());
+    }
+    Ok(file_roots.keys().next().expect("non-empty").clone())
+}
+
+fn resolve_version_target_file(file_roots: &BTreeMap<String, Value>) -> ConfigModifyResult<String> {
+    if file_roots.is_empty() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "no configuration files available to host a version section".to_owned(),
+        ));
+    }
+    if file_roots.len() == 1 {
+        return Ok(file_roots.keys().next().expect("len == 1").clone());
+    }
+    // Prefer an existing file whose name suggests version ownership.
+    if let Some(path) = file_roots
+        .keys()
+        .find(|path| path.to_ascii_lowercase().contains("version"))
     {
         return Ok(path.clone());
     }

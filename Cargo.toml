@@ -4,11 +4,12 @@ resolver = "3"
 
 [package]
 name = "feldjaeger"
-version = "0.4.3"
+version = "0.5.14"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "Local desktop control panel for managing remote Xray servers over SSH"
 readme = "README.md"
+repository = "https://github.com/berbunda/Feldjaeger"
 
 [[bin]]
 name = "feldjaeger"
@@ -31,6 +32,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "std
 uuid = { version = "1.24.1", features = ["v4"] }
 base64 = "0.23.1"
 x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets"] }
+rustls = { version = "0.23.43", default-features = false, features = ["aws-lc-rs", "std", "logging"] }
+x509-parser = "0.18.1"
 
 [dev-dependencies]
 tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "macros", "time"] }

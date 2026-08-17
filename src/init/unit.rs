@@ -307,6 +307,21 @@ pub async fn probe_can_write_unit_dir<S: SshSession + Sync>(session: &S) -> Unit
     Ok(result.exit_code == 0)
 }
 
+/// Reads the current unit file body, if it exists (Roadmap §3:126 — before/after diff for
+/// Edit unit). `Ok(None)` when the unit file does not exist yet (Create flow: nothing to diff
+/// against). Read-only; never called from the Apply/write path.
+pub async fn read_unit_file<S: SshSession + Sync>(
+    session: &S,
+    unit_name: &ServiceName,
+) -> UnitFileResult<Option<String>> {
+    let path = unit_file_path(unit_name)?;
+    if !probe_unit_file_exists(session, unit_name).await? {
+        return Ok(None);
+    }
+    let bytes = session.read_file(&path).await.map_err(map_ssh)?;
+    Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
+}
+
 /// Full host probe for a unit name.
 pub async fn probe_unit_host<S: SshSession + Sync>(
     session: &S,

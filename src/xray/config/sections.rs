@@ -16,6 +16,9 @@ use super::summary::{
 ///
 /// Any other top-level key is stored in [`XrayConfigSections::extra_sections`].
 pub const KNOWN_SECTION_NAMES: &[&str] = &[
+    "env",
+    "version",
+    "geodata",
     "log",
     "api",
     "dns",
@@ -42,6 +45,9 @@ pub const KNOWN_SECTION_NAMES: &[&str] = &[
 /// needs stronger typing (Users, Inbounds, DNS, …).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct XrayConfigSections {
+    env: Option<SourcedSection<Value>>,
+    version: Option<SourcedSection<Value>>,
+    geodata: Option<SourcedSection<Value>>,
     log: Option<SourcedSection<Value>>,
     api: Option<SourcedSection<Value>>,
     dns: Option<SourcedSection<Value>>,
@@ -67,7 +73,10 @@ impl XrayConfigSections {
 
     /// Returns `true` when no sections or array entries are present.
     pub fn is_empty(&self) -> bool {
-        self.log.is_none()
+        self.env.is_none()
+            && self.version.is_none()
+            && self.geodata.is_none()
+            && self.log.is_none()
             && self.api.is_none()
             && self.dns.is_none()
             && self.fakedns.is_none()
@@ -81,6 +90,36 @@ impl XrayConfigSections {
             && self.inbounds.is_empty()
             && self.outbounds.is_empty()
             && self.extra_sections.is_empty()
+    }
+
+    /// `env` section, if present.
+    pub fn env(&self) -> Option<&SourcedSection<Value>> {
+        self.env.as_ref()
+    }
+
+    /// Mutable `env` section, if present.
+    pub fn env_mut(&mut self) -> Option<&mut SourcedSection<Value>> {
+        self.env.as_mut()
+    }
+
+    /// `version` section, if present.
+    pub fn version(&self) -> Option<&SourcedSection<Value>> {
+        self.version.as_ref()
+    }
+
+    /// Mutable `version` section, if present.
+    pub fn version_mut(&mut self) -> Option<&mut SourcedSection<Value>> {
+        self.version.as_mut()
+    }
+
+    /// `geodata` section, if present.
+    pub fn geodata(&self) -> Option<&SourcedSection<Value>> {
+        self.geodata.as_ref()
+    }
+
+    /// Mutable `geodata` section, if present.
+    pub fn geodata_mut(&mut self) -> Option<&mut SourcedSection<Value>> {
+        self.geodata.as_mut()
     }
 
     /// `log` section, if present.
@@ -98,9 +137,19 @@ impl XrayConfigSections {
         self.api.as_ref()
     }
 
+    /// Mutable `api` section, if present.
+    pub fn api_mut(&mut self) -> Option<&mut SourcedSection<Value>> {
+        self.api.as_mut()
+    }
+
     /// `dns` section, if present.
     pub fn dns(&self) -> Option<&SourcedSection<Value>> {
         self.dns.as_ref()
+    }
+
+    /// Mutable `dns` section, if present.
+    pub fn dns_mut(&mut self) -> Option<&mut SourcedSection<Value>> {
+        self.dns.as_mut()
     }
 
     /// `fakedns` section, if present.
@@ -111,9 +160,19 @@ impl XrayConfigSections {
         self.fakedns.as_ref()
     }
 
+    /// Mutable `fakedns` section, if present.
+    pub fn fakedns_mut(&mut self) -> Option<&mut SourcedSection<Value>> {
+        self.fakedns.as_mut()
+    }
+
     /// `routing` section, if present.
     pub fn routing(&self) -> Option<&SourcedSection<Value>> {
         self.routing.as_ref()
+    }
+
+    /// Mutable `routing` section, if present.
+    pub fn routing_mut(&mut self) -> Option<&mut SourcedSection<Value>> {
+        self.routing.as_mut()
     }
 
     /// `policy` section, if present.
@@ -121,9 +180,19 @@ impl XrayConfigSections {
         self.policy.as_ref()
     }
 
+    /// Mutable `policy` section, if present.
+    pub fn policy_mut(&mut self) -> Option<&mut SourcedSection<Value>> {
+        self.policy.as_mut()
+    }
+
     /// `stats` section, if present.
     pub fn stats(&self) -> Option<&SourcedSection<Value>> {
         self.stats.as_ref()
+    }
+
+    /// Mutable `stats` section, if present.
+    pub fn stats_mut(&mut self) -> Option<&mut SourcedSection<Value>> {
+        self.stats.as_mut()
     }
 
     /// `reverse` section, if present.
@@ -136,14 +205,29 @@ impl XrayConfigSections {
         self.observatory.as_ref()
     }
 
+    /// Mutable `observatory` section, if present.
+    pub fn observatory_mut(&mut self) -> Option<&mut SourcedSection<Value>> {
+        self.observatory.as_mut()
+    }
+
     /// `burstObservatory` section, if present.
     pub fn burst_observatory(&self) -> Option<&SourcedSection<Value>> {
         self.burst_observatory.as_ref()
     }
 
+    /// Mutable `burstObservatory` section, if present.
+    pub fn burst_observatory_mut(&mut self) -> Option<&mut SourcedSection<Value>> {
+        self.burst_observatory.as_mut()
+    }
+
     /// `metrics` section, if present.
     pub fn metrics(&self) -> Option<&SourcedSection<Value>> {
         self.metrics.as_ref()
+    }
+
+    /// Mutable `metrics` section, if present.
+    pub fn metrics_mut(&mut self) -> Option<&mut SourcedSection<Value>> {
+        self.metrics.as_mut()
     }
 
     /// Inbound entries in preserved order.
@@ -233,6 +317,9 @@ impl XrayConfigSections {
         let mut labels = Vec::new();
 
         let scalar_sections: &[(&str, Option<&SourcedSection<Value>>)] = &[
+            ("env", self.env.as_ref()),
+            ("version", self.version.as_ref()),
+            ("geodata", self.geodata.as_ref()),
             ("log", self.log.as_ref()),
             ("api", self.api.as_ref()),
             ("dns", self.dns.as_ref()),
@@ -324,6 +411,18 @@ impl XrayConfigSections {
 
     pub(crate) fn set_metrics(&mut self, section: Option<SourcedSection<Value>>) {
         self.metrics = section;
+    }
+
+    pub(crate) fn set_env(&mut self, section: Option<SourcedSection<Value>>) {
+        self.env = section;
+    }
+
+    pub(crate) fn set_version(&mut self, section: Option<SourcedSection<Value>>) {
+        self.version = section;
+    }
+
+    pub(crate) fn set_geodata(&mut self, section: Option<SourcedSection<Value>>) {
+        self.geodata = section;
     }
 
     pub(crate) fn push_inbound(&mut self, inbound: SourcedSection<Value>) {

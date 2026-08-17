@@ -275,6 +275,30 @@ impl XrayConfigParser {
 
         for (key, section_value) in object {
             match key.as_str() {
+                "env" => self.assign_object_section(
+                    source_file,
+                    "env",
+                    section_value,
+                    sections,
+                    errors,
+                    |s, v| s.set_env(Some(v)),
+                ),
+                "version" => self.assign_object_section(
+                    source_file,
+                    "version",
+                    section_value,
+                    sections,
+                    errors,
+                    |s, v| s.set_version(Some(v)),
+                ),
+                "geodata" => self.assign_object_section(
+                    source_file,
+                    "geodata",
+                    section_value,
+                    sections,
+                    errors,
+                    |s, v| s.set_geodata(Some(v)),
+                ),
                 "log" => self.assign_object_section(
                     source_file,
                     "log",

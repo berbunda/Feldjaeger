@@ -138,6 +138,10 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
             }
             ui.add_space(8.0);
         }
+        if let Some(entries) = service.log_settings_diff_preview() {
+            super::json_diff_preview(ui, entries);
+            ui.add_space(8.0);
+        }
         show_edit_form(ui, service);
     } else {
         show_view(ui, &model.settings);
@@ -179,6 +183,15 @@ fn show_actions(
                     // Error already stored on the service for page display.
                     let _ = error;
                 }
+            }
+            if ui
+                .add_enabled(
+                    !service.is_log_settings_mutation_busy(),
+                    egui::Button::new("Preview changes"),
+                )
+                .clicked()
+            {
+                let _ = service.preview_log_settings_diff();
             }
             if ui
                 .add_enabled(!service.is_log_settings_mutation_busy(), egui::Button::new("Cancel"))

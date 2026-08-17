@@ -23,10 +23,40 @@ use super::inbound_security::{
     InboundSecurityDraft, InboundSecurityMode, apply_inbound_security,
 };
 use super::inbound_stream::{InboundStreamDraft, apply_inbound_stream, apply_tunnel_sockopt};
+use super::api_settings::{ApiSettings, apply_api_settings_to_value, validate_api_settings};
+use super::dns_settings::{DnsSettings, apply_dns_settings_to_value, validate_dns_settings};
+use super::fakedns_settings::{
+    FakeDnsSettings, apply_fakedns_settings_to_value, validate_fakedns_settings,
+};
 use super::log_settings::{apply_log_settings_to_value, validate_log_settings, LogSettings};
+use super::burst_observatory_settings::{
+    BurstObservatorySettings, apply_burst_observatory_settings_to_value,
+    validate_burst_observatory_settings,
+};
+use super::env_settings::{EnvSettings, apply_env_settings_to_value, validate_env_settings};
+use super::version_settings::{
+    VersionSettings, apply_version_settings_to_value, validate_version_settings,
+};
+use super::geodata_settings::{
+    GeodataSettings, apply_geodata_settings_to_value, validate_geodata_settings,
+};
+use super::metrics_settings::{
+    MetricsSettings, apply_metrics_settings_to_value, validate_metrics_settings,
+};
 use super::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
+use super::stats_settings::{StatsSettings, stats_settings_to_value, validate_stats_settings};
+use super::observatory_settings::{
+    ObservatorySettings, apply_observatory_settings_to_value, validate_observatory_settings,
+};
+use super::policy_settings::{
+    PolicySettings, apply_policy_settings_to_value, validate_policy_settings,
+};
+use super::routing_settings::{
+    RoutingSettings, apply_routing_settings_to_value, validate_routing_settings,
+};
 use super::outbound_edit::{OutboundGeneral, OutboundRef, apply_outbound_general};
 use super::outbound_protocol::{OutboundSettingsDraft, apply_outbound_settings, is_shell_editable_protocol};
+use super::reverse_proxy::{ReverseTagDraft, validate_reverse};
 use super::serialize::validate_serialized_json;
 use crate::xray::secret::SecretString;
 
@@ -43,6 +73,8 @@ pub struct AddUserRequest {
     pub flow: Option<String>,
     /// Policy level (default 0).
     pub level: u32,
+    /// Portal-side VLESS-native reverse registration (Roadmap §2.1:58); `None` = ordinary client.
+    pub reverse: Option<ReverseTagDraft>,
 }
 
 /// Enum client Add request (IB-L1: VLESS | Trojan | Hysteria).
@@ -89,6 +121,8 @@ pub struct UpdateUserRequest {
     pub flow: Option<String>,
     /// Policy level.
     pub level: u32,
+    /// Replacement reverse registration; `None` removes it, `Some` replaces it.
+    pub reverse: Option<ReverseTagDraft>,
     /// Fingerprint from edit intent; when `Some`, must match before write.
     pub expected_fingerprint: Option<String>,
 }
@@ -153,6 +187,90 @@ pub enum DeleteInboundClientRequest {
 pub struct UpdateLogSettingsRequest {
     /// Validated draft settings to write.
     pub settings: LogSettings,
+}
+
+/// Request to replace the top-level Xray `api` settings (Roadmap §2.1:54).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateApiSettingsRequest {
+    /// Validated draft settings to write.
+    pub settings: ApiSettings,
+}
+
+/// Request to replace the top-level Xray `dns` settings (Roadmap §2.1:46).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateDnsSettingsRequest {
+    /// Validated draft settings to write.
+    pub settings: DnsSettings,
+}
+
+/// Request to replace the top-level Xray `fakedns` value (Roadmap §2.1:47).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateFakeDnsSettingsRequest {
+    /// Validated draft settings to write.
+    pub settings: FakeDnsSettings,
+}
+
+/// Request to replace the top-level Xray `routing` object (Roadmap §2.1:48).
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateRoutingSettingsRequest {
+    /// Validated draft settings to write.
+    pub settings: RoutingSettings,
+}
+
+/// Request to replace the top-level Xray `policy` object (Roadmap §2.1:49).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdatePolicySettingsRequest {
+    /// Validated draft settings to write.
+    pub settings: PolicySettings,
+}
+
+/// Request to replace the top-level Xray `observatory` object (Roadmap §2.1:50).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateObservatorySettingsRequest {
+    /// Validated draft settings to write.
+    pub settings: ObservatorySettings,
+}
+
+/// Request to replace the top-level Xray `burstObservatory` object (Roadmap §2.1:51).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateBurstObservatorySettingsRequest {
+    /// Validated draft settings to write.
+    pub settings: BurstObservatorySettings,
+}
+
+/// Request to enable/disable the top-level Xray `stats` object (Roadmap §2.1:52).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateStatsSettingsRequest {
+    /// Validated draft settings to write.
+    pub settings: StatsSettings,
+}
+
+/// Request to replace the top-level Xray `metrics` object (Roadmap §2.1:53).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateMetricsSettingsRequest {
+    /// Validated draft settings to write.
+    pub settings: MetricsSettings,
+}
+
+/// Request to replace the top-level Xray `env` object (Roadmap §2.1:55).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateEnvSettingsRequest {
+    /// Validated draft settings to write.
+    pub settings: EnvSettings,
+}
+
+/// Request to replace the top-level Xray `version` object (Roadmap §2.1:56).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateVersionSettingsRequest {
+    /// Validated draft settings to write.
+    pub settings: VersionSettings,
+}
+
+/// Request to replace the top-level Xray `geodata` object (Roadmap §2.1:57).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateGeodataSettingsRequest {
+    /// Validated draft settings to write.
+    pub settings: GeodataSettings,
 }
 
 /// Request to append a WireGuard (or other) outbound object.
@@ -396,6 +514,9 @@ fn add_vless_client(
         None => Uuid::new_v4().to_string(),
     };
     let flow = normalize_optional_flow(request.flow);
+    if let Some(reverse) = &request.reverse {
+        validate_reverse(reverse)?;
+    }
 
     validate_no_uuid_conflict(config, request.inbound_index, &id, None)?;
     validate_no_email_conflict(config, request.inbound_index, &email, None)?;
@@ -405,6 +526,7 @@ fn add_vless_client(
         email: Some(email),
         flow,
         level: request.level,
+        reverse: request.reverse,
         extras: Map::new(),
     });
     let client = write_inbound_client(&typed);
@@ -546,6 +668,9 @@ fn update_vless_client(
 ) -> ConfigModifyResult<ModifyUserOutcome> {
     let email = normalize_email(&request.email)?;
     let flow = normalize_optional_flow(request.flow);
+    if let Some(reverse) = &request.reverse {
+        validate_reverse(reverse)?;
+    }
 
     validate_no_email_conflict(
         config,
@@ -580,6 +705,7 @@ fn update_vless_client(
         vless.email = Some(email.clone());
         vless.flow = flow.clone();
         vless.level = request.level;
+        vless.reverse = request.reverse.clone();
         // id and extras preserved from parse.
 
         *client = write_inbound_client(&InboundClient::Vless(vless));
@@ -1186,6 +1312,363 @@ pub fn update_log_settings(
     })
 }
 
+/// Replaces the top-level `api` object (Roadmap §2.1:54). Mirrors [`update_log_settings`] —
+/// same validate → mutate → serialize → structural re-check shape, backup/write/`xray run -test`
+/// handled by the shared remote pipeline the caller drives afterward.
+pub fn update_api_settings(
+    config: &mut EditableXrayConfig,
+    request: UpdateApiSettingsRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    validate_api_settings(&request.settings)?;
+
+    let original_by_file = snapshot_all_roots(config)?;
+
+    let (source_file, _) =
+        config.with_api_mut(|value| apply_api_settings_to_value(value, &request.settings))?;
+
+    let serialized = config.serialize_source_file(&source_file)?;
+    validate_serialized_json(&serialized)?;
+    validate_api_structure_after_edit(config, &source_file)?;
+
+    let original_serialized = original_by_file
+        .get(&source_file)
+        .cloned()
+        .unwrap_or_else(|| b"{}\n".to_vec());
+
+    Ok(ModifyConfigOutcome {
+        source_file,
+        serialized,
+        original_serialized,
+    })
+}
+
+/// Replaces the top-level `dns` object (Roadmap §2.1:46). Mirrors [`update_api_settings`] — same
+/// validate → mutate → serialize → structural re-check shape, backup/write/`xray run -test`
+/// handled by the shared remote pipeline the caller drives afterward.
+pub fn update_dns_settings(
+    config: &mut EditableXrayConfig,
+    request: UpdateDnsSettingsRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    validate_dns_settings(&request.settings)?;
+
+    let original_by_file = snapshot_all_roots(config)?;
+
+    let (source_file, _) =
+        config.with_dns_mut(|value| apply_dns_settings_to_value(value, &request.settings))?;
+
+    let serialized = config.serialize_source_file(&source_file)?;
+    validate_serialized_json(&serialized)?;
+    validate_dns_structure_after_edit(config, &source_file)?;
+
+    let original_serialized = original_by_file
+        .get(&source_file)
+        .cloned()
+        .unwrap_or_else(|| b"{}\n".to_vec());
+
+    Ok(ModifyConfigOutcome {
+        source_file,
+        serialized,
+        original_serialized,
+    })
+}
+
+/// Replaces the top-level `fakedns` value (Roadmap §2.1:47). Mirrors [`update_dns_settings`] —
+/// same validate → mutate → serialize → structural re-check shape — except the structural
+/// re-check accepts either JSON shape `fakedns` may legitimately take (object or array), since
+/// [`apply_fakedns_settings_to_value`] itself picks whichever is simplest for the current pool
+/// count.
+pub fn update_fakedns_settings(
+    config: &mut EditableXrayConfig,
+    request: UpdateFakeDnsSettingsRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    validate_fakedns_settings(&request.settings)?;
+
+    let original_by_file = snapshot_all_roots(config)?;
+
+    let (source_file, _) = config
+        .with_fakedns_mut(|value| apply_fakedns_settings_to_value(value, &request.settings))?;
+
+    let serialized = config.serialize_source_file(&source_file)?;
+    validate_serialized_json(&serialized)?;
+    validate_fakedns_structure_after_edit(config, &source_file)?;
+
+    let original_serialized = original_by_file
+        .get(&source_file)
+        .cloned()
+        .unwrap_or_else(|| b"{}\n".to_vec());
+
+    Ok(ModifyConfigOutcome {
+        source_file,
+        serialized,
+        original_serialized,
+    })
+}
+
+/// Replaces the top-level `routing` object (Roadmap §2.1:48). Mirrors [`update_dns_settings`] —
+/// same validate → mutate → serialize → structural re-check shape.
+pub fn update_routing_settings(
+    config: &mut EditableXrayConfig,
+    request: UpdateRoutingSettingsRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    validate_routing_settings(&request.settings)?;
+
+    let original_by_file = snapshot_all_roots(config)?;
+
+    let (source_file, _) = config
+        .with_routing_mut(|value| apply_routing_settings_to_value(value, &request.settings))?;
+
+    let serialized = config.serialize_source_file(&source_file)?;
+    validate_serialized_json(&serialized)?;
+    validate_routing_structure_after_edit(config, &source_file)?;
+
+    let original_serialized = original_by_file
+        .get(&source_file)
+        .cloned()
+        .unwrap_or_else(|| b"{}\n".to_vec());
+
+    Ok(ModifyConfigOutcome {
+        source_file,
+        serialized,
+        original_serialized,
+    })
+}
+
+/// Replaces the top-level `policy` object (Roadmap §2.1:49). Mirrors [`update_dns_settings`] —
+/// same validate → mutate → serialize → structural re-check shape.
+pub fn update_policy_settings(
+    config: &mut EditableXrayConfig,
+    request: UpdatePolicySettingsRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    validate_policy_settings(&request.settings)?;
+
+    let original_by_file = snapshot_all_roots(config)?;
+
+    let (source_file, _) =
+        config.with_policy_mut(|value| apply_policy_settings_to_value(value, &request.settings))?;
+
+    let serialized = config.serialize_source_file(&source_file)?;
+    validate_serialized_json(&serialized)?;
+    validate_policy_structure_after_edit(config, &source_file)?;
+
+    let original_serialized = original_by_file
+        .get(&source_file)
+        .cloned()
+        .unwrap_or_else(|| b"{}\n".to_vec());
+
+    Ok(ModifyConfigOutcome {
+        source_file,
+        serialized,
+        original_serialized,
+    })
+}
+
+/// Replaces the top-level `observatory` object (Roadmap §2.1:50). Mirrors
+/// [`update_dns_settings`] — same validate → mutate → serialize → structural re-check shape.
+pub fn update_observatory_settings(
+    config: &mut EditableXrayConfig,
+    request: UpdateObservatorySettingsRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    validate_observatory_settings(&request.settings)?;
+
+    let original_by_file = snapshot_all_roots(config)?;
+
+    let (source_file, _) = config
+        .with_observatory_mut(|value| apply_observatory_settings_to_value(value, &request.settings))?;
+
+    let serialized = config.serialize_source_file(&source_file)?;
+    validate_serialized_json(&serialized)?;
+    validate_observatory_structure_after_edit(config, &source_file)?;
+
+    let original_serialized = original_by_file
+        .get(&source_file)
+        .cloned()
+        .unwrap_or_else(|| b"{}\n".to_vec());
+
+    Ok(ModifyConfigOutcome {
+        source_file,
+        serialized,
+        original_serialized,
+    })
+}
+
+/// Replaces the top-level `burstObservatory` object (Roadmap §2.1:51). Mirrors
+/// [`update_dns_settings`] — same validate → mutate → serialize → structural re-check shape.
+pub fn update_burst_observatory_settings(
+    config: &mut EditableXrayConfig,
+    request: UpdateBurstObservatorySettingsRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    validate_burst_observatory_settings(&request.settings)?;
+
+    let original_by_file = snapshot_all_roots(config)?;
+
+    let (source_file, _) = config.with_burst_observatory_mut(|value| {
+        apply_burst_observatory_settings_to_value(value, &request.settings)
+    })?;
+
+    let serialized = config.serialize_source_file(&source_file)?;
+    validate_serialized_json(&serialized)?;
+    validate_burst_observatory_structure_after_edit(config, &source_file)?;
+
+    let original_serialized = original_by_file
+        .get(&source_file)
+        .cloned()
+        .unwrap_or_else(|| b"{}\n".to_vec());
+
+    Ok(ModifyConfigOutcome {
+        source_file,
+        serialized,
+        original_serialized,
+    })
+}
+
+/// Enables/disables the top-level `stats` object (Roadmap §2.1:52). Mirrors
+/// [`update_dns_settings`]'s validate → mutate → serialize → structural re-check shape, but the
+/// mutation itself may remove the key entirely (see [`EditableXrayConfig::with_stats_mut`]).
+pub fn update_stats_settings(
+    config: &mut EditableXrayConfig,
+    request: UpdateStatsSettingsRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    validate_stats_settings(&request.settings)?;
+
+    let original_by_file = snapshot_all_roots(config)?;
+
+    let (source_file, _) = config.with_stats_mut(|value| {
+        *value = stats_settings_to_value(&request.settings);
+        Ok(())
+    })?;
+
+    let serialized = config.serialize_source_file(&source_file)?;
+    validate_serialized_json(&serialized)?;
+    validate_stats_structure_after_edit(config, &source_file)?;
+
+    let original_serialized = original_by_file
+        .get(&source_file)
+        .cloned()
+        .unwrap_or_else(|| b"{}\n".to_vec());
+
+    Ok(ModifyConfigOutcome {
+        source_file,
+        serialized,
+        original_serialized,
+    })
+}
+
+/// Replaces the top-level `metrics` object (Roadmap §2.1:53). Mirrors [`update_dns_settings`] —
+/// same validate → mutate → serialize → structural re-check shape.
+pub fn update_metrics_settings(
+    config: &mut EditableXrayConfig,
+    request: UpdateMetricsSettingsRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    validate_metrics_settings(&request.settings)?;
+
+    let original_by_file = snapshot_all_roots(config)?;
+
+    let (source_file, _) = config
+        .with_metrics_mut(|value| apply_metrics_settings_to_value(value, &request.settings))?;
+
+    let serialized = config.serialize_source_file(&source_file)?;
+    validate_serialized_json(&serialized)?;
+    validate_metrics_structure_after_edit(config, &source_file)?;
+
+    let original_serialized = original_by_file
+        .get(&source_file)
+        .cloned()
+        .unwrap_or_else(|| b"{}\n".to_vec());
+
+    Ok(ModifyConfigOutcome {
+        source_file,
+        serialized,
+        original_serialized,
+    })
+}
+
+/// Replaces the top-level `env` object (Roadmap §2.1:55). Mirrors [`update_dns_settings`] — same
+/// validate → mutate → serialize → structural re-check shape.
+pub fn update_env_settings(
+    config: &mut EditableXrayConfig,
+    request: UpdateEnvSettingsRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    validate_env_settings(&request.settings)?;
+
+    let original_by_file = snapshot_all_roots(config)?;
+
+    let (source_file, _) =
+        config.with_env_mut(|value| apply_env_settings_to_value(value, &request.settings))?;
+
+    let serialized = config.serialize_source_file(&source_file)?;
+    validate_serialized_json(&serialized)?;
+    validate_env_structure_after_edit(config, &source_file)?;
+
+    let original_serialized = original_by_file
+        .get(&source_file)
+        .cloned()
+        .unwrap_or_else(|| b"{}\n".to_vec());
+
+    Ok(ModifyConfigOutcome {
+        source_file,
+        serialized,
+        original_serialized,
+    })
+}
+
+/// Replaces the top-level `version` object (Roadmap §2.1:56). Mirrors [`update_env_settings`] —
+/// same validate → mutate → serialize → structural re-check shape.
+pub fn update_version_settings(
+    config: &mut EditableXrayConfig,
+    request: UpdateVersionSettingsRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    validate_version_settings(&request.settings)?;
+
+    let original_by_file = snapshot_all_roots(config)?;
+
+    let (source_file, _) = config
+        .with_version_mut(|value| apply_version_settings_to_value(value, &request.settings))?;
+
+    let serialized = config.serialize_source_file(&source_file)?;
+    validate_serialized_json(&serialized)?;
+    validate_version_structure_after_edit(config, &source_file)?;
+
+    let original_serialized = original_by_file
+        .get(&source_file)
+        .cloned()
+        .unwrap_or_else(|| b"{}\n".to_vec());
+
+    Ok(ModifyConfigOutcome {
+        source_file,
+        serialized,
+        original_serialized,
+    })
+}
+
+/// Replaces the top-level `geodata` object (Roadmap §2.1:57). Mirrors [`update_version_settings`]
+/// — same validate → mutate → serialize → structural re-check shape.
+pub fn update_geodata_settings(
+    config: &mut EditableXrayConfig,
+    request: UpdateGeodataSettingsRequest,
+) -> ConfigModifyResult<ModifyConfigOutcome> {
+    validate_geodata_settings(&request.settings)?;
+
+    let original_by_file = snapshot_all_roots(config)?;
+
+    let (source_file, _) = config
+        .with_geodata_mut(|value| apply_geodata_settings_to_value(value, &request.settings))?;
+
+    let serialized = config.serialize_source_file(&source_file)?;
+    validate_serialized_json(&serialized)?;
+    validate_geodata_structure_after_edit(config, &source_file)?;
+
+    let original_serialized = original_by_file
+        .get(&source_file)
+        .cloned()
+        .unwrap_or_else(|| b"{}\n".to_vec());
+
+    Ok(ModifyConfigOutcome {
+        source_file,
+        serialized,
+        original_serialized,
+    })
+}
+
 /// Deep-copies a shell-editable outbound (Freedom, Blackhole, DNS) into the same source file
 /// with a unique tag. Roadmap §2.4:98.
 pub fn duplicate_outbound(
@@ -1454,6 +1937,7 @@ fn outbound_settings_protocol_name(settings: &OutboundSettingsDraft) -> &'static
         OutboundSettingsDraft::Freedom { .. } => "freedom",
         OutboundSettingsDraft::Blackhole { .. } => "blackhole",
         OutboundSettingsDraft::Dns { .. } => "dns",
+        OutboundSettingsDraft::Vless(_) => "vless",
     }
 }
 
@@ -1601,6 +2085,305 @@ fn validate_log_structure_after_edit(
         return Err(ConfigModifyError::new(
             ConfigModifyErrorKind::MalformedLogObject,
             "log section must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_api_structure_after_edit(
+    config: &EditableXrayConfig,
+    source_file: &str,
+) -> ConfigModifyResult<()> {
+    let root = config.file_roots().get(source_file).ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified source file missing from editable config".to_owned(),
+        )
+    })?;
+    let api = root.get("api").ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified file must contain an api object".to_owned(),
+        )
+    })?;
+    if !api.is_object() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "api section must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Unlike every other `validate_*_structure_after_edit` in this module, `stats` is legitimately
+/// allowed to be absent after a successful edit (that's what `enabled: false` means) — only its
+/// *shape*, when present, is checked.
+fn validate_env_structure_after_edit(
+    config: &EditableXrayConfig,
+    source_file: &str,
+) -> ConfigModifyResult<()> {
+    let root = config.file_roots().get(source_file).ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified source file missing from editable config".to_owned(),
+        )
+    })?;
+    let env = root.get("env").ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified file must contain an env object".to_owned(),
+        )
+    })?;
+    if !env.is_object() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::MalformedEnvObject,
+            "env section must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_version_structure_after_edit(
+    config: &EditableXrayConfig,
+    source_file: &str,
+) -> ConfigModifyResult<()> {
+    let root = config.file_roots().get(source_file).ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified source file missing from editable config".to_owned(),
+        )
+    })?;
+    let version = root.get("version").ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified file must contain a version object".to_owned(),
+        )
+    })?;
+    if !version.is_object() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::MalformedVersionObject,
+            "version section must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_geodata_structure_after_edit(
+    config: &EditableXrayConfig,
+    source_file: &str,
+) -> ConfigModifyResult<()> {
+    let root = config.file_roots().get(source_file).ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified source file missing from editable config".to_owned(),
+        )
+    })?;
+    let geodata = root.get("geodata").ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified file must contain a geodata object".to_owned(),
+        )
+    })?;
+    if !geodata.is_object() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::MalformedGeodataObject,
+            "geodata section must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_metrics_structure_after_edit(
+    config: &EditableXrayConfig,
+    source_file: &str,
+) -> ConfigModifyResult<()> {
+    let root = config.file_roots().get(source_file).ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified source file missing from editable config".to_owned(),
+        )
+    })?;
+    let metrics = root.get("metrics").ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified file must contain a metrics object".to_owned(),
+        )
+    })?;
+    if !metrics.is_object() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::MalformedMetricsObject,
+            "metrics section must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_stats_structure_after_edit(
+    config: &EditableXrayConfig,
+    source_file: &str,
+) -> ConfigModifyResult<()> {
+    let root = config.file_roots().get(source_file).ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified source file missing from editable config".to_owned(),
+        )
+    })?;
+    if let Some(stats) = root.get("stats")
+        && !stats.is_object()
+    {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::MalformedStatsObject,
+            "stats section must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_burst_observatory_structure_after_edit(
+    config: &EditableXrayConfig,
+    source_file: &str,
+) -> ConfigModifyResult<()> {
+    let root = config.file_roots().get(source_file).ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified source file missing from editable config".to_owned(),
+        )
+    })?;
+    let burst_observatory = root.get("burstObservatory").ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified file must contain a burstObservatory object".to_owned(),
+        )
+    })?;
+    if !burst_observatory.is_object() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::MalformedBurstObservatoryObject,
+            "burstObservatory section must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_observatory_structure_after_edit(
+    config: &EditableXrayConfig,
+    source_file: &str,
+) -> ConfigModifyResult<()> {
+    let root = config.file_roots().get(source_file).ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified source file missing from editable config".to_owned(),
+        )
+    })?;
+    let observatory = root.get("observatory").ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified file must contain an observatory object".to_owned(),
+        )
+    })?;
+    if !observatory.is_object() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::MalformedObservatoryObject,
+            "observatory section must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_policy_structure_after_edit(
+    config: &EditableXrayConfig,
+    source_file: &str,
+) -> ConfigModifyResult<()> {
+    let root = config.file_roots().get(source_file).ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified source file missing from editable config".to_owned(),
+        )
+    })?;
+    let policy = root.get("policy").ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified file must contain a policy object".to_owned(),
+        )
+    })?;
+    if !policy.is_object() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::MalformedPolicyObject,
+            "policy section must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_routing_structure_after_edit(
+    config: &EditableXrayConfig,
+    source_file: &str,
+) -> ConfigModifyResult<()> {
+    let root = config.file_roots().get(source_file).ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified source file missing from editable config".to_owned(),
+        )
+    })?;
+    let routing = root.get("routing").ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified file must contain a routing object".to_owned(),
+        )
+    })?;
+    if !routing.is_object() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::MalformedRoutingObject,
+            "routing section must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_dns_structure_after_edit(
+    config: &EditableXrayConfig,
+    source_file: &str,
+) -> ConfigModifyResult<()> {
+    let root = config.file_roots().get(source_file).ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified source file missing from editable config".to_owned(),
+        )
+    })?;
+    let dns = root.get("dns").ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified file must contain a dns object".to_owned(),
+        )
+    })?;
+    if !dns.is_object() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::MalformedDnsObject,
+            "dns section must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_fakedns_structure_after_edit(
+    config: &EditableXrayConfig,
+    source_file: &str,
+) -> ConfigModifyResult<()> {
+    let root = config.file_roots().get(source_file).ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified source file missing from editable config".to_owned(),
+        )
+    })?;
+    let fakedns = root.get("fakedns").ok_or_else(|| {
+        ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "modified file must contain a fakedns value".to_owned(),
+        )
+    })?;
+    if !fakedns.is_object() && !fakedns.is_array() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::MalformedFakeDnsObject,
+            "fakedns section must be a JSON object or an array of objects".to_owned(),
         ));
     }
     Ok(())

@@ -25,5 +25,5 @@ pub use systemd_probe::{
 pub use unit::{
     DEFAULT_UNIT_DESCRIPTION, DEFAULT_WANTED_BY, InstallUnitOptions, UnitConfigLayout,
     UnitHostProbe, UnitRunUser, UnitSpec, install_or_replace_unit, is_instance_unit_name,
-    preview_exec_start, probe_unit_host, render_unit, unit_file_path,
+    preview_exec_start, probe_unit_host, read_unit_file, render_unit, unit_file_path,
 };

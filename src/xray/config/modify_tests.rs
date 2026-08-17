@@ -69,6 +69,7 @@ fn add_user_appends_client_and_generates_uuid() {
             id: None,
             flow: None,
             level: 0,
+            reverse: None,
         },
     )
     .expect("add should succeed");
@@ -111,6 +112,7 @@ fn add_user_preserves_optional_flow_when_set() {
             id: Some("11111111-1111-4111-8111-111111111111".to_owned()),
             flow: Some("xtls-rprx-vision".to_owned()),
             level: 0,
+            reverse: None,
         },
     )
     .expect("add");
@@ -140,6 +142,7 @@ fn add_user_vision_on_xhttp_rejected_by_g3() {
             id: Some("11111111-1111-4111-8111-111111111111".to_owned()),
             flow: Some("xtls-rprx-vision".to_owned()),
             level: 0,
+            reverse: None,
         },
     )
     .expect_err("Vision + xhttp must fail G3");
@@ -178,6 +181,7 @@ fn update_user_vision_on_xhttp_rejected_by_g3() {
             email: "old@example.com".to_owned(),
             flow: Some("xtls-rprx-vision".to_owned()),
             level: 0,
+            reverse: None,
             expected_fingerprint: None,
         },
     )
@@ -221,6 +225,7 @@ fn update_user_changes_email_and_flow_keeps_uuid_and_unknown_fields() {
             email: "new@example.com".to_owned(),
             flow: Some("xtls-rprx-vision".to_owned()),
             level: 0,
+            reverse: None,
             expected_fingerprint: None,
         },
     )
@@ -256,6 +261,7 @@ fn update_user_clears_flow_when_empty() {
             email: "a@example.com".to_owned(),
             flow: None,
             level: 0,
+            reverse: None,
             expected_fingerprint: None,
         },
     )
@@ -342,6 +348,7 @@ fn unsupported_inbound_rejected() {
             id: None,
             flow: None,
             level: 0,
+            reverse: None,
         },
     )
     .expect_err("vmess unsupported");
@@ -378,6 +385,7 @@ fn config_directory_modifies_only_affected_file() {
             id: Some("u2".to_owned()),
             flow: None,
             level: 0,
+            reverse: None,
         },
     )
     .expect("add");
@@ -579,6 +587,7 @@ fn email_conflict_rejected() {
             id: None,
             flow: None,
             level: 0,
+            reverse: None,
         },
     )
     .expect_err("conflict");
@@ -1164,6 +1173,7 @@ fn add_freedom_outbound_shell_writes_settings() {
             general: OutboundGeneral {
                 tag: Some("direct".to_owned()),
                 send_through: Some("0.0.0.0".to_owned()),
+                proxy_settings: None,
             },
             settings: OutboundSettingsDraft::Freedom {
                 domain_strategy: "UseIP".to_owned(),
@@ -1230,6 +1240,7 @@ fn update_freedom_outbound_shell_edits_settings_and_preserves_unrelated_fields()
             general: OutboundGeneral {
                 tag: Some("direct".to_owned()),
                 send_through: None,
+                proxy_settings: None,
             },
             settings: OutboundSettingsDraft::Freedom {
                 domain_strategy: "UseIPv4".to_owned(),
@@ -1266,6 +1277,7 @@ fn update_freedom_outbound_shell_fingerprint_mismatch_rejected() {
             general: OutboundGeneral {
                 tag: Some("direct".to_owned()),
                 send_through: None,
+                proxy_settings: None,
             },
             settings: OutboundSettingsDraft::freedom_default(),
         },
@@ -1293,6 +1305,7 @@ fn update_freedom_outbound_shell_rejects_tag_rename() {
             general: OutboundGeneral {
                 tag: Some("direct-renamed".to_owned()),
                 send_through: None,
+                proxy_settings: None,
             },
             settings: OutboundSettingsDraft::freedom_default(),
         },
@@ -1313,6 +1326,7 @@ fn add_blackhole_outbound_shell_writes_settings() {
             general: OutboundGeneral {
                 tag: Some("block".to_owned()),
                 send_through: None,
+                proxy_settings: None,
             },
             settings: OutboundSettingsDraft::Blackhole {
                 response_type: "http".to_owned(),
@@ -1359,6 +1373,7 @@ fn update_blackhole_outbound_shell_edits_settings_and_preserves_unrelated_fields
             general: OutboundGeneral {
                 tag: Some("block".to_owned()),
                 send_through: None,
+                proxy_settings: None,
             },
             settings: OutboundSettingsDraft::Blackhole {
                 response_type: "http".to_owned(),
@@ -1386,6 +1401,7 @@ fn add_dns_outbound_shell_writes_settings() {
             general: OutboundGeneral {
                 tag: Some("dns-out".to_owned()),
                 send_through: None,
+                proxy_settings: None,
             },
             settings: OutboundSettingsDraft::Dns {
                 rewrite_network: "udp".to_owned(),
@@ -1448,6 +1464,7 @@ fn update_dns_outbound_shell_edits_settings_and_preserves_unrelated_fields() {
             general: OutboundGeneral {
                 tag: Some("dns-out".to_owned()),
                 send_through: None,
+                proxy_settings: None,
             },
             settings: OutboundSettingsDraft::Dns {
                 rewrite_network: "udp".to_owned(),
@@ -1483,6 +1500,7 @@ fn update_dns_outbound_shell_fingerprint_mismatch_rejected() {
             general: OutboundGeneral {
                 tag: Some("dns-out".to_owned()),
                 send_through: None,
+                proxy_settings: None,
             },
             settings: OutboundSettingsDraft::dns_default(),
         },
@@ -1509,6 +1527,7 @@ fn update_dns_outbound_shell_rejects_tag_rename() {
             general: OutboundGeneral {
                 tag: Some("dns-out-renamed".to_owned()),
                 send_through: None,
+                proxy_settings: None,
             },
             settings: OutboundSettingsDraft::dns_default(),
         },
@@ -1540,6 +1559,7 @@ fn lake1_ambiguous_clients_and_users_rejected() {
             id: None,
             flow: None,
             level: 0,
+            reverse: None,
         },
     )
     .expect_err("ambiguous");
@@ -1568,6 +1588,7 @@ fn lake1_fingerprint_mismatch_rejects_update() {
             email: "b@example.com".to_owned(),
             flow: None,
             level: 0,
+            reverse: None,
             expected_fingerprint: Some("deadbeef".to_owned()),
         },
     )
@@ -1605,6 +1626,7 @@ fn lake1_fingerprint_match_allows_update() {
             email: "b@example.com".to_owned(),
             flow: None,
             level: 0,
+            reverse: None,
             expected_fingerprint: Some(fingerprint),
         },
     )
@@ -1634,6 +1656,7 @@ fn lake1_level_round_trip_on_add_and_update() {
             id: Some("11111111-1111-4111-8111-111111111111".to_owned()),
             flow: None,
             level: 2,
+            reverse: None,
         },
     )
     .expect("add");
@@ -1650,6 +1673,7 @@ fn lake1_level_round_trip_on_add_and_update() {
             email: "lvl@example.com".to_owned(),
             flow: None,
             level: 5,
+            reverse: None,
             expected_fingerprint: None,
         },
     )
@@ -1682,6 +1706,7 @@ fn lake1_users_array_key_preserved() {
             id: Some("u2".to_owned()),
             flow: None,
             level: 0,
+            reverse: None,
         },
     )
     .expect("add");
@@ -2229,6 +2254,7 @@ fn shell_users_fingerprint_regression_still_works() {
             email: "b@example.com".to_owned(),
             flow: None,
             level: 0,
+            reverse: None,
             expected_fingerprint: Some(fingerprint),
         },
     )
@@ -3416,12 +3442,16 @@ fn duplicate_outbound_appends_unique_tag_copy() {
 fn duplicate_outbound_rejects_non_shell_protocol() {
     use super::modify::{DuplicateOutboundRequest, duplicate_outbound};
 
+    // wireguard, not vless: vless joined the shell-editable whitelist with the reverse-proxy
+    // Outbound Shell (Roadmap §2.1:58) — duplicate is a raw JSON clone, so it works for VLESS
+    // regardless of legacy vnext[] vs. flat settings form (unlike Edit, which is content-gated;
+    // see `outbound_protocol::vless::is_legacy_vnext_form`).
     let mut config = single_file_editable(
         r#"{
             "outbounds":[{
-                "tag":"vless-out",
-                "protocol":"vless",
-                "settings":{"vnext":[]}
+                "tag":"wg-out",
+                "protocol":"wireguard",
+                "settings":{"peers":[]}
             }]
         }"#,
     );
@@ -3432,6 +3462,26 @@ fn duplicate_outbound_rejects_non_shell_protocol() {
     .expect_err("not shell-editable");
     assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
     assert_eq!(config.sections().outbounds().len(), 1);
+}
+
+#[test]
+fn duplicate_outbound_allows_vless_legacy_vnext_form() {
+    use super::modify::{DuplicateOutboundRequest, duplicate_outbound};
+
+    // Duplicate is a raw JSON clone (no structured parsing), so it succeeds even for the legacy
+    // vnext[] form that the Outbound Shell's Edit path treats as unsupported.
+    let mut config = single_file_editable(
+        r#"{
+            "outbounds":[{
+                "tag":"vless-out",
+                "protocol":"vless",
+                "settings":{"vnext":[{"address":"a","port":443,"users":[{"id":"u"}]}]}
+            }]
+        }"#,
+    );
+    duplicate_outbound(&mut config, DuplicateOutboundRequest { outbound_index: 0 })
+        .expect("duplicate succeeds for any vless settings shape");
+    assert_eq!(config.sections().outbounds().len(), 2);
 }
 
 #[test]
