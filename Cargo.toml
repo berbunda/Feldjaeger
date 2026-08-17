@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "feldjaeger"
-version = "0.5.14"
+version = "0.5.15"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "Local desktop control panel for managing remote Xray servers over SSH"
