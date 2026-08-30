@@ -463,10 +463,16 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
         InboundsPageState::NoSshConnection
         | InboundsPageState::NoXrayInstallation
         | InboundsPageState::DiscoveryNotCompleted
-        | InboundsPageState::ConfigurationNotLoaded
-        | InboundsPageState::NoInbounds => {
+        | InboundsPageState::ConfigurationNotLoaded => {
             show_state_message(ui, model.state);
             return;
+        }
+        InboundsPageState::NoInbounds => {
+            // Configuration is loaded — the inbound list is just empty (e.g. a freshly
+            // created config). Show the hint but fall through so the "Add Inbound" button
+            // below stays reachable.
+            show_state_message(ui, model.state);
+            ui.add_space(8.0);
         }
         InboundsPageState::ConfigurationContainsWarnings => {
             show_state_message(ui, model.state);
@@ -479,8 +485,9 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
             }
             ui.add_space(8.0);
             if model.rows.is_empty() {
+                // Still fall through to the Add button — an empty list plus warnings
+                // must not lock the user out of creating the first inbound.
                 ui.label(RichText::new("No inbounds").size(14.0));
-                return;
             }
         }
         InboundsPageState::ConfigurationLoaded => {}
@@ -2043,6 +2050,13 @@ fn show_stream_readonly_method_grid(ui: &mut Ui, draft: &InboundStreamDraft) {
                     ui.label("scMaxBufferedPosts");
                     ui.label(draft.xhttp.core.sc_max_buffered_posts.to_string());
                     ui.end_row();
+                    ui.label("xmux");
+                    ui.label(if draft.xhttp.core.xmux.is_some() {
+                        "enabled"
+                    } else {
+                        "—"
+                    });
+                    ui.end_row();
                     ui.label("downloadSettings");
                     ui.label(if draft.xhttp.download.is_some() {
                         "enabled"
@@ -2283,12 +2297,22 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                             });
                     }
                     ui.add_space(8.0);
-                    if xhttp_spoiler_header(ui, "xmux", "XMUX", HELP_XHTTP_XMUX_SECTION, false) {
+                    ui.horizontal(|ui| {
+                        super::help_button(ui, "xmux", HELP_XHTTP_XMUX_SECTION);
+                        ui.heading("XMUX");
+                    });
+                    let mut xmux_enabled = session.stream.xhttp.core.xmux.is_some();
+                    if ui.checkbox(&mut xmux_enabled, "Enable XMUX").changed() {
+                        dirty = true;
+                        session.stream.xhttp.core.xmux =
+                            xmux_enabled.then(crate::xray::XmuxDraft::default);
+                    }
+                    if let Some(xmux) = session.stream.xhttp.core.xmux.as_mut() {
                         egui::Grid::new("stream_xhttp_xmux_grid")
                             .num_columns(2)
                             .spacing([16.0, 6.0])
                             .show(ui, |ui| {
-                                dirty |= xhttp_edit_xmux(ui, &mut session.stream.xhttp.core.xmux, "main");
+                                dirty |= xhttp_edit_xmux(ui, xmux, "main");
                             });
                     }
                     ui.add_space(8.0);
@@ -4466,8 +4490,11 @@ fn show_inbound_raw_json_tab(ui: &mut Ui, service: &mut ApplicationService, row:
     });
     ui.add_space(6.0);
 
-    if editing {
-        let mut state = raw_json_edit_state(ui).expect("checked above");
+    // Re-read the temp store here rather than trusting the frame-start `editing`
+    // snapshot: the button closure above may have cleared the state (Cancel, or a
+    // successful Save), in which case `editing` is now stale and an `.expect()` here
+    // would panic.
+    if let Some(mut state) = raw_json_edit_state(ui).filter(|s| s.inbound_index == row.index) {
         if let Some(error) = &state.error {
             ui.label(
                 RichText::new(error.clone())
@@ -5331,7 +5358,8 @@ fn show_delete_inbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
 
 // ─── XHTTP Stream helpers (Wave C3) ──────────────────────────────────────────
 
-/// Section heading with a spoiler-style disclosure arrow on the right of the title.
+/// Section heading with a spoiler-style disclosure arrow to the left of the title,
+/// so long key/value content on following rows cannot push it out of view.
 /// Returns whether the body should currently be drawn (open state).
 fn xhttp_spoiler_header(
     ui: &mut Ui,
@@ -5346,21 +5374,19 @@ fn xhttp_spoiler_header(
     let openness = state.openness(ui.ctx());
 
     ui.horizontal(|ui| {
+        let size = egui::Vec2::splat(ui.spacing().icon_width);
+        let (rect, _) = ui.allocate_exact_size(size, Sense::click());
+        let response = ui.interact(rect, id, Sense::click());
+        egui::collapsing_header::paint_default_icon(
+            ui,
+            openness,
+            &response.clone().with_new_rect(rect),
+        );
+        if response.clicked() {
+            state.toggle(ui);
+        }
         super::help_button(ui, title, help_text);
         ui.heading(title);
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let size = egui::Vec2::splat(ui.spacing().icon_width);
-            let (rect, _) = ui.allocate_exact_size(size, Sense::click());
-            let response = ui.interact(rect, id, Sense::click());
-            egui::collapsing_header::paint_default_icon(
-                ui,
-                openness,
-                &response.clone().with_new_rect(rect),
-            );
-            if response.clicked() {
-                state.toggle(ui);
-            }
-        });
     });
 
     state.store(ui.ctx());

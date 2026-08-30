@@ -110,9 +110,13 @@ pub fn run() -> eframe::Result {
     let service = ApplicationService::new();
     let ui = service.ui_config().clone();
 
+    let icon = eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon-256.png"))
+        .expect("bundled app icon is a valid PNG");
+
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Feldjäger")
-        .with_inner_size([ui.window_size.width, ui.window_size.height]);
+        .with_inner_size([ui.window_size.width, ui.window_size.height])
+        .with_icon(icon);
 
     if let Some(position) = ui.window_position {
         viewport = viewport.with_position([position.x, position.y]);

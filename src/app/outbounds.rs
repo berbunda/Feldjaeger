@@ -81,7 +81,7 @@ impl OutboundsPageState {
     pub fn shows_table(self) -> bool {
         matches!(
             self,
-            Self::ConfigurationLoaded | Self::ConfigurationContainsWarnings
+            Self::ConfigurationLoaded | Self::ConfigurationContainsWarnings | Self::NoOutbounds
         )
     }
 }

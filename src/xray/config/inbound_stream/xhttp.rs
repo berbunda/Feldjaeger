@@ -175,8 +175,9 @@ pub struct XhttpCoreSettings {
     pub sc_max_buffered_posts: i64,
     /// Server keepalive padding interval (stream-up, server); `-1` disables.
     pub sc_stream_up_server_secs: XhttpRange,
-    /// Connection pool / mux knobs.
-    pub xmux: XmuxDraft,
+    /// Connection pool / mux knobs. `None` = section disabled / omitted (xray uses its
+    /// own defaults); `Some` = "Enable XMUX" checkbox on (zero fields are still omitted).
+    pub xmux: Option<XmuxDraft>,
     /// Advanced padding obfuscation.
     pub x_padding_obfs_mode: bool,
     /// Padding key name when obfs mode is on.
@@ -231,7 +232,7 @@ impl Default for XhttpCoreSettings {
                 XHTTP_DEFAULT_SC_STREAM_UP_FROM,
                 XHTTP_DEFAULT_SC_STREAM_UP_TO,
             ),
-            xmux: XmuxDraft::default(),
+            xmux: None,
             x_padding_obfs_mode: false,
             x_padding_key: String::new(),
             x_padding_header: String::new(),
@@ -416,9 +417,10 @@ fn parse_core(object: &Map<String, Value>) -> XhttpCoreSettings {
     {
         core.sc_stream_up_server_secs = range;
     }
-    if let Some(xmux) = object.get("xmux").and_then(Value::as_object) {
-        core.xmux = parse_xmux(xmux);
-    }
+    core.xmux = object
+        .get("xmux")
+        .and_then(Value::as_object)
+        .map(parse_xmux);
     core.x_padding_obfs_mode = object
         .get("xPaddingObfsMode")
         .and_then(Value::as_bool)
@@ -652,7 +654,9 @@ fn core_to_object(core: &XhttpCoreSettings) -> Map<String, Value> {
         "scStreamUpServerSecs".to_owned(),
         range_to_value(core.sc_stream_up_server_secs),
     );
-    object.insert("xmux".to_owned(), Value::Object(xmux_to_object(&core.xmux)));
+    if let Some(xmux) = &core.xmux {
+        object.insert("xmux".to_owned(), Value::Object(xmux_to_object(xmux)));
+    }
     object.insert(
         "xPaddingObfsMode".to_owned(),
         Value::Bool(core.x_padding_obfs_mode),
@@ -688,32 +692,47 @@ fn core_to_object(core: &XhttpCoreSettings) -> Map<String, Value> {
     object
 }
 
+/// Serialize an enabled `xmux` section. Fields left at their zero default are omitted so
+/// xray-core keeps applying its own non-zero defaults for them; an untouched section
+/// therefore serializes as `{}` (which still round-trips back to "enabled").
 fn xmux_to_object(xmux: &XmuxDraft) -> Map<String, Value> {
     let mut object = Map::new();
-    object.insert(
-        "maxConcurrency".to_owned(),
-        range_to_value(xmux.max_concurrency),
-    );
-    object.insert(
-        "maxConnections".to_owned(),
-        range_to_value(xmux.max_connections),
-    );
-    object.insert(
-        "cMaxReuseTimes".to_owned(),
-        range_to_value(xmux.c_max_reuse_times),
-    );
-    object.insert(
-        "hMaxRequestTimes".to_owned(),
-        range_to_value(xmux.h_max_request_times),
-    );
-    object.insert(
-        "hMaxReusableSecs".to_owned(),
-        range_to_value(xmux.h_max_reusable_secs),
-    );
-    object.insert(
-        "hKeepAlivePeriod".to_owned(),
-        i64_to_value(xmux.h_keep_alive_period),
-    );
+    if !range_is_zero(xmux.max_concurrency) {
+        object.insert(
+            "maxConcurrency".to_owned(),
+            range_to_value(xmux.max_concurrency),
+        );
+    }
+    if !range_is_zero(xmux.max_connections) {
+        object.insert(
+            "maxConnections".to_owned(),
+            range_to_value(xmux.max_connections),
+        );
+    }
+    if !range_is_zero(xmux.c_max_reuse_times) {
+        object.insert(
+            "cMaxReuseTimes".to_owned(),
+            range_to_value(xmux.c_max_reuse_times),
+        );
+    }
+    if !range_is_zero(xmux.h_max_request_times) {
+        object.insert(
+            "hMaxRequestTimes".to_owned(),
+            range_to_value(xmux.h_max_request_times),
+        );
+    }
+    if !range_is_zero(xmux.h_max_reusable_secs) {
+        object.insert(
+            "hMaxReusableSecs".to_owned(),
+            range_to_value(xmux.h_max_reusable_secs),
+        );
+    }
+    if xmux.h_keep_alive_period != 0 {
+        object.insert(
+            "hKeepAlivePeriod".to_owned(),
+            i64_to_value(xmux.h_keep_alive_period),
+        );
+    }
     for (k, v) in &xmux.extras {
         if !object.contains_key(k) {
             object.insert(k.clone(), v.clone());
@@ -906,29 +925,30 @@ fn validate_core(core: &XhttpCoreSettings, prefix: &str) -> ConfigModifyResult<(
             ),
         ));
     }
-    let xmux = &core.xmux;
-    let conc_on = xmux.max_concurrency.from != 0 || xmux.max_concurrency.to != 0;
-    let conn_on = xmux.max_connections.from != 0 || xmux.max_connections.to != 0;
-    if conc_on && conn_on {
-        return Err(ConfigModifyError::new(
-            ConfigModifyErrorKind::ValidationFailed,
-            format!(
-                "{prefix}.xmux: maxConcurrency and maxConnections conflict — set only one"
-            ),
-        ));
+    if let Some(xmux) = &core.xmux {
+        let conc_on = !range_is_zero(xmux.max_concurrency);
+        let conn_on = !range_is_zero(xmux.max_connections);
+        if conc_on && conn_on {
+            return Err(ConfigModifyError::new(
+                ConfigModifyErrorKind::ValidationFailed,
+                format!(
+                    "{prefix}.xmux: maxConcurrency and maxConnections conflict — set only one"
+                ),
+            ));
+        }
+        validate_range(
+            xmux.max_concurrency,
+            &format!("{prefix}.xmux.maxConcurrency"),
+            0,
+            10_000,
+        )?;
+        validate_range(
+            xmux.max_connections,
+            &format!("{prefix}.xmux.maxConnections"),
+            0,
+            10_000,
+        )?;
     }
-    validate_range(
-        xmux.max_concurrency,
-        &format!("{prefix}.xmux.maxConcurrency"),
-        0,
-        10_000,
-    )?;
-    validate_range(
-        xmux.max_connections,
-        &format!("{prefix}.xmux.maxConnections"),
-        0,
-        10_000,
-    )?;
     Ok(())
 }
 
@@ -1005,6 +1025,12 @@ fn range_to_value(range: XhttpRange) -> Value {
     }
 }
 
+/// A range left at its zero default (`0`/`0-0`) — treated as "unset", omitted on write so
+/// xray-core applies its own per-field default.
+fn range_is_zero(range: XhttpRange) -> bool {
+    range.from == 0 && range.to == 0
+}
+
 fn i64_to_value(n: i64) -> Value {
     Value::Number(Number::from(n))
 }
@@ -1047,10 +1073,62 @@ mod tests {
         assert_eq!(object.get("scMaxBufferedPosts"), Some(&json!(30)));
         assert_eq!(object.get("scStreamUpServerSecs"), Some(&json!("20-80")));
         assert_eq!(object.get("noSSEHeader"), Some(&json!(false)));
+        assert!(
+            !object.contains_key("xmux"),
+            "xmux must be omitted when the section is disabled"
+        );
+        assert!(!object.contains_key("downloadSettings"));
         let parsed = parse_xhttp(&object);
         assert_eq!(parsed.core.path, "/");
         assert_eq!(parsed.core.mode, "auto");
         assert_eq!(parsed.core.x_padding_bytes, XhttpRange::span(100, 1000));
+        assert!(parsed.core.xmux.is_none());
+    }
+
+    #[test]
+    fn xmux_absent_when_disabled_and_round_trips_when_enabled() {
+        // Disabled: no key at all.
+        let mut settings = XhttpStreamSettings::default();
+        assert!(settings.core.xmux.is_none());
+        assert!(!xhttp_to_object(&settings).contains_key("xmux"));
+
+        // Enabled but untouched: empty object, still parses back as enabled.
+        settings.core.xmux = Some(XmuxDraft::default());
+        let object = xhttp_to_object(&settings);
+        assert_eq!(object.get("xmux"), Some(&json!({})));
+        assert!(parse_xhttp(&object).core.xmux.is_some());
+
+        // Enabled with one non-zero field: only that field is written.
+        let mut xmux = XmuxDraft::default();
+        xmux.h_keep_alive_period = 5;
+        settings.core.xmux = Some(xmux);
+        assert_eq!(
+            xhttp_to_object(&settings).get("xmux"),
+            Some(&json!({ "hKeepAlivePeriod": 5 }))
+        );
+    }
+
+    #[test]
+    fn xmux_parsed_from_disk_keeps_only_set_fields() {
+        let object = json!({
+            "path": "/",
+            "xmux": { "maxConcurrency": "16-32" }
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        let parsed = parse_xhttp(&object);
+        let xmux = parsed
+            .core
+            .xmux
+            .as_ref()
+            .expect("xmux present on disk => Some");
+        assert_eq!(xmux.max_concurrency, XhttpRange::span(16, 32));
+        assert!(range_is_zero(xmux.max_connections));
+        assert_eq!(
+            xhttp_to_object(&parsed).get("xmux"),
+            Some(&json!({ "maxConcurrency": "16-32" }))
+        );
     }
 
     #[test]
@@ -1079,10 +1157,12 @@ mod tests {
         settings.core.mode = "nope".to_owned();
         assert!(validate_xhttp_settings(&settings).is_err());
         settings.core.mode = "auto".to_owned();
-        settings.core.xmux.max_concurrency = XhttpRange::fixed(8);
-        settings.core.xmux.max_connections = XhttpRange::fixed(1);
+        let mut xmux = XmuxDraft::default();
+        xmux.max_concurrency = XhttpRange::fixed(8);
+        xmux.max_connections = XhttpRange::fixed(1);
+        settings.core.xmux = Some(xmux);
         assert!(validate_xhttp_settings(&settings).is_err());
-        settings.core.xmux.max_connections = XhttpRange::fixed(0);
+        settings.core.xmux.as_mut().unwrap().max_connections = XhttpRange::fixed(0);
         assert!(validate_xhttp_settings(&settings).is_ok());
     }
 

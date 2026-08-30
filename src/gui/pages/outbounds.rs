@@ -29,10 +29,16 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     match model.state {
         OutboundsPageState::NoSshConnection
         | OutboundsPageState::XrayNotDiscovered
-        | OutboundsPageState::ConfigurationNotLoaded
-        | OutboundsPageState::NoOutbounds => {
+        | OutboundsPageState::ConfigurationNotLoaded => {
             show_state_message(ui, model.state);
             return;
+        }
+        OutboundsPageState::NoOutbounds => {
+            // Configuration is loaded — the outbound list is just empty (e.g. a freshly
+            // created config). Show the hint but fall through so the "Add Outbound" menu
+            // below stays reachable.
+            show_state_message(ui, model.state);
+            ui.add_space(8.0);
         }
         OutboundsPageState::ConfigurationContainsWarnings => {
             show_state_message(ui, model.state);
@@ -45,8 +51,9 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
             }
             ui.add_space(8.0);
             if model.rows.is_empty() {
+                // Still fall through to the Add menu — an empty list plus warnings must
+                // not lock the user out of creating the first outbound.
                 ui.label(RichText::new("No outbounds").size(14.0));
-                return;
             }
         }
         OutboundsPageState::ConfigurationLoaded => {}

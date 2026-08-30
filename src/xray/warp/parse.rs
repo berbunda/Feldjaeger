@@ -204,6 +204,13 @@ pub fn proposed_change_from_credentials(
 }
 
 /// Applies the chosen outbound tag onto a credentials outbound value (clone).
+///
+/// Also forces the WireGuard userspace (gVisor) network stack via
+/// `settings.noKernelTun = true` unless the generated config set it explicitly.
+/// Kernel-mode TUN needs `CAP_NET_ADMIN`, mutates host routing, and on Linux
+/// hosts with an IPv6 tunnel address it can fail outright with
+/// `failed to find available ipv6 table index`; userspace mode is the right
+/// default for WARP used as an outbound proxy.
 pub fn outbound_value_with_tag(credentials: &WarpCredentials, tag: &str) -> Value {
     let mut value = credentials.outbound_value.clone();
     if let Some(object) = value.as_object_mut() {
@@ -213,6 +220,14 @@ pub fn outbound_value_with_tag(credentials: &WarpCredentials, tag: &str) -> Valu
                 "protocol".to_owned(),
                 Value::String("wireguard".to_owned()),
             );
+        }
+        if let Some(settings) = object
+            .get_mut("settings")
+            .and_then(Value::as_object_mut)
+        {
+            settings
+                .entry("noKernelTun")
+                .or_insert(Value::Bool(true));
         }
     }
     value
@@ -314,5 +329,27 @@ mod tests {
         let rendered = format!("{creds:?}");
         assert!(rendered.contains("[REDACTED]"));
         assert!(!rendered.contains("AAAAAAAA"));
+    }
+
+    #[test]
+    fn outbound_value_with_tag_forces_userspace_wireguard_stack() {
+        let creds = parse_generated_xray_value(sample_outbound(None, true)).unwrap();
+        let value = outbound_value_with_tag(&creds, "warp-out");
+        assert_eq!(value["tag"], json!("warp-out"));
+        assert_eq!(value["settings"]["noKernelTun"], json!(true));
+    }
+
+    #[test]
+    fn outbound_value_with_tag_keeps_explicit_kernel_tun_choice() {
+        let mut source = sample_outbound(None, true);
+        source
+            .pointer_mut("/settings")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("noKernelTun".to_owned(), json!(false));
+        let creds = parse_generated_xray_value(source).unwrap();
+        let value = outbound_value_with_tag(&creds, "warp-out");
+        assert_eq!(value["settings"]["noKernelTun"], json!(false));
     }
 }

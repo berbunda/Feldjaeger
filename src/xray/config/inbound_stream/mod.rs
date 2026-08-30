@@ -1191,7 +1191,10 @@ mod tests {
         assert_eq!(xhttp["xPaddingBytes"], "100-1000");
         assert_eq!(xhttp["scMaxBufferedPosts"], 30);
         assert_eq!(xhttp["noSSEHeader"], false);
-        assert!(xhttp.get("xmux").is_some());
+        assert!(
+            xhttp.get("xmux").is_none(),
+            "xmux is optional and must be omitted unless explicitly enabled"
+        );
     }
 
     #[test]

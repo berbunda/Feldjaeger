@@ -2,6 +2,7 @@
 
 use russh::client;
 use russh::keys::PublicKey;
+use russh::keys::PublicKeyOrCertificate;
 use russh::keys::known_hosts::check_known_hosts_path;
 use tracing::warn;
 
@@ -36,7 +37,7 @@ impl client::Handler for ClientHandler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &PublicKey,
+        server_public_key: &PublicKeyOrCertificate,
     ) -> Result<bool, Self::Error> {
         match &self.host_key_policy {
             HostKeyPolicy::AcceptAny => {
@@ -52,7 +53,7 @@ impl client::Handler for ClientHandler {
                 path,
                 &self.expected_host,
                 self.expected_port,
-                server_public_key,
+                &server_public_key.public_key(),
             )
             .map_err(host_key_error_to_russh),
         }

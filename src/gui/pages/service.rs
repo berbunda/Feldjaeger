@@ -310,11 +310,13 @@ fn show_actions(ui: &mut Ui, service: &mut ApplicationService, busy: bool) {
     ui.strong("Operations");
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
+        // Reload is intentionally omitted: xray-core has no config hot-reload and the
+        // unit file defines no ExecReload, so `systemctl reload` only ever errors.
+        // Use Restart to apply configuration changes.
         for operation in [
             ServiceOperation::Start,
             ServiceOperation::Stop,
             ServiceOperation::Restart,
-            ServiceOperation::Reload,
             ServiceOperation::Enable,
             ServiceOperation::Disable,
         ] {
