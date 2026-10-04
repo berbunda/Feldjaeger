@@ -148,7 +148,10 @@ use crate::xray::{
     parse_stats_query_stdout, parse_stats_sys_stdout,
     port_is_shell_editable, raw_port_display, update_api_settings, update_dns_settings,
     update_fakedns_settings, update_routing_settings, update_policy_settings,
-    update_inbound_shell,
+    update_inbound_shell, build_add_inbound_value, compose_inbound_shell, inbound_warnings,
+    outbound_warnings, with_warning_suffix, CompatibilityWarning, LegacyDomainStrategyMigration,
+    XrayCoreVersion,
+    apply_outbound_general, apply_outbound_settings,
     validate_api_settings, validate_dns_settings, validate_fakedns_settings, validate_log_settings,
     validate_routing_settings, RoutingSettings, UpdateRoutingSettingsRequest,
     validate_policy_settings, PolicySettings, UpdatePolicySettingsRequest,
@@ -163,7 +166,8 @@ use crate::xray::{
     update_geodata_settings, validate_geodata_settings, GeodataSettings, UpdateGeodataSettingsRequest,
 };
 
-/// How long a transient Status Bar message remains visible.
+/// How long [`CurrentOperation::Message`] stays active (drives idle repaint);
+/// the text itself remains visible as a sticky notification until dismissed.
 const STATUS_MESSAGE_DURATION: Duration = Duration::from_secs(3);
 
 /// Internal request payload for the user-mutation worker (VLESS + Trojan + Hysteria).
@@ -211,6 +215,67 @@ enum InboundShellMutationRequest {
     Sniffing(UpdateInboundSniffingRequest),
 }
 
+/// Result of [`ApplicationService::inbound_editor_warnings`] keyed by what it was computed from:
+/// the editor session and the on-disk inbound it edits (`None` for Add). Recomputed only when
+/// either changes — composing the draft clones the inbound and reruns every `apply_*`.
+struct InboundWarningsCache {
+    session: InboundEditorSession,
+    base: Option<serde_json::Value>,
+    /// Installed core the warnings were computed for (re-discovery can change it).
+    core: Option<XrayCoreVersion>,
+    warnings: Vec<CompatibilityWarning>,
+}
+
+/// Wire protocol of an editor session (Add sessions have no `inbound_ref`).
+fn session_client_protocol(session: &InboundEditorSession) -> InboundClientProtocol {
+    if let Some(inbound_ref) = &session.inbound_ref {
+        return inbound_ref.protocol;
+    }
+    match &session.protocol {
+        InboundProtocolDraft::Vless { .. } => InboundClientProtocol::Vless,
+        InboundProtocolDraft::Trojan { .. } => InboundClientProtocol::Trojan,
+        InboundProtocolDraft::Hysteria { .. } => InboundClientProtocol::Hysteria,
+        InboundProtocolDraft::Tunnel { .. } => InboundClientProtocol::Tunnel,
+        InboundProtocolDraft::Tun { .. } => InboundClientProtocol::Tun,
+    }
+}
+
+/// The Add request an Add session would submit.
+fn add_request_from_session(session: &InboundEditorSession) -> AddInboundRequest {
+    AddInboundRequest {
+        protocol: session_client_protocol(session),
+        general: session.general.clone(),
+        protocol_draft: session.protocol.clone(),
+        stream: session.stream.clone(),
+        sniffing: session.sniffing.clone(),
+        security: session.security.clone(),
+        preferred_source_file: None,
+    }
+}
+
+/// The inbound JSON a Save (`base` = on-disk inbound) or Add (`base` = `None`) of `session` would
+/// write, without the Save gates. `None` while the draft doesn't compose.
+fn compose_session_inbound(
+    session: &InboundEditorSession,
+    base: Option<&serde_json::Value>,
+) -> Option<serde_json::Value> {
+    if session.is_add {
+        return build_add_inbound_value(&add_request_from_session(session)).ok();
+    }
+    let mut inbound = base?.clone();
+    compose_inbound_shell(
+        &mut inbound,
+        session_client_protocol(session),
+        &session.general,
+        &session.protocol,
+        &session.stream,
+        session.security.as_ref(),
+        &session.sniffing,
+    )
+    .ok()?;
+    Some(inbound)
+}
+
 /// Top-level application service exposed to the GUI.
 ///
 /// Hides SSH, init-system, Xray, and config-file wiring from presentation code.
@@ -249,6 +314,8 @@ pub struct ApplicationService {
     inbound_shell_rx: Option<Receiver<InboundShellMutationOutcome>>,
     /// IB-L1 unified editor session (Shell Save / Add / Keygen).
     inbound_editor_session: Option<InboundEditorSession>,
+    /// Non-blocking warnings for the editor draft (Roadmap §2.6 stage 0.3).
+    inbound_warnings_cache: Option<InboundWarningsCache>,
     /// Reality PublicKey / vlessenc client encryption retained for Share URI.
     share_materials: super::share_material::ShareMaterialStore,
     /// In-flight unified inbound mutation (Shell / Add / GenerateX25519).
@@ -473,6 +540,7 @@ pub struct ApplicationService {
     xray_logs: XrayLogsRuntime,
     operation: CurrentOperation,
     status_message_until: Option<Instant>,
+    status_notification: Option<String>,
     ssh_status: SshStatus,
     xray_status: XrayStatus,
 }
@@ -615,6 +683,7 @@ impl std::fmt::Debug for ApplicationService {
             .field("xray_logs_ui", &self.xray_logs.ui_state)
             .field("operation", &self.operation)
             .field("status_message_until", &self.status_message_until)
+            .field("status_notification", &self.status_notification)
             .field("ssh_status", &self.ssh_status)
             .field("xray_status", &self.xray_status)
             .finish()
@@ -715,6 +784,7 @@ impl ApplicationService {
             inbound_shell_drafts: None,
             inbound_shell_rx: None,
             inbound_editor_session: None,
+            inbound_warnings_cache: None,
             share_materials: super::share_material::ShareMaterialStore::new(),
             inbound_mutation_rx: None,
             outbound_mutation_rx: None,
@@ -816,6 +886,7 @@ impl ApplicationService {
             xray_logs: XrayLogsRuntime::default(),
             operation: CurrentOperation::Ready,
             status_message_until: None,
+            status_notification: None,
             ssh_status: SshStatus::Disconnected,
             xray_status: XrayStatus::unknown(),
         };
@@ -1121,7 +1192,6 @@ impl ApplicationService {
         self.dns_settings_saved_flash = false;
         self.status_message_until = None;
         self.operation = CurrentOperation::SavingDnsSettings;
-        self.show_status_message("Saving DNS settings...");
 
         let client = self.ssh_client.clone();
         let secrets = self.connection_secrets.clone();
@@ -1222,11 +1292,9 @@ impl ApplicationService {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.dns_settings_rx = None;
-                if matches!(self.operation, CurrentOperation::SavingDnsSettings) {
-                    self.dns_settings_error =
-                        Some("Remote write failed: worker ended unexpectedly".to_owned());
-                    self.show_status_message("Remote write failed: worker ended unexpectedly");
-                }
+                self.dns_settings_error =
+                    Some("Remote write failed: worker ended unexpectedly".to_owned());
+                self.show_status_message("Remote write failed: worker ended unexpectedly");
             }
         }
     }
@@ -1371,7 +1439,6 @@ impl ApplicationService {
         self.fakedns_settings_saved_flash = false;
         self.status_message_until = None;
         self.operation = CurrentOperation::SavingFakeDnsSettings;
-        self.show_status_message("Saving FakeDNS settings...");
 
         let client = self.ssh_client.clone();
         let secrets = self.connection_secrets.clone();
@@ -1472,11 +1539,9 @@ impl ApplicationService {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.fakedns_settings_rx = None;
-                if matches!(self.operation, CurrentOperation::SavingFakeDnsSettings) {
-                    self.fakedns_settings_error =
-                        Some("Remote write failed: worker ended unexpectedly".to_owned());
-                    self.show_status_message("Remote write failed: worker ended unexpectedly");
-                }
+                self.fakedns_settings_error =
+                    Some("Remote write failed: worker ended unexpectedly".to_owned());
+                self.show_status_message("Remote write failed: worker ended unexpectedly");
             }
         }
     }
@@ -1620,7 +1685,6 @@ impl ApplicationService {
         self.stats_settings_saved_flash = false;
         self.status_message_until = None;
         self.operation = CurrentOperation::SavingStatsSettings;
-        self.show_status_message("Saving stats settings...");
 
         let client = self.ssh_client.clone();
         let secrets = self.connection_secrets.clone();
@@ -1721,11 +1785,9 @@ impl ApplicationService {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.stats_settings_rx = None;
-                if matches!(self.operation, CurrentOperation::SavingStatsSettings) {
-                    self.stats_settings_error =
-                        Some("Remote write failed: worker ended unexpectedly".to_owned());
-                    self.show_status_message("Remote write failed: worker ended unexpectedly");
-                }
+                self.stats_settings_error =
+                    Some("Remote write failed: worker ended unexpectedly".to_owned());
+                self.show_status_message("Remote write failed: worker ended unexpectedly");
             }
         }
     }
@@ -1869,7 +1931,6 @@ impl ApplicationService {
         self.metrics_settings_saved_flash = false;
         self.status_message_until = None;
         self.operation = CurrentOperation::SavingMetricsSettings;
-        self.show_status_message("Saving metrics settings...");
 
         let client = self.ssh_client.clone();
         let secrets = self.connection_secrets.clone();
@@ -1970,11 +2031,9 @@ impl ApplicationService {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.metrics_settings_rx = None;
-                if matches!(self.operation, CurrentOperation::SavingMetricsSettings) {
-                    self.metrics_settings_error =
-                        Some("Remote write failed: worker ended unexpectedly".to_owned());
-                    self.show_status_message("Remote write failed: worker ended unexpectedly");
-                }
+                self.metrics_settings_error =
+                    Some("Remote write failed: worker ended unexpectedly".to_owned());
+                self.show_status_message("Remote write failed: worker ended unexpectedly");
             }
         }
     }
@@ -2118,7 +2177,6 @@ impl ApplicationService {
         self.env_settings_saved_flash = false;
         self.status_message_until = None;
         self.operation = CurrentOperation::SavingEnvSettings;
-        self.show_status_message("Saving env settings...");
 
         let client = self.ssh_client.clone();
         let secrets = self.connection_secrets.clone();
@@ -2219,11 +2277,9 @@ impl ApplicationService {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.env_settings_rx = None;
-                if matches!(self.operation, CurrentOperation::SavingEnvSettings) {
-                    self.env_settings_error =
-                        Some("Remote write failed: worker ended unexpectedly".to_owned());
-                    self.show_status_message("Remote write failed: worker ended unexpectedly");
-                }
+                self.env_settings_error =
+                    Some("Remote write failed: worker ended unexpectedly".to_owned());
+                self.show_status_message("Remote write failed: worker ended unexpectedly");
             }
         }
     }
@@ -2367,7 +2423,6 @@ impl ApplicationService {
         self.version_settings_saved_flash = false;
         self.status_message_until = None;
         self.operation = CurrentOperation::SavingVersionSettings;
-        self.show_status_message("Saving version settings...");
 
         let client = self.ssh_client.clone();
         let secrets = self.connection_secrets.clone();
@@ -2468,11 +2523,9 @@ impl ApplicationService {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.version_settings_rx = None;
-                if matches!(self.operation, CurrentOperation::SavingVersionSettings) {
-                    self.version_settings_error =
-                        Some("Remote write failed: worker ended unexpectedly".to_owned());
-                    self.show_status_message("Remote write failed: worker ended unexpectedly");
-                }
+                self.version_settings_error =
+                    Some("Remote write failed: worker ended unexpectedly".to_owned());
+                self.show_status_message("Remote write failed: worker ended unexpectedly");
             }
         }
     }
@@ -2616,7 +2669,6 @@ impl ApplicationService {
         self.geodata_settings_saved_flash = false;
         self.status_message_until = None;
         self.operation = CurrentOperation::SavingGeodataSettings;
-        self.show_status_message("Saving geodata settings...");
 
         let client = self.ssh_client.clone();
         let secrets = self.connection_secrets.clone();
@@ -2717,11 +2769,9 @@ impl ApplicationService {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.geodata_settings_rx = None;
-                if matches!(self.operation, CurrentOperation::SavingGeodataSettings) {
-                    self.geodata_settings_error =
-                        Some("Remote write failed: worker ended unexpectedly".to_owned());
-                    self.show_status_message("Remote write failed: worker ended unexpectedly");
-                }
+                self.geodata_settings_error =
+                    Some("Remote write failed: worker ended unexpectedly".to_owned());
+                self.show_status_message("Remote write failed: worker ended unexpectedly");
             }
         }
     }
@@ -2853,7 +2903,6 @@ impl ApplicationService {
         self.routing_settings_saved_flash = false;
         self.status_message_until = None;
         self.operation = CurrentOperation::SavingRoutingSettings;
-        self.show_status_message("Saving routing settings...");
 
         let client = self.ssh_client.clone();
         let secrets = self.connection_secrets.clone();
@@ -2954,11 +3003,9 @@ impl ApplicationService {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.routing_settings_rx = None;
-                if matches!(self.operation, CurrentOperation::SavingRoutingSettings) {
-                    self.routing_settings_error =
-                        Some("Remote write failed: worker ended unexpectedly".to_owned());
-                    self.show_status_message("Remote write failed: worker ended unexpectedly");
-                }
+                self.routing_settings_error =
+                    Some("Remote write failed: worker ended unexpectedly".to_owned());
+                self.show_status_message("Remote write failed: worker ended unexpectedly");
             }
         }
     }
@@ -3090,7 +3137,6 @@ impl ApplicationService {
         self.policy_settings_saved_flash = false;
         self.status_message_until = None;
         self.operation = CurrentOperation::SavingPolicySettings;
-        self.show_status_message("Saving policy settings...");
 
         let client = self.ssh_client.clone();
         let secrets = self.connection_secrets.clone();
@@ -3191,11 +3237,9 @@ impl ApplicationService {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.policy_settings_rx = None;
-                if matches!(self.operation, CurrentOperation::SavingPolicySettings) {
-                    self.policy_settings_error =
-                        Some("Remote write failed: worker ended unexpectedly".to_owned());
-                    self.show_status_message("Remote write failed: worker ended unexpectedly");
-                }
+                self.policy_settings_error =
+                    Some("Remote write failed: worker ended unexpectedly".to_owned());
+                self.show_status_message("Remote write failed: worker ended unexpectedly");
             }
         }
     }
@@ -3342,7 +3386,6 @@ impl ApplicationService {
         self.observatory_settings_saved_flash = false;
         self.status_message_until = None;
         self.operation = CurrentOperation::SavingObservatorySettings;
-        self.show_status_message("Saving Observatory settings...");
 
         let client = self.ssh_client.clone();
         let secrets = self.connection_secrets.clone();
@@ -3443,11 +3486,9 @@ impl ApplicationService {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.observatory_settings_rx = None;
-                if matches!(self.operation, CurrentOperation::SavingObservatorySettings) {
-                    self.observatory_settings_error =
-                        Some("Remote write failed: worker ended unexpectedly".to_owned());
-                    self.show_status_message("Remote write failed: worker ended unexpectedly");
-                }
+                self.observatory_settings_error =
+                    Some("Remote write failed: worker ended unexpectedly".to_owned());
+                self.show_status_message("Remote write failed: worker ended unexpectedly");
             }
         }
     }
@@ -3594,7 +3635,6 @@ impl ApplicationService {
         self.burst_observatory_settings_saved_flash = false;
         self.status_message_until = None;
         self.operation = CurrentOperation::SavingBurstObservatorySettings;
-        self.show_status_message("Saving BurstObservatory settings...");
 
         let client = self.ssh_client.clone();
         let secrets = self.connection_secrets.clone();
@@ -3695,11 +3735,9 @@ impl ApplicationService {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.burst_observatory_settings_rx = None;
-                if matches!(self.operation, CurrentOperation::SavingBurstObservatorySettings) {
-                    self.burst_observatory_settings_error =
-                        Some("Remote write failed: worker ended unexpectedly".to_owned());
-                    self.show_status_message("Remote write failed: worker ended unexpectedly");
-                }
+                self.burst_observatory_settings_error =
+                    Some("Remote write failed: worker ended unexpectedly".to_owned());
+                self.show_status_message("Remote write failed: worker ended unexpectedly");
             }
         }
     }
@@ -3821,7 +3859,7 @@ impl ApplicationService {
             InboundClientProtocol::Vless
             | InboundClientProtocol::Trojan
             | InboundClientProtocol::Hysteria => Some(parse_inbound_security(&inbound_value)),
-            InboundClientProtocol::Tunnel => None,
+            InboundClientProtocol::Tunnel | InboundClientProtocol::Tun => None,
         };
         let vision_active = crate::xray::vision_active_from_inbound(&inbound_value);
         let material = self
@@ -3868,6 +3906,7 @@ impl ApplicationService {
             InboundClientProtocol::Trojan => InboundProtocolDraft::trojan_default(),
             InboundClientProtocol::Hysteria => InboundProtocolDraft::hysteria_default(),
             InboundClientProtocol::Tunnel => InboundProtocolDraft::tunnel_default(),
+            InboundClientProtocol::Tun => InboundProtocolDraft::tun_default(),
         };
         let security = match protocol {
             InboundClientProtocol::Vless => Some(InboundSecurityDraft {
@@ -3882,7 +3921,7 @@ impl ApplicationService {
                 mode: InboundSecurityMode::Tls,
                 ..Default::default()
             }),
-            InboundClientProtocol::Tunnel => None,
+            InboundClientProtocol::Tunnel | InboundClientProtocol::Tun => None,
         };
         let stream = match protocol {
             InboundClientProtocol::Hysteria => InboundStreamDraft {
@@ -4032,6 +4071,65 @@ impl ApplicationService {
         self.share_materials.get(tag, inbound_index)
     }
 
+    /// Non-blocking compatibility warnings for the inbound being edited, computed on the exact
+    /// JSON a Save / Add would write (Roadmap §2.6 stage 0.3). Empty without a session, or while
+    /// the draft doesn't compose yet (Save reports that error itself). Cached per session +
+    /// on-disk inbound snapshot, so calling it every frame is cheap.
+    pub fn inbound_editor_warnings(&mut self) -> Vec<CompatibilityWarning> {
+        let Some(session) = self.inbound_editor_session.as_ref() else {
+            self.inbound_warnings_cache = None;
+            return Vec::new();
+        };
+        let base = if session.is_add {
+            None
+        } else {
+            self.loaded_config
+                .editable()
+                .and_then(|editable| editable.sections().inbounds().get(session.inbound_index))
+                .map(|inbound| inbound.value())
+        };
+        let core = self.xray_core_version();
+        if let Some(cache) = &self.inbound_warnings_cache
+            && cache.session == *session
+            && cache.base.as_ref() == base
+            && cache.core == core
+        {
+            return cache.warnings.clone();
+        }
+        let warnings = compose_session_inbound(session, base)
+            .map(|inbound| inbound_warnings(&inbound, core))
+            .unwrap_or_default();
+        self.inbound_warnings_cache = Some(InboundWarningsCache {
+            session: session.clone(),
+            base: base.cloned(),
+            core,
+            warnings: warnings.clone(),
+        });
+        warnings
+    }
+
+    /// Non-blocking compatibility warnings for the saved inbound at `inbound_index`
+    /// (read-only Stream tab, post-save status). Empty when the index is unknown.
+    pub fn inbound_warnings_at(&self, inbound_index: usize) -> Vec<CompatibilityWarning> {
+        let core = self.xray_core_version();
+        self.loaded_config
+            .editable()
+            .and_then(|editable| editable.sections().inbounds().get(inbound_index))
+            .map(|inbound| inbound_warnings(inbound.value(), core))
+            .unwrap_or_default()
+    }
+
+    /// Installed Xray-core version from the last successful Discovery (Roadmap §2.6 stage 0.7);
+    /// `None` when unknown — warnings then assume the current core.
+    fn xray_core_version(&self) -> Option<XrayCoreVersion> {
+        match &self.discovery {
+            DiscoveryState::Succeeded(installation) => {
+                installation.version.as_deref().and_then(XrayCoreVersion::parse)
+            }
+            _ => None,
+        }
+    }
+
     /// Dry-runs Shell Save / Add and stores a redacted JSON diff preview (IB-L5).
     pub fn preview_inbound_shell_diff(&mut self) -> Result<(), String> {
         let editable = self
@@ -4045,21 +4143,7 @@ impl ApplicationService {
             .ok_or_else(|| "Not editing an inbound.".to_owned())?;
 
         let outcome = if session.is_add {
-            let protocol = match &session.protocol {
-                InboundProtocolDraft::Vless { .. } => InboundClientProtocol::Vless,
-                InboundProtocolDraft::Trojan { .. } => InboundClientProtocol::Trojan,
-                InboundProtocolDraft::Hysteria { .. } => InboundClientProtocol::Hysteria,
-                InboundProtocolDraft::Tunnel { .. } => InboundClientProtocol::Tunnel,
-            };
-            let request = AddInboundRequest {
-                protocol,
-                general: session.general.clone(),
-                protocol_draft: session.protocol.clone(),
-                stream: session.stream.clone(),
-                sniffing: session.sniffing.clone(),
-                security: session.security.clone(),
-                preferred_source_file: None,
-            };
+            let request = add_request_from_session(session);
             let mut editable = editable;
             add_inbound(&mut editable, request).map_err(|e| e.message())?
         } else {
@@ -4089,6 +4173,73 @@ impl ApplicationService {
             session.diff_preview = Some(entries);
         }
         Ok(())
+    }
+
+    /// Non-blocking compatibility warnings for the outbound being edited, computed on the JSON a
+    /// Save / Add would write (Roadmap §2.4:105). Empty without a session or while the draft
+    /// doesn't compose (Save reports that error itself). Outbounds are small, so no cache.
+    pub fn outbound_editor_warnings(&self) -> Vec<CompatibilityWarning> {
+        let Some(session) = self.outbound_editor_session.as_ref() else {
+            return Vec::new();
+        };
+        let base = if session.is_add {
+            None
+        } else {
+            self.loaded_config
+                .editable()
+                .and_then(|editable| editable.sections().outbounds().get(session.outbound_index))
+                .map(|outbound| outbound.value().clone())
+        };
+        let mut outbound = base.unwrap_or_else(|| {
+            serde_json::json!({ "protocol": session.settings.protocol_name(), "settings": {} })
+        });
+        if apply_outbound_general(&mut outbound, &session.general).is_err()
+            || apply_outbound_settings(&mut outbound, &session.settings).is_err()
+        {
+            return Vec::new();
+        }
+        outbound_warnings(&outbound)
+    }
+
+    /// Non-blocking compatibility warnings for the saved outbound at `outbound_index`. Empty
+    /// when the index is unknown.
+    pub fn outbound_warnings_at(&self, outbound_index: usize) -> Vec<CompatibilityWarning> {
+        self.loaded_config
+            .editable()
+            .and_then(|editable| editable.sections().outbounds().get(outbound_index))
+            .map(|outbound| outbound_warnings(outbound.value()))
+            .unwrap_or_default()
+    }
+
+    /// Explicit migration of the legacy Freedom `settings.domainStrategy` into
+    /// `streamSettings.sockopt.domainStrategy` (Roadmap §2.4:105): changes only the editor draft
+    /// and refreshes the diff preview, so the user reviews the change before Save writes it.
+    /// Returns a status line describing what happened.
+    pub fn migrate_outbound_legacy_domain_strategy(&mut self) -> Result<String, String> {
+        let session = self
+            .outbound_editor_session
+            .as_mut()
+            .ok_or_else(|| "Not editing an outbound.".to_owned())?;
+        let OutboundSettingsDraft::Freedom(settings) = &mut session.settings else {
+            return Err("Only Freedom outbounds have a legacy domainStrategy.".to_owned());
+        };
+        let message = match settings.migrate_legacy_domain_strategy() {
+            LegacyDomainStrategyMigration::Moved { value } => format!(
+                "domainStrategy \"{value}\" moved to streamSettings.sockopt.domainStrategy — \
+                 review the preview and Save."
+            ),
+            LegacyDomainStrategyMigration::SockoptWins { legacy, sockopt } => format!(
+                "streamSettings.sockopt.domainStrategy \"{sockopt}\" is kept (it is the one \
+                 Xray-core applies); the legacy value \"{legacy}\" will be removed — review the \
+                 preview and Save."
+            ),
+            LegacyDomainStrategyMigration::NothingToMigrate => {
+                return Err("No legacy domainStrategy to migrate.".to_owned());
+            }
+        };
+        session.diff_preview = None;
+        self.preview_outbound_shell_diff()?;
+        Ok(message)
     }
 
     /// Dry-runs Outbound Shell Save / Add and stores a redacted JSON diff preview
@@ -4211,6 +4362,9 @@ impl ApplicationService {
             }
             InboundClientProtocol::Tunnel => {
                 return Err("Share URI is not available for Tunnel inbounds.".to_owned());
+            }
+            InboundClientProtocol::Tun => {
+                return Err("Share URI is not available for TUN inbounds.".to_owned());
             }
         };
 
@@ -4491,7 +4645,11 @@ impl ApplicationService {
             _ => "none".to_owned(),
         };
 
-        let obfs_salamander_password = crate::xray::hysteria_salamander_obfs_password(inbound_value);
+        let obfs_salamander_password = if matches!(protocol, InboundClientProtocol::Hysteria) {
+            Self::hysteria_share_obfs(Some(inbound_value), &stream_draft)?
+        } else {
+            None
+        };
 
         let request = ShareUriRequest {
             protocol: share_protocol,
@@ -4508,6 +4666,69 @@ impl ApplicationService {
             pin_sha256,
         };
         build_share_uri(&request).map_err(|e| e.detail().to_owned())
+    }
+
+    /// hy2 `obfs` of a Hysteria inbound, from the typed `finalmask.udp` chain (Roadmap §2.6 stage
+    /// 4.1). `stream` is the typed draft (editor session or disk); `on_disk` the saved inbound,
+    /// when there is one. A chain on disk the typed model can't read must not silently become
+    /// "no obfs": the client built from the link would not connect.
+    fn hysteria_share_obfs(
+        on_disk: Option<&serde_json::Value>,
+        stream: &crate::xray::InboundStreamDraft,
+    ) -> Result<Option<String>, String> {
+        let udp_on_disk = on_disk
+            .and_then(|inbound| inbound.pointer("/streamSettings/finalmask/udp"))
+            .is_some_and(|udp| !udp.is_null());
+        if udp_on_disk && !stream.write_finalmask_udp {
+            return Err(
+                "streamSettings.finalmask.udp can't be read — fix it on the Stream tab before sharing."
+                    .to_owned(),
+            );
+        }
+        crate::xray::hy2_share_obfs(&stream.finalmask_udp)
+    }
+
+    /// Why share links of the Hysteria inbound `inbound_index` are disabled by its
+    /// `finalmask.udp` chain (Roadmap §2.6 stage 4.1); `None` when they are not, or the inbound is
+    /// not Hysteria. Like [`Self::build_client_share_uri`], prefers the open editor draft of that
+    /// inbound — the Users page shows it as a warning, so the missing Share is explained.
+    pub fn hy2_share_blocked_reason(&self, inbound_index: usize) -> Option<String> {
+        let inbound = self.loaded_config.editable()?.sections().inbounds().get(inbound_index)?.value();
+        if inbound.get("protocol").and_then(serde_json::Value::as_str) != Some("hysteria") {
+            return None;
+        }
+        let session_stream = self
+            .inbound_editor_session
+            .as_ref()
+            .filter(|s| !s.is_add && s.inbound_index == inbound_index)
+            .map(|s| &s.stream);
+        let parsed;
+        let stream = match session_stream {
+            Some(stream) => stream,
+            None => {
+                parsed = crate::xray::parse_inbound_stream(inbound);
+                &parsed
+            }
+        };
+        Self::hysteria_share_obfs(Some(inbound), stream).err()
+    }
+
+    /// [`Self::hy2_share_blocked_reason`] for the open inbound editor session (Add sessions too):
+    /// what Share will say about the chain being edited on the Stream tab once it is saved.
+    pub fn editor_hy2_share_blocked_reason(&self) -> Option<String> {
+        let session = self.inbound_editor_session.as_ref()?;
+        if session.stream.method != Some(crate::xray::StreamMethod::Hysteria) {
+            return None;
+        }
+        let on_disk = if session.is_add {
+            None
+        } else {
+            self.loaded_config
+                .editable()
+                .and_then(|editable| editable.sections().inbounds().get(session.inbound_index))
+                .map(|inbound| inbound.value())
+        };
+        Self::hysteria_share_obfs(on_disk, &session.stream).err()
     }
 
     /// Refreshes the fingerprint in the editor session after a users mutation.
@@ -4636,6 +4857,7 @@ impl ApplicationService {
                 InboundProtocolDraft::Trojan { .. } => InboundClientProtocol::Trojan,
                 InboundProtocolDraft::Hysteria { .. } => InboundClientProtocol::Hysteria,
                 InboundProtocolDraft::Tunnel { .. } => InboundClientProtocol::Tunnel,
+                InboundProtocolDraft::Tun { .. } => InboundClientProtocol::Tun,
             };
             (
                 protocol,
@@ -6389,7 +6611,6 @@ impl ApplicationService {
         self.api_settings_saved_flash = false;
         self.status_message_until = None;
         self.operation = CurrentOperation::SavingApiSettings;
-        self.show_status_message("Saving API settings...");
 
         let client = self.ssh_client.clone();
         let secrets = self.connection_secrets.clone();
@@ -6490,11 +6711,9 @@ impl ApplicationService {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.api_settings_rx = None;
-                if matches!(self.operation, CurrentOperation::SavingApiSettings) {
-                    self.api_settings_error =
-                        Some("Remote write failed: worker ended unexpectedly".to_owned());
-                    self.show_status_message("Remote write failed: worker ended unexpectedly");
-                }
+                self.api_settings_error =
+                    Some("Remote write failed: worker ended unexpectedly".to_owned());
+                self.show_status_message("Remote write failed: worker ended unexpectedly");
             }
         }
     }
@@ -7059,22 +7278,26 @@ impl ApplicationService {
                         wrote_remote,
                         stale_references,
                     }) => {
+                        let saved_index =
+                            self.inbound_editor_session.as_ref().map(|s| s.inbound_index);
                         self.retain_share_material_from_session();
                         self.schedule_share_material_persist();
                         self.replace_loaded_editable(editable);
                         self.inbound_editor_session = None;
-                        if !wrote_remote {
-                            self.show_status_message("Inbound saved (no remote change required).");
+                        let message = if !wrote_remote {
+                            "Inbound saved (no remote change required).".to_owned()
                         } else if stale_references.is_empty() {
-                            self.show_status_message(
-                                "Inbound saved. Configuration updated. Xray restart required.",
-                            );
+                            "Inbound saved. Configuration updated. Xray restart required.".to_owned()
                         } else {
-                            self.show_status_message(format!(
+                            format!(
                                 "Inbound saved. Configuration updated. Xray restart required. Tag renamed — still referenced in routing (update manually): {}",
                                 stale_references.join("; ")
-                            ));
-                        }
+                            )
+                        };
+                        let warnings = saved_index
+                            .map(|index| self.inbound_warnings_at(index))
+                            .unwrap_or_default();
+                        self.show_status_message(with_warning_suffix(message, &warnings));
                     }
                     Ok(InboundMutationSuccess::Add { editable }) => {
                         let captured = self.inbound_editor_session.as_ref().map(|s| {
@@ -7086,12 +7309,14 @@ impl ApplicationService {
                             )
                         });
                         self.replace_loaded_editable(editable);
+                        let mut added_index = None;
                         if let Some((tag, pk, enc, verify)) = captured {
                             let inbounds = self.loaded_config.inbounds();
                             let index = inbounds
                                 .iter()
                                 .rposition(|row| row.tag == tag)
                                 .unwrap_or_else(|| inbounds.len().saturating_sub(1));
+                            added_index = Some(index);
                             self.share_materials.merge(
                                 tag.as_deref(),
                                 index,
@@ -7102,9 +7327,13 @@ impl ApplicationService {
                             self.schedule_share_material_persist();
                         }
                         self.inbound_editor_session = None;
-                        self.show_status_message(
+                        let warnings = added_index
+                            .map(|index| self.inbound_warnings_at(index))
+                            .unwrap_or_default();
+                        self.show_status_message(with_warning_suffix(
                             "Inbound added. Configuration updated. Xray restart required.",
-                        );
+                            &warnings,
+                        ));
                     }
                     Ok(InboundMutationSuccess::Delete {
                         editable,
@@ -7263,14 +7492,19 @@ impl ApplicationService {
                             self.schedule_share_material_persist();
                         }
                     }
-                    Ok(InboundMutationSuccess::RawJson { editable }) => {
+                    Ok(InboundMutationSuccess::RawJson {
+                        editable,
+                        inbound_index,
+                    }) => {
                         self.retain_share_material_from_session();
                         self.schedule_share_material_persist();
                         self.replace_loaded_editable(editable);
                         self.inbound_editor_session = None;
-                        self.show_status_message(
+                        let warnings = self.inbound_warnings_at(inbound_index);
+                        self.show_status_message(with_warning_suffix(
                             "Inbound saved (raw JSON). Configuration updated. Xray restart required.",
-                        );
+                            &warnings,
+                        ));
                     }
                     Err(error) => {
                         let technical =
@@ -7332,18 +7566,26 @@ impl ApplicationService {
                         );
                     }
                     Ok(super::outbound_ops::OutboundMutationSuccess::Add { editable }) => {
+                        let new_index = editable.sections().outbounds().len().saturating_sub(1);
                         self.replace_loaded_editable(editable);
                         self.outbound_editor_session = None;
-                        self.show_status_message(
+                        let warnings = self.outbound_warnings_at(new_index);
+                        self.show_status_message(with_warning_suffix(
                             "Outbound added. Configuration updated. Xray restart required.",
-                        );
+                            &warnings,
+                        ));
                     }
                     Ok(super::outbound_ops::OutboundMutationSuccess::Update { editable }) => {
+                        let index = self.outbound_editor_session.as_ref().map(|s| s.outbound_index);
                         self.replace_loaded_editable(editable);
                         self.outbound_editor_session = None;
-                        self.show_status_message(
+                        let warnings = index
+                            .map(|index| self.outbound_warnings_at(index))
+                            .unwrap_or_default();
+                        self.show_status_message(with_warning_suffix(
                             "Outbound saved. Configuration updated. Xray restart required.",
-                        );
+                            &warnings,
+                        ));
                     }
                     Ok(super::outbound_ops::OutboundMutationSuccess::Duplicate {
                         editable,
@@ -8577,6 +8819,7 @@ impl ApplicationService {
     pub fn status_snapshot(&self) -> StatusSnapshot {
         StatusSnapshot {
             operation: self.operation.clone(),
+            notification: self.status_notification.clone(),
             ssh: self.ssh_status,
             xray: self.xray_status.clone(),
         }
@@ -10572,7 +10815,6 @@ impl ApplicationService {
         self.log_settings_saved_flash = false;
         self.status_message_until = None;
         self.operation = CurrentOperation::SavingLogSettings;
-        self.show_status_message("Saving log settings...");
 
         let client = self.ssh_client.clone();
         let secrets = self.connection_secrets.clone();
@@ -10677,11 +10919,9 @@ impl ApplicationService {
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => {
                 self.log_settings_rx = None;
-                if matches!(self.operation, CurrentOperation::SavingLogSettings) {
-                    self.log_settings_error =
-                        Some("Remote write failed: worker ended unexpectedly".to_owned());
-                    self.show_status_message("Remote write failed: worker ended unexpectedly");
-                }
+                self.log_settings_error =
+                    Some("Remote write failed: worker ended unexpectedly".to_owned());
+                self.show_status_message("Remote write failed: worker ended unexpectedly");
             }
         }
     }
@@ -11081,23 +11321,48 @@ impl ApplicationService {
                 self.operation = CurrentOperation::Ready;
             }
         }
+
+        // A newly started background operation supersedes the sticky notification,
+        // so an old result never reappears after that operation finishes.
+        if self.operation.is_busy() {
+            self.status_notification = None;
+        }
     }
 
-    /// Shows a short-lived Status Bar message, then returns to [`CurrentOperation::Ready`].
+    /// Shows a Status Bar message.
+    ///
+    /// The transient [`CurrentOperation::Message`] returns to [`CurrentOperation::Ready`]
+    /// after a short delay (so idle repaint stops), while the same text stays visible as a
+    /// sticky notification until the user dismisses it or a new operation starts.
     pub fn show_status_message(&mut self, text: impl Into<String>) {
-        self.operation = CurrentOperation::Message { text: text.into() };
+        let text = text.into();
+        self.status_notification = Some(text.clone());
+        self.operation = CurrentOperation::Message { text };
         self.status_message_until = Some(Instant::now() + STATUS_MESSAGE_DURATION);
+    }
+
+    /// Dismisses the current Status Bar message (the `×` button in the Status Bar).
+    ///
+    /// Busy operations are not affected; only informational messages are cleared.
+    pub fn dismiss_status_message(&mut self) {
+        self.status_notification = None;
+        if matches!(self.operation, CurrentOperation::Message { .. }) {
+            self.status_message_until = None;
+            self.operation = CurrentOperation::Ready;
+        }
     }
 
     /// Sets the transient current operation shown in the Status Bar.
     pub fn set_current_operation(&mut self, operation: CurrentOperation) {
         self.status_message_until = None;
+        self.status_notification = None;
         self.operation = operation;
     }
 
     /// Marks the application as idle (`Ready`).
     pub fn clear_current_operation(&mut self) {
         self.status_message_until = None;
+        self.status_notification = None;
         self.operation = CurrentOperation::Ready;
     }
 
@@ -11372,6 +11637,48 @@ mod tests {
         // Force connecting state without spawning a real network call.
         service.connection_test = ConnectionTestState::Connecting;
         assert!(!service.start_connection_test());
+        let _ = fs::remove_dir_all(service.config.path().parent().unwrap());
+    }
+
+    #[test]
+    fn status_notification_sticks_until_dismissed() {
+        let mut service = service_with_temp_config("status-notification");
+        service.show_status_message("Saved.");
+
+        // The transient message expires, the notification text stays visible.
+        service.status_message_until = Some(Instant::now() - Duration::from_millis(1));
+        service.tick_status();
+        let snapshot = service.status_snapshot();
+        assert_eq!(snapshot.operation, CurrentOperation::Ready);
+        assert_eq!(snapshot.notification.as_deref(), Some("Saved."));
+
+        service.dismiss_status_message();
+        assert_eq!(service.status_snapshot().notification, None);
+
+        // A new busy operation supersedes an earlier notification.
+        service.show_status_message("Old result");
+        service.operation = CurrentOperation::DiscoveringXray;
+        service.tick_status();
+        assert_eq!(service.status_snapshot().notification, None);
+        let _ = fs::remove_dir_all(service.config.path().parent().unwrap());
+    }
+
+    #[test]
+    fn settings_save_worker_crash_is_reported_even_after_other_message() {
+        let mut service = service_with_temp_config("save-worker-crash");
+        let (tx, rx) = std::sync::mpsc::channel();
+        drop(tx);
+        service.dns_settings_rx = Some(rx);
+        // Any message shown mid-save replaces the busy `SavingDnsSettings` operation;
+        // the crash must still surface.
+        service.show_status_message("Unrelated message");
+
+        service.poll_dns_settings_mutation();
+        assert!(service.dns_settings_rx.is_none());
+        assert_eq!(
+            service.dns_settings_error.as_deref(),
+            Some("Remote write failed: worker ended unexpectedly")
+        );
         let _ = fs::remove_dir_all(service.config.path().parent().unwrap());
     }
 
@@ -12027,6 +12334,69 @@ mod tests {
         let _ = fs::remove_dir_all(service.config.path().parent().unwrap());
     }
 
+    /// Roadmap §2.6 stage 4.1: hy2 `obfs` comes from the typed `finalmask.udp` chain; a chain the
+    /// link cannot carry disables Share instead of producing a client that cannot connect.
+    #[test]
+    fn hy2_share_uri_obfs_follows_typed_finalmask_udp() {
+        fn hysteria_json(udp: &str) -> String {
+            format!(
+                r#"{{"inbounds":[{{
+                    "tag":"hy-in","protocol":"hysteria","port":443,"listen":"0.0.0.0",
+                    "settings":{{"version":2,"clients":[{{"auth":"secret","email":"u@example.com"}}]}},
+                    "streamSettings":{{
+                        "network":"hysteria","security":"tls",
+                        "tlsSettings":{{"serverName":"www.example.com","certificates":[{{
+                            "certificateFile":"/etc/xray/cert.pem","keyFile":"/etc/xray/key.pem"}}]}},
+                        "hysteriaSettings":{{"version":2}},
+                        "finalmask":{{"udp":{udp}}}
+                    }}
+                }}]}}"#
+            )
+        }
+        let share = |name: &str, udp: &str| {
+            let mut service = loaded_service_from_json(name, &hysteria_json(udp));
+            service.connection_draft_mut().host = "203.0.113.10".to_owned();
+            let result = service.build_client_share_uri(0, 0);
+            let _ = fs::remove_dir_all(service.config.path().parent().unwrap());
+            result
+        };
+
+        let uri = share(
+            "hy2-obfs-plain",
+            r#"[{"type":"noise","settings":{}},{"type":"salamander","settings":{"password":"cat"}}]"#,
+        )
+        .expect("plain salamander is shareable");
+        assert!(uri.starts_with("hy2://secret@203.0.113.10:443"), "{uri}");
+        assert!(uri.contains("obfs=salamander") && uri.contains("obfs-password=cat"), "{uri}");
+
+        let uri = share("hy2-obfs-none", "[]").expect("no udp layers");
+        assert!(!uri.contains("obfs="), "{uri}");
+
+        let gecko = share(
+            "hy2-obfs-gecko",
+            r#"[{"type":"salamander","settings":{"password":"cat","packetSize":"512-1200"}}]"#,
+        );
+        assert!(gecko.unwrap_err().contains("Gecko"));
+
+        let unreadable = share("hy2-obfs-unreadable", r#"[{"settings":{"password":"cat"}}]"#);
+        assert!(unreadable.unwrap_err().contains("can't be read"));
+
+        // The same reason is offered as a warning (Users page, Stream tab); the open editor draft
+        // wins over disk, as in Share itself.
+        let gecko_udp = r#"[{"type":"salamander","settings":{"password":"cat","packetSize":"512-1200"}}]"#;
+        let mut service = loaded_service_from_json("hy2-obfs-reason", &hysteria_json(gecko_udp));
+        assert!(service.hy2_share_blocked_reason(0).expect("blocked").contains("Gecko"));
+        assert_eq!(service.editor_hy2_share_blocked_reason(), None, "no editor session");
+        service.begin_edit_inbound_shell(0).expect("edit session");
+        assert!(service.editor_hy2_share_blocked_reason().expect("blocked").contains("Gecko"));
+        let session = service.inbound_editor_session_mut().expect("session");
+        session.stream.finalmask_udp[0].settings = serde_json::json!({"password": "cat"});
+        assert_eq!(service.editor_hy2_share_blocked_reason(), None);
+        assert_eq!(service.hy2_share_blocked_reason(0), None);
+        assert_eq!(service.hy2_share_blocked_reason(7), None, "no such inbound");
+        let _ = fs::remove_dir_all(service.config.path().parent().unwrap());
+    }
+
     fn loaded_service_from_json(name: &str, json: &str) -> ApplicationService {
         use crate::xray::XrayConfigParser;
 
@@ -12329,6 +12699,178 @@ mod tests {
         assert_eq!(
             service.loaded_config.editable().unwrap().sections().inbounds().len(),
             1
+        );
+    }
+
+    /// VLESS inbound with a client-only `udphop` layer that still carries the removed `sockopt`
+    /// (Roadmap §2.6 stages 0.3 / 1.1): one `UdpHopClientOnly` warning on the layer type.
+    const UDPHOP_SOCKOPT_INBOUND: &str = r#"{
+        "inbounds":[{
+            "tag":"vless-in",
+            "protocol":"vless",
+            "port":443,
+            "settings":{"clients":[],"decryption":"none"},
+            "streamSettings":{
+                "network":"tcp",
+                "finalmask":{"udp":[
+                    {"type":"udphop","settings":{"mode":"intervalRemote","sockopt":{"mark":1}}}
+                ]}
+            }
+        }]
+    }"#;
+
+    #[test]
+    fn inbound_warnings_at_reports_the_saved_inbound() {
+        let service = loaded_service_from_json("warnings-saved", UDPHOP_SOCKOPT_INBOUND);
+        let warnings = service.inbound_warnings_at(0);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0].id,
+            crate::xray::CompatibilityWarningId::UdpHopClientOnly
+        );
+        assert!(service.inbound_warnings_at(7).is_empty());
+    }
+
+    #[test]
+    fn inbound_warnings_follow_the_discovered_core_version() {
+        // Roadmap §2.6 stage 0.7: the `udphop` mask needs v26.9.9; from there on it is reported
+        // as client-only (stage 1.1) — its `sockopt` is moot on an inbound.
+        let mut service = loaded_service_from_json("warnings-core-version", UDPHOP_SOCKOPT_INBOUND);
+        let mut discover = |version: &str| {
+            service.discovery = DiscoveryState::Succeeded(crate::xray::XrayInstallation {
+                operating_system: "Debian".to_owned(),
+                architecture: "x86_64".to_owned(),
+                init_system: crate::xray::InitSystemKind::Systemd,
+                binary_path: None,
+                version: Some(version.to_owned()),
+                service_name: None,
+                service_state: None,
+                exec_start: None,
+                config_source: crate::xray::ConfigSource::NotFound,
+                config_readable: false,
+                config_files: Vec::new(),
+                discovery_warnings: Vec::new(),
+            });
+            service.inbound_warnings_at(0)
+        };
+        for version in ["26.9.30", "26.9.20"] {
+            let warnings = discover(version);
+            assert_eq!(warnings.len(), 1, "{version}");
+            assert_eq!(
+                warnings[0].id,
+                crate::xray::CompatibilityWarningId::UdpHopClientOnly
+            );
+        }
+        let old = discover("26.9.8");
+        assert_eq!(old.len(), 1);
+        assert_eq!(old[0].location, "streamSettings.finalmask.udp[0].type");
+        assert!(matches!(
+            old[0].id,
+            crate::xray::CompatibilityWarningId::RequiresNewerCore { .. }
+        ));
+    }
+
+    /// VLESS mKCP inbound with `kcpSettings.congestion`, which Xray-core ignores — a warning that
+    /// does not stop the draft from composing (unlike the client-only `udphop`, stage 1.1).
+    const KCP_IGNORED_FIELD_INBOUND: &str = r#"{
+        "inbounds":[{
+            "tag":"vless-kcp",
+            "protocol":"vless",
+            "port":443,
+            "settings":{"clients":[],"decryption":"none"},
+            "streamSettings":{"network":"mkcp","kcpSettings":{"mtu":1350,"congestion":true}}
+        }]
+    }"#;
+
+    #[test]
+    fn editor_warnings_follow_the_unsaved_draft() {
+        let mut service = loaded_service_from_json("warnings-draft", KCP_IGNORED_FIELD_INBOUND);
+        assert!(service.inbound_editor_warnings().is_empty(), "no session yet");
+
+        service.begin_edit_inbound_shell(0).expect("begin edit");
+        assert_eq!(service.inbound_editor_warnings().len(), 1);
+        // Second call is served from the cache built for this exact session.
+        assert_eq!(service.inbound_editor_warnings().len(), 1);
+        assert!(service.inbound_warnings_cache.is_some());
+
+        // Removing the ignored key in the draft clears the warning before any Save.
+        service
+            .inbound_editor_session_mut()
+            .expect("session")
+            .stream
+            .kcp
+            .extras
+            .remove("congestion");
+        assert!(service.inbound_editor_warnings().is_empty());
+        // The saved inbound still has it.
+        assert_eq!(service.inbound_warnings_at(0).len(), 1);
+
+        service.cancel_inbound_editor_session();
+        assert!(service.inbound_editor_warnings().is_empty());
+        assert!(service.inbound_warnings_cache.is_none());
+    }
+
+    #[test]
+    fn editor_warnings_are_empty_while_the_draft_does_not_compose() {
+        // Stage 1.1: an on-disk client-only `udphop` already stops the draft from composing (Save
+        // refuses it), so the editor shows the layer notice instead of warnings.
+        let mut service = loaded_service_from_json("warnings-udphop", UDPHOP_SOCKOPT_INBOUND);
+        service.begin_edit_inbound_shell(0).expect("begin edit");
+        assert!(service.inbound_editor_warnings().is_empty());
+        service.cancel_inbound_editor_session();
+
+        let mut service = loaded_service_from_json("warnings-invalid", KCP_IGNORED_FIELD_INBOUND);
+        service.begin_edit_inbound_shell(0).expect("begin edit");
+        assert_eq!(service.inbound_editor_warnings().len(), 1);
+        // A layer without a type fails `apply_inbound_stream`; Save reports that error itself.
+        let stream = &mut service.inbound_editor_session_mut().expect("session").stream;
+        stream.finalmask_udp.push(crate::xray::FinalMaskLayerDraft::default());
+        stream.write_finalmask_udp = true;
+        assert!(service.inbound_editor_warnings().is_empty());
+    }
+
+    const LEGACY_FREEDOM_OUTBOUND: &str = r#"{
+        "outbounds": [{
+            "tag": "direct",
+            "protocol": "freedom",
+            "settings": {"domainStrategy": "UseIPv4"}
+        }]
+    }"#;
+
+    #[test]
+    fn freedom_legacy_domain_strategy_warning_and_migration() {
+        // Roadmap §2.4:105: flagged on the saved outbound and on the draft; the migration only
+        // changes the draft and refreshes the diff preview — the loaded config is untouched.
+        let mut service = loaded_service_from_json("freedom-legacy", LEGACY_FREEDOM_OUTBOUND);
+        let warnings = service.outbound_warnings_at(0);
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(
+            warnings[0].id,
+            crate::xray::CompatibilityWarningId::FreedomSettingsDomainStrategyIgnored
+        );
+        assert!(service.outbound_warnings_at(5).is_empty());
+        assert!(service.outbound_editor_warnings().is_empty(), "no session yet");
+        assert!(service.migrate_outbound_legacy_domain_strategy().is_err());
+
+        service.begin_edit_outbound_shell(0).expect("edit session");
+        assert_eq!(service.outbound_editor_warnings().len(), 1);
+
+        let message = service
+            .migrate_outbound_legacy_domain_strategy()
+            .expect("migrate");
+        assert!(message.contains("UseIPv4"));
+        assert!(service.outbound_editor_warnings().is_empty());
+        let session = service.outbound_editor_session().expect("session");
+        let crate::xray::OutboundSettingsDraft::Freedom(draft) = &session.settings else {
+            panic!("freedom draft expected");
+        };
+        assert_eq!(draft.sockopt_domain_strategy, "UseIPv4");
+        let preview = format!("{:?}", session.diff_preview.as_ref().expect("preview"));
+        assert!(preview.contains("sockopt"), "{preview}");
+        assert_eq!(service.outbound_warnings_at(0).len(), 1, "nothing saved yet");
+        assert!(
+            service.migrate_outbound_legacy_domain_strategy().is_err(),
+            "second migration is a no-op"
         );
     }
 }

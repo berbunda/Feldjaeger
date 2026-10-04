@@ -33,6 +33,10 @@ pub mod version_settings;
 pub mod warp;
 pub mod xray_management;
 
+// Shared `streamSettings` editors (Roadmap §2.6 stage 0.4).
+mod stream_finalmask;
+mod stream_sockopt;
+
 /// Renders a placeholder page with a title and a not-implemented message.
 pub(crate) fn placeholder(ui: &mut Ui, title: &str) {
     ui.heading(title);
@@ -327,5 +331,196 @@ pub(crate) fn show_help_dialog(ui: &mut Ui) {
     if !open || close_clicked {
         ui.ctx()
             .data_mut(|d| d.remove::<(&'static str, &'static str)>(help_dialog_id()));
+    }
+}
+
+// ─── Shared form widgets (Roadmap §2.6 stage 0.4) ───────────────────────────
+//
+// Used by several pages (Inbounds Stream/Security tabs, the `stream_*` editors, DNS, Routing,
+// API Settings); previously copy-pasted per page.
+
+/// Splits a one-per-line text area into trimmed, non-empty entries.
+pub(crate) fn lines_to_vec(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Monospace multi-line editor inside a vertical scroll area capped at 160 px.
+pub(crate) fn resizable_multiline(
+    ui: &mut Ui,
+    text: &mut String,
+    rows: usize,
+    id: &str,
+) -> egui::Response {
+    egui::ScrollArea::vertical()
+        .id_salt(id)
+        .max_height(160.0)
+        .show(ui, |ui| {
+            ui.add(
+                egui::TextEdit::multiline(text)
+                    .desired_rows(rows)
+                    .desired_width(f32::INFINITY)
+                    .code_editor(),
+            )
+        })
+        .inner
+}
+
+/// Preset ComboBox with a `(default)` entry (= empty string) plus a free-text override.
+/// Returns true when the value changed.
+pub(crate) fn optional_string_combo(
+    ui: &mut Ui,
+    id: &str,
+    value: &mut String,
+    presets: &[&str],
+) -> bool {
+    let mut dirty = false;
+    let display = if value.is_empty() {
+        "(default)".to_owned()
+    } else {
+        value.clone()
+    };
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(display)
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(value.is_empty(), "(default)")
+                .clicked()
+            {
+                value.clear();
+                dirty = true;
+            }
+            for preset in presets {
+                if ui
+                    .selectable_label(value == *preset, *preset)
+                    .clicked()
+                {
+                    *value = (*preset).to_owned();
+                    dirty = true;
+                }
+            }
+        });
+    if ui
+        .add(
+            egui::TextEdit::singleline(value)
+                .desired_width(140.0)
+                .hint_text("custom"),
+        )
+        .changed()
+    {
+        dirty = true;
+    }
+    dirty
+}
+
+// ─── Frame-persistent text buffers (Roadmap §2.6 stage 0.2) ─────────────────
+//
+// egui is immediate-mode: a widget whose text is re-derived from the model every frame loses
+// whatever the user typed that the model normalizes away (a trailing Enter in a one-per-line
+// list, half-typed JSON). A `SourcedTextBuffer` keeps the typed text in egui temp memory next
+// to the model value it was rendered from, and is discarded as soon as the model changes from
+// elsewhere.
+
+/// A text buffer tied to the value it was rendered from (see the section comment above).
+#[derive(Clone)]
+pub(crate) struct SourcedTextBuffer<S> {
+    /// The model value `text` was rendered from / last applied to.
+    pub(crate) source: S,
+    /// The text as the user left it.
+    pub(crate) text: String,
+}
+
+/// Returns the buffered text for `source` if the buffer at `id` still belongs to it, else `render()`.
+pub(crate) fn load_text_buffer<S: Clone + PartialEq + Send + Sync + 'static>(
+    ui: &Ui,
+    id: egui::Id,
+    source: &S,
+    render: impl FnOnce() -> String,
+) -> String {
+    ui.ctx()
+        .data(|d| d.get_temp::<SourcedTextBuffer<S>>(id))
+        .filter(|buffer| buffer.source == *source)
+        .map(|buffer| buffer.text)
+        .unwrap_or_else(render)
+}
+
+/// Stores `text` as the buffer for `source` at `id`.
+pub(crate) fn store_text_buffer<S: Clone + Send + Sync + 'static>(
+    ui: &Ui,
+    id: egui::Id,
+    source: S,
+    text: String,
+) {
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(id, SourcedTextBuffer { source, text }));
+}
+
+/// Newline-separated `Vec<String>` field, same idiom as `routing.rs`'s `multiline_list_row`, but
+/// with a frame-persistent text buffer so blank lines being typed (a trailing Enter) survive.
+pub(crate) fn persistent_multiline_list_row(
+    ui: &mut Ui,
+    label: &str,
+    values: &mut Vec<String>,
+    id: impl std::hash::Hash + std::fmt::Debug,
+) -> bool {
+    let mut changed = false;
+    ui.push_id(id, |ui| {
+        ui.label(label);
+        let buffer_id = ui.make_persistent_id("list_text");
+        let mut text = load_text_buffer(ui, buffer_id, values, || values.join("\n"));
+        if ui.add(egui::TextEdit::multiline(&mut text).desired_rows(2)).changed() {
+            let parsed = lines_to_vec(&text);
+            if parsed != *values {
+                *values = parsed;
+                changed = true;
+            }
+        }
+        store_text_buffer(ui, buffer_id, values.clone(), text);
+    });
+    changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lines_to_vec_trims_and_skips_blank_lines() {
+        assert_eq!(lines_to_vec(" a \n\n  \nb"), vec!["a".to_owned(), "b".to_owned()]);
+    }
+
+    #[test]
+    fn list_row_keeps_a_trailing_newline_being_typed() {
+        let ctx = egui::Context::default();
+        let mut values = vec!["1.1.1.1".to_owned()];
+        let mut buffer_id = egui::Id::NULL;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            buffer_id = ui.push_id("ips", |ui| ui.make_persistent_id("list_text")).inner;
+        })
+        .drop_without_applying_deltas();
+        ctx.data_mut(|d| {
+            d.insert_temp(
+                buffer_id,
+                SourcedTextBuffer {
+                    source: values.clone(),
+                    text: "1.1.1.1\n".to_owned(),
+                },
+            );
+        });
+
+        let mut changed = false;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            changed = persistent_multiline_list_row(ui, "ips", &mut values, "ips");
+        })
+        .drop_without_applying_deltas();
+        assert!(!changed);
+        assert_eq!(values, vec!["1.1.1.1".to_owned()]);
+        let stored = ctx
+            .data(|d| d.get_temp::<SourcedTextBuffer<Vec<String>>>(buffer_id))
+            .expect("buffer");
+        assert_eq!(stored.text, "1.1.1.1\n");
     }
 }

@@ -206,6 +206,7 @@ pub fn extract_inbound_clients(sections: &XrayConfigSections) -> Vec<InboundClie
                     }));
                 }
                 InboundClientProtocol::Tunnel => {}
+                InboundClientProtocol::Tun => {}
                 InboundClientProtocol::Hysteria => {
                     let has_auth = client
                         .get("auth")

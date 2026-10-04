@@ -45,6 +45,29 @@ pub enum InboundProtocolDraft {
         /// `settings.userLevel` (default 0).
         user_level: u64,
     },
+    /// TUN: local network-interface inbound (no `port`, no `streamSettings`/security, no
+    /// clients). Schema per Xray-core `infra/conf/tun.go` (v26.9.x; `autoSystemRoutingTable` /
+    /// `autoOutboundsInterface` extended to FreeBSD in XTLS/Xray-core#6691).
+    Tun {
+        /// `settings.name` — interface name; empty = key absent (Xray picks one).
+        name: String,
+        /// `settings.desc` — interface description (Windows); empty = key absent.
+        desc: String,
+        /// `settings.mtu`; `0` = key absent (Xray default).
+        mtu: u32,
+        /// `settings.gateway[]` — gateway IPs to assign; empty = key absent.
+        gateway: Vec<String>,
+        /// `settings.dns[]` — DNS servers to assign to the interface; empty = key absent.
+        dns: Vec<String>,
+        /// `settings.userLevel`; `0` = key absent (Xray default).
+        user_level: u64,
+        /// `settings.autoSystemRoutingTable[]` — platforms to auto-manage the system routing
+        /// table on (e.g. `linux`, `windows`, `darwin`, `freebsd`); empty = key absent.
+        auto_system_routing_table: Vec<String>,
+        /// `settings.autoOutboundsInterface` — free-form outbound-interface selection; empty =
+        /// key absent.
+        auto_outbounds_interface: String,
+    },
 }
 
 impl InboundProtocolDraft {
@@ -80,11 +103,25 @@ impl InboundProtocolDraft {
         }
     }
 
+    /// Default for Add TUN.
+    pub fn tun_default() -> Self {
+        Self::Tun {
+            name: String::new(),
+            desc: String::new(),
+            mtu: 0,
+            gateway: Vec::new(),
+            dns: Vec::new(),
+            user_level: 0,
+            auto_system_routing_table: Vec::new(),
+            auto_outbounds_interface: String::new(),
+        }
+    }
+
     /// Shared fallbacks slice when protocol supports them.
     pub fn fallbacks(&self) -> Option<&[FallbackObject]> {
         match self {
             Self::Vless { fallbacks, .. } | Self::Trojan { fallbacks } => Some(fallbacks),
-            Self::Hysteria { .. } | Self::Tunnel { .. } => None,
+            Self::Hysteria { .. } | Self::Tunnel { .. } | Self::Tun { .. } => None,
         }
     }
 
@@ -92,7 +129,7 @@ impl InboundProtocolDraft {
     pub fn fallbacks_mut(&mut self) -> Option<&mut Vec<FallbackObject>> {
         match self {
             Self::Vless { fallbacks, .. } | Self::Trojan { fallbacks } => Some(fallbacks),
-            Self::Hysteria { .. } | Self::Tunnel { .. } => None,
+            Self::Hysteria { .. } | Self::Tunnel { .. } | Self::Tun { .. } => None,
         }
     }
 }
@@ -129,6 +166,7 @@ pub fn parse_inbound_protocol(inbound: &Value) -> Option<InboundProtocolDraft> {
             Some(InboundProtocolDraft::Hysteria { version })
         }
         "tunnel" => Some(parse_tunnel_protocol(inbound)),
+        "tun" => Some(parse_tun_protocol(inbound)),
         _ => None,
     }
 }
@@ -178,6 +216,68 @@ fn parse_tunnel_protocol(inbound: &Value) -> InboundProtocolDraft {
         follow_redirect,
         user_level,
     }
+}
+
+fn parse_tun_protocol(inbound: &Value) -> InboundProtocolDraft {
+    let settings = inbound.get("settings").and_then(Value::as_object);
+    let name = settings
+        .and_then(|s| s.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+        .to_owned();
+    let desc = settings
+        .and_then(|s| s.get("desc"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+        .to_owned();
+    let mtu = settings
+        .and_then(|s| s.get("mtu"))
+        .and_then(Value::as_u64)
+        .and_then(|n| u32::try_from(n).ok())
+        .unwrap_or(0);
+    let gateway = string_array(settings.and_then(|s| s.get("gateway")));
+    let dns = string_array(settings.and_then(|s| s.get("dns")));
+    let user_level = settings
+        .and_then(|s| s.get("userLevel"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let auto_system_routing_table = string_array(settings.and_then(|s| s.get("autoSystemRoutingTable")));
+    let auto_outbounds_interface = settings
+        .and_then(|s| s.get("autoOutboundsInterface"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+        .to_owned();
+    InboundProtocolDraft::Tun {
+        name,
+        desc,
+        mtu,
+        gateway,
+        dns,
+        user_level,
+        auto_system_routing_table,
+        auto_outbounds_interface,
+    }
+}
+
+fn string_array(value: Option<&Value>) -> Vec<String> {
+    value
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Applies Protocol draft into `settings` **in place** (never replaces settings object;
@@ -237,6 +337,80 @@ pub fn apply_inbound_protocol(
             *follow_redirect,
             *user_level,
         ),
+        InboundProtocolDraft::Tun {
+            name,
+            desc,
+            mtu,
+            gateway,
+            dns,
+            user_level,
+            auto_system_routing_table,
+            auto_outbounds_interface,
+        } => apply_tun_protocol(
+            inbound,
+            name,
+            desc,
+            *mtu,
+            gateway,
+            dns,
+            *user_level,
+            auto_system_routing_table,
+            auto_outbounds_interface,
+        ),
+    }
+}
+
+fn apply_tun_protocol(
+    inbound: &mut Value,
+    name: &str,
+    desc: &str,
+    mtu: u32,
+    gateway: &[String],
+    dns: &[String],
+    user_level: u64,
+    auto_system_routing_table: &[String],
+    auto_outbounds_interface: &str,
+) -> ConfigModifyResult<()> {
+    let settings = ensure_settings_object(inbound)?;
+    apply_optional_string(settings, "name", name);
+    apply_optional_string(settings, "desc", desc);
+    if mtu != 0 {
+        settings.insert("mtu".to_owned(), Value::Number(mtu.into()));
+    } else {
+        settings.remove("mtu");
+    }
+    apply_string_array(settings, "gateway", gateway);
+    apply_string_array(settings, "dns", dns);
+    if user_level != 0 {
+        settings.insert("userLevel".to_owned(), Value::Number(user_level.into()));
+    } else {
+        settings.remove("userLevel");
+    }
+    apply_string_array(settings, "autoSystemRoutingTable", auto_system_routing_table);
+    apply_optional_string(settings, "autoOutboundsInterface", auto_outbounds_interface);
+    Ok(())
+}
+
+fn apply_optional_string(object: &mut Map<String, Value>, key: &str, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        object.remove(key);
+    } else {
+        object.insert(key.to_owned(), Value::String(trimmed.to_owned()));
+    }
+}
+
+fn apply_string_array(object: &mut Map<String, Value>, key: &str, values: &[String]) {
+    let cleaned: Vec<Value> = values
+        .iter()
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| Value::String(v.to_owned()))
+        .collect();
+    if cleaned.is_empty() {
+        object.remove(key);
+    } else {
+        object.insert(key.to_owned(), Value::Array(cleaned));
     }
 }
 
@@ -460,5 +634,43 @@ mod tests {
     fn dokodemo_door_is_not_parsed_as_tunnel_draft() {
         let inbound = json!({"protocol":"dokodemo-door","settings":{}});
         assert!(parse_inbound_protocol(&inbound).is_none());
+    }
+
+    #[test]
+    fn tun_parse_apply_roundtrip_preserves_unknown() {
+        let mut inbound = json!({
+            "protocol": "tun",
+            "settings": {
+                "name": "tun0",
+                "desc": "Feldjaeger TUN",
+                "mtu": 1500,
+                "gateway": ["10.0.0.1"],
+                "dns": ["1.1.1.1"],
+                "userLevel": 1,
+                "autoSystemRoutingTable": ["linux", "windows"],
+                "autoOutboundsInterface": "auto",
+                "futureField": "keep"
+            }
+        });
+        let draft = parse_inbound_protocol(&inbound).expect("parse");
+        apply_inbound_protocol(&mut inbound, &draft).expect("apply");
+        assert_eq!(inbound["settings"]["name"], "tun0");
+        assert_eq!(inbound["settings"]["mtu"], 1500);
+        assert_eq!(inbound["settings"]["gateway"], json!(["10.0.0.1"]));
+        assert_eq!(inbound["settings"]["dns"], json!(["1.1.1.1"]));
+        assert_eq!(inbound["settings"]["userLevel"], 1);
+        assert_eq!(
+            inbound["settings"]["autoSystemRoutingTable"],
+            json!(["linux", "windows"])
+        );
+        assert_eq!(inbound["settings"]["autoOutboundsInterface"], "auto");
+        assert_eq!(inbound["settings"]["futureField"], "keep");
+    }
+
+    #[test]
+    fn tun_default_apply_omits_empty_fields() {
+        let mut inbound = json!({"protocol": "tun"});
+        apply_inbound_protocol(&mut inbound, &InboundProtocolDraft::tun_default()).expect("apply");
+        assert_eq!(inbound["settings"], json!({}));
     }
 }

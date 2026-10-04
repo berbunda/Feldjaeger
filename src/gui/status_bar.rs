@@ -15,13 +15,18 @@ pub const STATUS_BAR_HEIGHT: f32 = 28.0;
 ///
 /// Layout: `Current Operation` | `Xray Status` | `SSH Status`.
 /// Long-running operations show a progress bar or spinner next to the label.
-pub fn show(ui: &mut Ui, status: &StatusSnapshot) {
+/// Informational messages stay visible with a `×` button.
+///
+/// Returns `true` when the user clicked `×`; the caller forwards it to
+/// `ApplicationService::dismiss_status_message`.
+pub fn show(ui: &mut Ui, status: &StatusSnapshot) -> bool {
+    let mut dismissed = false;
     ui.horizontal_centered(|ui| {
         ui.set_min_height(STATUS_BAR_HEIGHT);
 
         about::trigger(ui);
         ui.separator();
-        show_current_operation(ui, &status.operation);
+        dismissed = show_current_operation(ui, status);
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             show_ssh_status(ui, status.ssh);
@@ -30,10 +35,23 @@ pub fn show(ui: &mut Ui, status: &StatusSnapshot) {
             ui.separator();
         });
     });
+    dismissed
 }
 
-fn show_current_operation(ui: &mut Ui, operation: &CurrentOperation) {
+/// Draws the Current Operation area; returns `true` when `×` was clicked.
+fn show_current_operation(ui: &mut Ui, status: &StatusSnapshot) -> bool {
+    let operation = &status.operation;
+    // After the transient `Message` expires the operation is `Ready`, but the
+    // sticky notification keeps the text on screen until it is dismissed.
+    if let (CurrentOperation::Ready, Some(text)) = (operation, &status.notification) {
+        ui.label(RichText::new(text).color(severity_color(StatusSeverity::Healthy)));
+        return dismiss_button(ui);
+    }
+
     ui.label(RichText::new(operation.label()).color(operation_color(operation)));
+    if matches!(operation, CurrentOperation::Message { .. }) {
+        return dismiss_button(ui);
+    }
 
     match operation.progress() {
         OperationProgress::None => {}
@@ -49,6 +67,13 @@ fn show_current_operation(ui: &mut Ui, operation: &CurrentOperation) {
             ui.add(Spinner::new().size(14.0));
         }
     }
+    false
+}
+
+fn dismiss_button(ui: &mut Ui) -> bool {
+    ui.small_button("×")
+        .on_hover_text("Dismiss message")
+        .clicked()
 }
 
 fn show_xray_status(ui: &mut Ui, status: &XrayStatus) {

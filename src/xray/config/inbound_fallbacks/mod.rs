@@ -1,12 +1,19 @@
 //! Shared `settings.fallbacks` editor helpers (VLESS / Trojan, Wave C2).
 //!
 //! Official constraint: TCP (raw) + TLS or Reality only. On Shell Save,
-//! incompatible stream/security strips `fallbacks`; when fallbacks remain,
-//! TLS/Reality `alpn` must be non-empty (no auto-patch).
+//! incompatible stream/security strips `fallbacks`; when fallbacks remain on TLS,
+//! `tlsSettings.alpn` must be non-empty (no auto-patch) — the fallback docs require
+//! `["http/1.1"]` (`["h2","http/1.1"]` for h2 fallbacks).
+//!
+//! REALITY has no ALPN setting: the core builds its server with `NextProtos: nil`
+//! (`transport/internet/reality/config.go`), so a REALITY connection negotiates no ALPN and only
+//! fallbacks with an empty `alpn` are ever chosen (`proxy/vless/inbound`: `cs.NegotiatedProtocol`).
+//! `realitySettings.alpn` is not read by Xray-core; nothing is required there.
 
 use serde_json::{Map, Number, Value};
 
 use crate::xray::config::compatibility::{effective_security, matrix_transport, normalized_method};
+use crate::xray::config::inbound_security::string_list;
 use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 
 /// How `FallbackObject.dest` is represented in the GUI / draft.
@@ -319,7 +326,7 @@ fn write_dest(dest: &FallbackDest) -> Value {
     }
 }
 
-/// After stream + security apply: strip incompatible fallbacks; else require ALPN.
+/// After stream + security apply: strip incompatible fallbacks; else require ALPN on TLS.
 ///
 /// Returns `true` when `settings.fallbacks` was removed due to incompatibility.
 pub fn reconcile_inbound_fallbacks(inbound: &mut Value) -> ConfigModifyResult<bool> {
@@ -353,43 +360,39 @@ pub fn reconcile_inbound_fallbacks(inbound: &mut Value) -> ConfigModifyResult<bo
     Ok(false)
 }
 
-/// Ensures TLS/Reality `alpn` is non-empty when fallbacks are present.
+/// Ensures `tlsSettings.alpn` is non-empty when fallbacks are present on TLS. REALITY needs
+/// nothing (module docs); any other security cannot carry fallbacks.
 pub fn require_alpn_for_fallbacks(inbound: &Value) -> ConfigModifyResult<()> {
     let fallbacks = parse_fallbacks(inbound);
     if fallbacks.is_empty() {
         return Ok(());
     }
-    let security = effective_security(inbound);
-    let settings_key = match security.as_str() {
-        "tls" => "tlsSettings",
-        "reality" => "realitySettings",
-        _ => {
-            return Err(ConfigModifyError::new(
-                ConfigModifyErrorKind::ValidationFailed,
-                "Fallbacks require TLS or Reality security with a non-empty alpn list".to_owned(),
-            ));
+    match effective_security(inbound).as_str() {
+        "reality" => Ok(()),
+        "tls" => {
+            // `alpn` is the core's `StringList`: an array or a comma-separated string.
+            let alpn = string_list(
+                inbound
+                    .get("streamSettings")
+                    .and_then(|s| s.get("tlsSettings"))
+                    .and_then(|s| s.get("alpn")),
+            );
+            if alpn.is_empty() {
+                return Err(ConfigModifyError::new(
+                    ConfigModifyErrorKind::ValidationFailed,
+                    "Fallbacks on TLS require a non-empty tlsSettings.alpn list (the fallback docs: \
+                     [\"http/1.1\"], or [\"h2\", \"http/1.1\"] for h2 fallbacks); select ALPN values \
+                     in the Security tab"
+                        .to_owned(),
+                ));
+            }
+            Ok(())
         }
-    };
-    let alpn = inbound
-        .get("streamSettings")
-        .and_then(|s| s.get(settings_key))
-        .and_then(|s| s.get("alpn"))
-        .and_then(Value::as_array)
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(str::trim))
-                .any(|s| !s.is_empty())
-        })
-        .unwrap_or(false);
-    if !alpn {
-        return Err(ConfigModifyError::new(
+        _ => Err(ConfigModifyError::new(
             ConfigModifyErrorKind::ValidationFailed,
-            format!(
-                "Fallbacks require a non-empty {settings_key}.alpn list; select ALPN values in the Security tab"
-            ),
-        ));
+            "Fallbacks require TLS or Reality security".to_owned(),
+        )),
     }
-    Ok(())
 }
 
 fn ensure_settings_object(inbound: &mut Value) -> ConfigModifyResult<&mut Map<String, Value>> {
@@ -505,7 +508,8 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_requires_reality_alpn() {
+    fn reconcile_needs_no_alpn_on_reality() {
+        // REALITY negotiates no ALPN; `realitySettings.alpn` is not read by the core.
         let mut inbound = json!({
             "protocol": "trojan",
             "settings": {"fallbacks": [{"dest": 80}]},
@@ -515,15 +519,23 @@ mod tests {
                 "realitySettings": {"privateKey": "x"}
             }
         });
-        let err = reconcile_inbound_fallbacks(&mut inbound).expect_err("alpn required");
-        assert!(err.message().contains("alpn"));
+        let before = inbound.clone();
+        assert!(!reconcile_inbound_fallbacks(&mut inbound).expect("reconcile"));
+        assert_eq!(inbound, before);
+    }
 
-        inbound["streamSettings"]["realitySettings"]["alpn"] = json!(["http/1.1"]);
-        reconcile_inbound_fallbacks(&mut inbound).expect("reconcile");
-        assert_eq!(
-            inbound["streamSettings"]["realitySettings"]["alpn"],
-            json!(["http/1.1"])
-        );
+    #[test]
+    fn tls_alpn_string_form_counts_as_set() {
+        let mut inbound = json!({
+            "protocol": "vless",
+            "settings": {"decryption": "none", "fallbacks": [{"dest": 80}]},
+            "streamSettings": {"network": "tcp", "security": "tls",
+                               "tlsSettings": {"alpn": "http/1.1", "certificates": []}}
+        });
+        reconcile_inbound_fallbacks(&mut inbound).expect("string StringList is a non-empty alpn");
+        inbound["streamSettings"]["tlsSettings"]["alpn"] = json!(" , ");
+        let err = reconcile_inbound_fallbacks(&mut inbound).expect_err("blank list");
+        assert!(err.message().contains("tlsSettings.alpn"), "{}", err.message());
     }
 
     #[test]

@@ -11,7 +11,7 @@
 - Reading support must be broader than writing support.
 
 # Technology stack
-Programming language: Rust 1.96.1
+Programming language: Rust 1.98
 Edition: Rust 2024
 Build system: Cargo
 Compiler: Cargo
@@ -26,7 +26,7 @@ Logging: tracing, tracing-subscriber, tracing-appender
 Async runtime: tokio
 
 # Required tools
-Rust 1.96.1
+Rust 1.98
 Cargo
 Git
 Cursor
@@ -43,12 +43,8 @@ OpenSSH CLI backend may be added later as an alternative backend for Unix-like s
 Only GPL-3.0 compatible dependencies.
 
 # Documentation
-Every public struct
-must have rustdoc.
-Complex algorithms
-must contain comments
-describing the idea,
-not the obvious implementation.
+Every public struct must have rustdoc.
+Complex algorithms must contain comments describing the idea, not the obvious implementation.
 
 # Error handling
 Never panic
@@ -115,22 +111,12 @@ must be implemented
 through separate backend classes.
 
 # Project philosophy
-The application prioritizes
-security,
-predictability
-and maintainability
-over feature count.
-Every configuration change
-must be reversible.
-The application must preserve
-unsupported configuration sections
-instead of deleting or rewriting them.
-Remote administration
-must minimize the attack surface.
-SSH is the primary management channel.
-The application should not require
-additional daemons on the server
-unless absolutely necessary.
+The application prioritizes security, predictability and maintainability over feature count.
+Every configuration change must be reversible.
+The application must preserve unsupported configuration sections instead of deleting or rewriting them.
+Feldjäger never deletes or modifies configuration data without an explicit user action indicating exactly what will be deleted.
+Remote administration must minimize the attack surface.
+SSH is the primary management channel. The application should not require additional daemons on the server unless absolutely necessary.
 
 # Features
 A new feature must satisfy ALL of the following:
@@ -182,3 +168,17 @@ GUI is responsible only for presentation.
 # Xray lifecycle management
 Feldjäger must never remove user configuration by default.
 Binary lifecycle operations must be separated from configuration management.
+
+# Build managements
+Every change to the program code must be accompanied by an increment of the program version in the `Cargo.toml` file under the `[package]` section.
+The versioning follows this structure: x.y.z-b, where
+x - major changes
+y - middle changes
+z - minor changes
+b - bugfixes (builds)
+Resetting lower-order parts: when a higher part increases, every lower part is reset to 0, and `-b` is always written explicitly (e.g. 0.5.16-8 → 0.5.17-0, never 0.5.17), so every version stays in the x.y.z-b form and sorts consistently under semver.
+`feldjaeger-ssh`: I bump its version only when the code for this crate changes, whereas I bump the root version upon any code change.
+
+# Internal Project Documantiation
+Development is progressing according to plan @docs/Feldjaeger-roadmap.md.
+After changes to the code, the architecture file must be updated in @docs/Feldjaeger-Architecture.md.

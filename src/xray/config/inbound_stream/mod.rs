@@ -8,19 +8,27 @@
 use serde_json::{Map, Value};
 
 use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
+use crate::xray::config::stream::{FinalMaskChain, StreamDirection};
 
-mod finalmask;
-mod sockopt;
 mod xhttp;
 
-pub use finalmask::{
-    FinalMaskLayerDraft, TCP_FINALMASK_TYPES, UDP_FINALMASK_TYPES, finalmask_layers_to_value,
-    hysteria_salamander_obfs_password, parse_finalmask_layers, validate_finalmask_layers,
-};
-pub use sockopt::{
-    ADDRESS_PORT_STRATEGIES, DOMAIN_STRATEGIES, HappyEyeballsDraft, SockoptDraft,
-    TCP_CONGESTION_PRESETS, TPROXY_MODES, TcpFastOpenDraft, parse_sockopt, sockopt_to_value,
-    validate_sockopt,
+// FinalMask, quicParams and sockopt live in the direction-aware `stream` module (Roadmap §2.6
+// stage 0.4); re-exported here so the inbound API is unchanged.
+pub use crate::xray::config::stream::{
+    ADDRESS_PORT_STRATEGIES, DOMAIN_STRATEGIES, FinalMaskLayerDraft, FragmentMaskSettings,
+    HappyEyeballsDraft, NoiseMaskItem, NoiseMaskSettings, PacketValue, PortListValue,
+    QuicParamsDraft, RangeValue, RealmSettings, SalamanderSettings, SockoptDraft, SudokuSettings,
+    TCP_CONGESTION_PRESETS, TCP_FINALMASK_TYPES, TPROXY_MODES, TcpFastOpenDraft,
+    UDP_FINALMASK_TYPES, UdpHopSettings, XdnsSettings, XicmpSettings,
+    finalmask_layers_to_value, fragment_mask_settings_to_value, hy2_share_obfs,
+    noise_mask_settings_to_value, parse_finalmask_layers, parse_fragment_mask_settings,
+    parse_noise_mask_settings, parse_quic_params, parse_range_values, parse_realm_settings,
+    parse_salamander_settings, parse_sockopt, parse_sudoku_settings, parse_udphop_settings,
+    parse_xdns_settings, parse_xicmp_settings, quic_params_to_value, range_values_from_lines,
+    range_values_to_lines, realm_settings_to_value, salamander_settings_to_value,
+    sockopt_to_value, sudoku_settings_to_value, udphop_settings_to_value,
+    validate_finalmask_layers, validate_quic_params, validate_sockopt, xdns_settings_to_value,
+    xicmp_settings_to_value,
 };
 pub use xhttp::{
     XHTTP_DEFAULT_PADDING_FROM, XHTTP_DEFAULT_PADDING_TO, XHTTP_DEFAULT_SC_MAX_BUFFERED_POSTS,
@@ -101,26 +109,39 @@ impl StreamMethod {
     }
 }
 
-/// Documented default `mtu` for [`KcpStreamSettings`].
+// mKCP values mirror Xray-core (Roadmap §2.6 stage 0.6): defaults from
+// `transport/internet/kcp/config.go` (`init`), limits from `KCPConfig.Build()` in
+// `infra/conf/transport_method.go`. Every numeric field is a `uint32` in the core.
+
+/// Default `mtu` for [`KcpStreamSettings`].
 pub const KCP_DEFAULT_MTU: u64 = 1350;
-/// Documented default `tti` (ms).
+/// Default `tti` (ms).
 pub const KCP_DEFAULT_TTI: u64 = 50;
-/// Documented default `uplinkCapacity` (MB/s).
+/// Default `uplinkCapacity` (MB/s).
 pub const KCP_DEFAULT_UPLINK: u64 = 5;
-/// Documented default `downlinkCapacity` (MB/s).
+/// Default `downlinkCapacity` (MB/s).
 pub const KCP_DEFAULT_DOWNLINK: u64 = 20;
-/// Documented default `readBufferSize` (MB).
-pub const KCP_DEFAULT_READ_BUFFER: u64 = 2;
-/// Documented default `writeBufferSize` (MB).
-pub const KCP_DEFAULT_WRITE_BUFFER: u64 = 2;
-/// Inclusive `mtu` range from Xray docs.
-pub const KCP_MTU_MIN: u64 = 576;
-/// Inclusive `mtu` max from Xray docs.
-pub const KCP_MTU_MAX: u64 = 1460;
+/// Default `cwndMultiplier`, used by the core when the key is absent.
+pub const KCP_DEFAULT_CWND_MULTIPLIER: u64 = 1;
+/// Default `maxSendingWindow` in bytes (2 MiB), used by the core when the key is absent.
+pub const KCP_DEFAULT_MAX_SENDING_WINDOW: u64 = 2 * 1024 * 1024;
+/// Minimum `mtu` ("MTU must be at least 21"). The docs recommend 576–1460, but the core accepts
+/// any value from 21, and Feldjäger must not reject a config the core accepts.
+pub const KCP_MTU_MIN: u64 = 21;
 /// Inclusive `tti` min (ms).
 pub const KCP_TTI_MIN: u64 = 10;
-/// Inclusive `tti` max (ms).
-pub const KCP_TTI_MAX: u64 = 100;
+/// Inclusive `tti` max (ms); above it `1000 / tti` would be 0 in the core's in-flight sizing.
+pub const KCP_TTI_MAX: u64 = 1000;
+/// Minimum `cwndMultiplier`.
+pub const KCP_CWND_MULTIPLIER_MIN: u64 = 1;
+
+/// `kcpSettings` keys that are not fields of Xray-core's `KCPConfig` any more and are silently
+/// ignored. Kept on disk (in [`KcpStreamSettings::extras`]) until the user removes them.
+pub const KCP_IGNORED_FIELDS: &[&str] = &["congestion", "readBufferSize", "writeBufferSize"];
+
+/// `kcpSettings` keys still declared in `KCPConfig` but never read by its `Build()` — the legacy
+/// mKCP obfuscation, now a `mkcp-legacy` layer in `finalmask.udp` (migration: Roadmap §2.6 5.2).
+pub const KCP_LEGACY_OBFUSCATION_FIELDS: &[&str] = &["header", "seed"];
 
 /// Which JSON key holds the transport method on disk.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -186,28 +207,30 @@ pub struct WsStreamSettings {
     pub extras: Map<String, Value>,
 }
 
-/// Nested fields for mKCP `kcpSettings` (Wave C1 allowlist + extras).
+/// Nested fields for mKCP `kcpSettings` — the fields of Xray-core's `KCPConfig` (Wave C1,
+/// synced with the core in Roadmap §2.6 stage 0.6) + extras.
 ///
-/// Always holds documented defaults when constructed via [`Default`]; Save
-/// writes the full seven-field object. Legacy `header` / `seed` live in
-/// [`Self::extras`] only (FinalMask tip in GUI).
+/// `mtu`/`tti`/`uplinkCapacity`/`downlinkCapacity` hold the core defaults when constructed via
+/// [`Default`] and are always written on Save. `cwndMultiplier`/`maxSendingWindow` are written only
+/// when set. Keys the core ignores ([`KCP_IGNORED_FIELDS`], [`KCP_LEGACY_OBFUSCATION_FIELDS`]) and
+/// unknown keys live in [`Self::extras`] and round-trip unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KcpStreamSettings {
-    /// Maximum transmission unit (576–1460).
+    /// Maximum transmission unit (≥ [`KCP_MTU_MIN`]).
     pub mtu: u64,
-    /// Transmission time interval in ms (10–100).
+    /// Transmission time interval in ms ([`KCP_TTI_MIN`]–[`KCP_TTI_MAX`]).
     pub tti: u64,
     /// Uplink capacity MB/s.
     pub uplink_capacity: u64,
     /// Downlink capacity MB/s.
     pub downlink_capacity: u64,
-    /// Congestion control.
-    pub congestion: bool,
-    /// Per-connection read buffer size MB.
-    pub read_buffer_size: u64,
-    /// Per-connection write buffer size MB.
-    pub write_buffer_size: u64,
-    /// Unknown keys under kcpSettings (including removed `header` / `seed`).
+    /// `cwndMultiplier` (≥ 1); `None` = key absent (core default [`KCP_DEFAULT_CWND_MULTIPLIER`]).
+    pub cwnd_multiplier: Option<u64>,
+    /// `maxSendingWindow` in bytes (≥ `mtu`); `None` = key absent (core default
+    /// [`KCP_DEFAULT_MAX_SENDING_WINDOW`]).
+    pub max_sending_window: Option<u64>,
+    /// Unknown keys under kcpSettings, including the ignored [`KCP_IGNORED_FIELDS`] and legacy
+    /// [`KCP_LEGACY_OBFUSCATION_FIELDS`].
     pub extras: Map<String, Value>,
 }
 
@@ -218,11 +241,25 @@ impl Default for KcpStreamSettings {
             tti: KCP_DEFAULT_TTI,
             uplink_capacity: KCP_DEFAULT_UPLINK,
             downlink_capacity: KCP_DEFAULT_DOWNLINK,
-            congestion: false,
-            read_buffer_size: KCP_DEFAULT_READ_BUFFER,
-            write_buffer_size: KCP_DEFAULT_WRITE_BUFFER,
+            cwnd_multiplier: None,
+            max_sending_window: None,
             extras: Map::new(),
         }
+    }
+}
+
+impl KcpStreamSettings {
+    /// True when [`Self::extras`] still holds keys the core ignores ([`KCP_IGNORED_FIELDS`]).
+    pub fn has_ignored_fields(&self) -> bool {
+        KCP_IGNORED_FIELDS.iter().any(|key| self.extras.contains_key(*key))
+    }
+
+    /// Drops the [`KCP_IGNORED_FIELDS`] from [`Self::extras`] (the explicit "remove" action);
+    /// returns true when anything was removed. Legacy `header`/`seed` are kept for migration.
+    pub fn remove_ignored_fields(&mut self) -> bool {
+        let before = self.extras.len();
+        self.extras.retain(|key, _| !KCP_IGNORED_FIELDS.contains(&key.as_str()));
+        self.extras.len() != before
     }
 }
 
@@ -236,19 +273,6 @@ pub struct HysteriaStreamSettings {
     /// UDP idle timeout seconds.
     pub udp_idle_timeout: Option<u64>,
     /// Unknown keys under hysteriaSettings (including masquerade object).
-    pub extras: Map<String, Value>,
-}
-
-/// Typed `finalmask.quicParams` fields for Hysteria congestion (Wave A CQ5).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct QuicParamsDraft {
-    /// `congestion`: reno | bbr | brutal | force-brutal.
-    pub congestion: String,
-    /// `brutalUp` rate string (e.g. `100 mbps`).
-    pub brutal_up: String,
-    /// `brutalDown` rate string.
-    pub brutal_down: String,
-    /// Unknown keys under quicParams.
     pub extras: Map<String, Value>,
 }
 
@@ -277,14 +301,19 @@ pub struct InboundStreamDraft {
     pub quic_params: QuicParamsDraft,
     /// Whether to write `finalmask.quicParams` from [`Self::quic_params`].
     pub write_quic_params: bool,
-    /// Typed `finalmask.tcp` masking layers (VLESS/Trojan; not Hysteria).
+    /// Typed `finalmask.tcp` masking layers (VLESS/Trojan; Hysteria never applies them).
     pub finalmask_tcp: Vec<FinalMaskLayerDraft>,
     /// Whether to write `finalmask.tcp` from [`Self::finalmask_tcp`].
     pub write_finalmask_tcp: bool,
-    /// Typed `finalmask.udp` masking layers (VLESS/Trojan; not Hysteria).
+    /// Typed `finalmask.udp` masking layers (VLESS/Trojan/Hysteria; Roadmap §2.6 stage 4.1).
     pub finalmask_udp: Vec<FinalMaskLayerDraft>,
     /// Whether to write `finalmask.udp` from [`Self::finalmask_udp`].
     pub write_finalmask_udp: bool,
+    /// `streamSettings.finalmask` exists on disk but is neither an object nor `null` (Roadmap §2.6
+    /// stage 0.5). Feldjäger does not own such a value: it is left byte-for-byte as it is, the
+    /// FinalMask / `quicParams` editors are unavailable, and a draft that would write into it is
+    /// rejected by [`apply_inbound_stream`].
+    pub finalmask_foreign: bool,
     /// Typed `sockopt` (VLESS/Trojan/Hysteria; method-independent; Roadmap §2.3:87).
     pub sockopt: SockoptDraft,
     /// Whether to write `sockopt` from [`Self::sockopt`] (false ⇒ raw clone-through fallback).
@@ -311,6 +340,7 @@ impl Default for InboundStreamDraft {
             write_finalmask_tcp: false,
             finalmask_udp: Vec::new(),
             write_finalmask_udp: false,
+            finalmask_foreign: false,
             sockopt: SockoptDraft::default(),
             write_sockopt: false,
             extras: Map::new(),
@@ -322,6 +352,31 @@ impl InboundStreamDraft {
     /// True when the method can be edited in IB-L3 UI.
     pub fn is_editable(&self) -> bool {
         self.method.is_some()
+    }
+
+    /// True when applying the draft writes into `streamSettings.finalmask`
+    /// (`quicParams`, `tcp` or `udp`).
+    pub fn writes_finalmask(&self) -> bool {
+        self.write_quic_params || self.write_finalmask_tcp || self.write_finalmask_udp
+    }
+}
+
+/// `true` for a `streamSettings.finalmask` value Feldjäger does not own: present, but neither a
+/// JSON object (the documented shape) nor `null` (read as "absent").
+fn is_foreign_finalmask(value: &Value) -> bool {
+    !value.is_object() && !value.is_null()
+}
+
+/// JSON type name for user-facing messages (`"a string"`, `"an array"`, …); never the value
+/// itself, which may hold a secret.
+fn json_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
     }
 }
 
@@ -386,6 +441,7 @@ pub fn parse_inbound_stream(inbound: &Value) -> InboundStreamDraft {
         write_finalmask_tcp: false,
         finalmask_udp: Vec::new(),
         write_finalmask_udp: false,
+        finalmask_foreign: stream.get("finalmask").is_some_and(is_foreign_finalmask),
         sockopt: SockoptDraft::default(),
         write_sockopt: false,
         extras,
@@ -516,18 +572,19 @@ fn parse_ws(object: &Map<String, Value>) -> WsStreamSettings {
 }
 
 fn parse_kcp(object: &Map<String, Value>) -> KcpStreamSettings {
-    let known = [
-        "mtu",
-        "tti",
-        "uplinkCapacity",
-        "downlinkCapacity",
-        "congestion",
-        "readBufferSize",
-        "writeBufferSize",
-    ];
+    // `cwndMultiplier`/`maxSendingWindow` are typed only when they hold an unsigned integer;
+    // any other shape stays in extras untouched instead of being dropped.
+    let cwnd_multiplier = object.get("cwndMultiplier").and_then(Value::as_u64);
+    let max_sending_window = object.get("maxSendingWindow").and_then(Value::as_u64);
     let mut extras = Map::new();
     for (key, value) in object {
-        if !known.contains(&key.as_str()) {
+        let typed = match key.as_str() {
+            "mtu" | "tti" | "uplinkCapacity" | "downlinkCapacity" => true,
+            "cwndMultiplier" => cwnd_multiplier.is_some(),
+            "maxSendingWindow" => max_sending_window.is_some(),
+            _ => false,
+        };
+        if !typed {
             extras.insert(key.clone(), value.clone());
         }
     }
@@ -549,40 +606,63 @@ fn parse_kcp(object: &Map<String, Value>) -> KcpStreamSettings {
             .get("downlinkCapacity")
             .and_then(Value::as_u64)
             .unwrap_or(defaults.downlink_capacity),
-        congestion: object
-            .get("congestion")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        read_buffer_size: object
-            .get("readBufferSize")
-            .and_then(Value::as_u64)
-            .unwrap_or(defaults.read_buffer_size),
-        write_buffer_size: object
-            .get("writeBufferSize")
-            .and_then(Value::as_u64)
-            .unwrap_or(defaults.write_buffer_size),
+        cwnd_multiplier,
+        max_sending_window,
         extras,
     }
 }
 
-/// Hard-validates mKCP numeric ranges from Xray docs before write.
+/// Hard-validates mKCP values exactly like Xray-core's `KCPConfig.Build()` (Roadmap §2.6 stage
+/// 0.6): every field fits `uint32`, `mtu ≥ 21`, `tti` 10–1000, `cwndMultiplier ≥ 1`, and the
+/// sending buffer `maxSendingWindow / mtu` is non-zero — checked with the core defaults for absent
+/// keys, as the core applies them before validating.
 pub fn validate_kcp_settings(kcp: &KcpStreamSettings) -> ConfigModifyResult<()> {
-    if !(KCP_MTU_MIN..=KCP_MTU_MAX).contains(&kcp.mtu) {
-        return Err(ConfigModifyError::new(
+    let invalid = |message: String| {
+        Err(ConfigModifyError::new(
             ConfigModifyErrorKind::ValidationFailed,
-            format!(
-                "kcpSettings.mtu must be between {KCP_MTU_MIN} and {KCP_MTU_MAX} (got {})",
-                kcp.mtu
-            ),
+            message,
+        ))
+    };
+    for (key, value) in [
+        ("mtu", Some(kcp.mtu)),
+        ("tti", Some(kcp.tti)),
+        ("uplinkCapacity", Some(kcp.uplink_capacity)),
+        ("downlinkCapacity", Some(kcp.downlink_capacity)),
+        ("cwndMultiplier", kcp.cwnd_multiplier),
+        ("maxSendingWindow", kcp.max_sending_window),
+    ] {
+        if let Some(value) = value
+            && u32::try_from(value).is_err()
+        {
+            return invalid(format!(
+                "kcpSettings.{key} must fit a 32-bit unsigned integer (got {value})"
+            ));
+        }
+    }
+    if kcp.mtu < KCP_MTU_MIN {
+        return invalid(format!(
+            "kcpSettings.mtu must be at least {KCP_MTU_MIN} (got {})",
+            kcp.mtu
         ));
     }
     if !(KCP_TTI_MIN..=KCP_TTI_MAX).contains(&kcp.tti) {
-        return Err(ConfigModifyError::new(
-            ConfigModifyErrorKind::ValidationFailed,
-            format!(
-                "kcpSettings.tti must be between {KCP_TTI_MIN} and {KCP_TTI_MAX} ms (got {})",
-                kcp.tti
-            ),
+        return invalid(format!(
+            "kcpSettings.tti must be between {KCP_TTI_MIN} and {KCP_TTI_MAX} ms (got {})",
+            kcp.tti
+        ));
+    }
+    let cwnd = kcp.cwnd_multiplier.unwrap_or(KCP_DEFAULT_CWND_MULTIPLIER);
+    if cwnd < KCP_CWND_MULTIPLIER_MIN {
+        return invalid(format!(
+            "kcpSettings.cwndMultiplier must be at least {KCP_CWND_MULTIPLIER_MIN} (got {cwnd})"
+        ));
+    }
+    let window = kcp.max_sending_window.unwrap_or(KCP_DEFAULT_MAX_SENDING_WINDOW);
+    if window / kcp.mtu == 0 {
+        return invalid(format!(
+            "kcpSettings.maxSendingWindow ({window}{}) must be at least mtu ({})",
+            if kcp.max_sending_window.is_none() { ", the default" } else { "" },
+            kcp.mtu
         ));
     }
     Ok(())
@@ -655,40 +735,6 @@ fn parse_hysteria(object: &Map<String, Value>) -> HysteriaStreamSettings {
     }
 }
 
-fn parse_quic_params(object: &Map<String, Value>) -> QuicParamsDraft {
-    let known = ["congestion", "brutalUp", "brutalDown"];
-    let mut extras = Map::new();
-    for (key, value) in object {
-        if !known.contains(&key.as_str()) {
-            extras.insert(key.clone(), value.clone());
-        }
-    }
-    QuicParamsDraft {
-        congestion: object
-            .get("congestion")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_owned(),
-        brutal_up: object
-            .get("brutalUp")
-            .and_then(|v| match v {
-                Value::String(s) => Some(s.clone()),
-                Value::Number(n) => Some(n.to_string()),
-                _ => None,
-            })
-            .unwrap_or_default(),
-        brutal_down: object
-            .get("brutalDown")
-            .and_then(|v| match v {
-                Value::String(s) => Some(s.clone()),
-                Value::Number(n) => Some(n.to_string()),
-                _ => None,
-            })
-            .unwrap_or_default(),
-        extras,
-    }
-}
-
 /// Applies Stream draft into inbound (step 4). Preserves security/reality/tls.
 pub fn apply_inbound_stream(
     inbound: &mut Value,
@@ -728,11 +774,26 @@ pub fn apply_inbound_stream(
             )
         })?;
 
+    // A non-object `finalmask` on disk is not Feldjäger's (Roadmap §2.6 stage 0.5): never wrap or
+    // overwrite it. Checked before anything is mutated, so a rejected draft leaves the inbound as
+    // it was.
+    if draft.writes_finalmask()
+        && let Some(existing) = stream.get("finalmask").filter(|v| is_foreign_finalmask(v))
+    {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            format!(
+                "streamSettings.finalmask is {}, not a JSON object; Feldjäger leaves it as is — \
+                 fix or remove it on the Raw JSON tab before editing FinalMask or quicParams",
+                json_kind(existing)
+            ),
+        ));
+    }
+
     // Preserve security-related keys.
     let security = stream.get("security").cloned();
     let reality = stream.get("realitySettings").cloned();
     let tls = stream.get("tlsSettings").cloned();
-    let finalmask = stream.get("finalmask").cloned();
     let sockopt = stream.get("sockopt").cloned();
 
     // Drop previous method settings keys we manage.
@@ -837,15 +898,12 @@ pub fn apply_inbound_stream(
                 "downlinkCapacity".to_owned(),
                 Value::Number(draft.kcp.downlink_capacity.into()),
             );
-            object.insert("congestion".to_owned(), Value::Bool(draft.kcp.congestion));
-            object.insert(
-                "readBufferSize".to_owned(),
-                Value::Number(draft.kcp.read_buffer_size.into()),
-            );
-            object.insert(
-                "writeBufferSize".to_owned(),
-                Value::Number(draft.kcp.write_buffer_size.into()),
-            );
+            if let Some(cwnd) = draft.kcp.cwnd_multiplier {
+                object.insert("cwndMultiplier".to_owned(), Value::Number(cwnd.into()));
+            }
+            if let Some(window) = draft.kcp.max_sending_window {
+                object.insert("maxSendingWindow".to_owned(), Value::Number(window.into()));
+            }
             for (k, v) in &draft.kcp.extras {
                 if !object.contains_key(k) {
                     object.insert(k.clone(), v.clone());
@@ -885,52 +943,30 @@ pub fn apply_inbound_stream(
     }
 
     if draft.write_finalmask_tcp {
-        validate_finalmask_layers(&draft.finalmask_tcp)?;
+        validate_finalmask_layers(&draft.finalmask_tcp, FinalMaskChain::Tcp, StreamDirection::Inbound)?;
     }
     if draft.write_finalmask_udp {
-        validate_finalmask_layers(&draft.finalmask_udp)?;
+        validate_finalmask_layers(&draft.finalmask_udp, FinalMaskChain::Udp, StreamDirection::Inbound)?;
+    }
+    if draft.write_quic_params {
+        validate_quic_params(&draft.quic_params).map_err(|message| {
+            ConfigModifyError::new(
+                ConfigModifyErrorKind::ValidationFailed,
+                format!("streamSettings.finalmask.{message}"),
+            )
+        })?;
     }
 
-    if draft.write_quic_params || draft.write_finalmask_tcp || draft.write_finalmask_udp {
+    // `finalmask` is never removed above, so when nothing is written it simply stays as it was
+    // (object, `null` or a foreign value alike). When writing, the value is an object or
+    // absent/`null` (foreign values were rejected before any mutation).
+    if draft.writes_finalmask() {
         let mut finalmask = match stream.remove("finalmask") {
             Some(Value::Object(existing)) => existing,
-            Some(other) => {
-                // Preserve non-object finalmask as extras-like: wrap
-                let mut m = Map::new();
-                m.insert("_preserved".to_owned(), other);
-                m
-            }
-            None => match finalmask {
-                Some(Value::Object(existing)) => existing,
-                _ => Map::new(),
-            },
+            _ => Map::new(),
         };
         if draft.write_quic_params {
-            let mut qp = Map::new();
-            if !draft.quic_params.congestion.trim().is_empty() {
-                qp.insert(
-                    "congestion".to_owned(),
-                    Value::String(draft.quic_params.congestion.trim().to_owned()),
-                );
-            }
-            if !draft.quic_params.brutal_up.trim().is_empty() {
-                qp.insert(
-                    "brutalUp".to_owned(),
-                    Value::String(draft.quic_params.brutal_up.trim().to_owned()),
-                );
-            }
-            if !draft.quic_params.brutal_down.trim().is_empty() {
-                qp.insert(
-                    "brutalDown".to_owned(),
-                    Value::String(draft.quic_params.brutal_down.trim().to_owned()),
-                );
-            }
-            for (k, v) in &draft.quic_params.extras {
-                if !qp.contains_key(k) {
-                    qp.insert(k.clone(), v.clone());
-                }
-            }
-            finalmask.insert("quicParams".to_owned(), Value::Object(qp));
+            finalmask.insert("quicParams".to_owned(), quic_params_to_value(&draft.quic_params));
         }
         if draft.write_finalmask_tcp {
             finalmask.insert(
@@ -945,8 +981,6 @@ pub fn apply_inbound_stream(
             );
         }
         stream.insert("finalmask".to_owned(), Value::Object(finalmask));
-    } else if let Some(value) = finalmask {
-        stream.insert("finalmask".to_owned(), value);
     }
 
     if draft.write_sockopt {
@@ -1126,7 +1160,9 @@ mod tests {
         assert_eq!(draft.method, Some(StreamMethod::Mkcp));
         assert_eq!(draft.kcp.mtu, 1400);
         assert_eq!(draft.kcp.tti, 30);
-        assert!(draft.kcp.congestion);
+        // Keys the core ignores are no longer typed; they round-trip via extras.
+        assert_eq!(draft.kcp.extras.get("congestion"), Some(&json!(true)));
+        assert!(draft.kcp.has_ignored_fields());
         assert_eq!(
             draft.kcp.extras.get("header").and_then(|v| v.get("type")),
             Some(&json!("none"))
@@ -1168,9 +1204,12 @@ mod tests {
         assert_eq!(stream["kcpSettings"]["tti"], KCP_DEFAULT_TTI);
         assert_eq!(stream["kcpSettings"]["uplinkCapacity"], KCP_DEFAULT_UPLINK);
         assert_eq!(stream["kcpSettings"]["downlinkCapacity"], KCP_DEFAULT_DOWNLINK);
-        assert_eq!(stream["kcpSettings"]["congestion"], false);
-        assert_eq!(stream["kcpSettings"]["readBufferSize"], KCP_DEFAULT_READ_BUFFER);
-        assert_eq!(stream["kcpSettings"]["writeBufferSize"], KCP_DEFAULT_WRITE_BUFFER);
+        // Keys Xray-core ignores are never written for a fresh mKCP transport, and the optional
+        // core fields stay absent (the core applies its own defaults).
+        let kcp = stream["kcpSettings"].as_object().expect("kcpSettings object");
+        for key in KCP_IGNORED_FIELDS.iter().chain(&["cwndMultiplier", "maxSendingWindow"]) {
+            assert!(!kcp.contains_key(*key), "{key} must not be written by default");
+        }
     }
 
     #[test]
@@ -1200,13 +1239,93 @@ mod tests {
     #[test]
     fn validate_kcp_rejects_out_of_range_mtu_tti() {
         let mut kcp = KcpStreamSettings::default();
-        kcp.mtu = 500;
+        kcp.mtu = 20;
         assert!(validate_kcp_settings(&kcp).is_err());
         kcp.mtu = KCP_DEFAULT_MTU;
         kcp.tti = 5;
         assert!(validate_kcp_settings(&kcp).is_err());
+        kcp.tti = KCP_TTI_MAX + 1;
+        assert!(validate_kcp_settings(&kcp).is_err());
         kcp.tti = KCP_DEFAULT_TTI;
         assert!(validate_kcp_settings(&kcp).is_ok());
+    }
+
+    #[test]
+    fn validate_kcp_mirrors_core_build_bounds() {
+        let ok = |kcp: &KcpStreamSettings| validate_kcp_settings(kcp).is_ok();
+        let mut kcp = KcpStreamSettings::default();
+        // Values the docs call out of range but the core accepts must pass (no stricter gate).
+        for (mtu, tti) in [(KCP_MTU_MIN, KCP_TTI_MIN), (500, 1000), (2000, 999)] {
+            (kcp.mtu, kcp.tti) = (mtu, tti);
+            assert!(ok(&kcp), "mtu {mtu} tti {tti}");
+        }
+        kcp = KcpStreamSettings::default();
+
+        kcp.cwnd_multiplier = Some(0);
+        assert!(!ok(&kcp), "cwndMultiplier 0");
+        kcp.cwnd_multiplier = Some(4);
+        assert!(ok(&kcp));
+
+        // maxSendingWindow / mtu must be non-zero: at least one packet in the sending buffer.
+        kcp.max_sending_window = Some(KCP_DEFAULT_MTU - 1);
+        assert!(!ok(&kcp), "window below mtu");
+        kcp.max_sending_window = Some(KCP_DEFAULT_MTU);
+        assert!(ok(&kcp));
+        // The core default window (2 MiB) is checked too when the key is absent.
+        kcp.max_sending_window = None;
+        kcp.mtu = KCP_DEFAULT_MAX_SENDING_WINDOW + 1;
+        let err = validate_kcp_settings(&kcp).unwrap_err();
+        assert!(err.to_string().contains("the default"), "{err}");
+
+        // Every field is a uint32 in the core.
+        kcp = KcpStreamSettings::default();
+        kcp.uplink_capacity = u64::from(u32::MAX) + 1;
+        assert!(!ok(&kcp), "uplinkCapacity above u32");
+    }
+
+    #[test]
+    fn mkcp_new_core_fields_round_trip_and_bad_shapes_stay_in_extras() {
+        let mut inbound = json!({
+            "streamSettings": {
+                "network": "mkcp",
+                "kcpSettings": {"mtu": 1350, "cwndMultiplier": 2, "maxSendingWindow": "big"}
+            }
+        });
+        let draft = parse_inbound_stream(&inbound);
+        assert_eq!(draft.kcp.cwnd_multiplier, Some(2));
+        assert_eq!(draft.kcp.max_sending_window, None);
+        assert_eq!(draft.kcp.extras.get("maxSendingWindow"), Some(&json!("big")));
+        apply_inbound_stream(&mut inbound, &draft).unwrap();
+        let kcp = &inbound["streamSettings"]["kcpSettings"];
+        assert_eq!(kcp["cwndMultiplier"], 2);
+        assert_eq!(kcp["maxSendingWindow"], "big", "an unrepresentable value is not dropped");
+    }
+
+    #[test]
+    fn mkcp_remove_ignored_fields_keeps_legacy_obfuscation_for_migration() {
+        let mut inbound = json!({
+            "streamSettings": {
+                "network": "mkcp",
+                "kcpSettings": {
+                    "congestion": false,
+                    "readBufferSize": 2,
+                    "writeBufferSize": 2,
+                    "seed": "s",
+                    "futureKey": 1
+                }
+            }
+        });
+        let mut draft = parse_inbound_stream(&inbound);
+        assert!(draft.kcp.remove_ignored_fields());
+        assert!(!draft.kcp.has_ignored_fields());
+        assert!(!draft.kcp.remove_ignored_fields(), "second call removes nothing");
+        apply_inbound_stream(&mut inbound, &draft).unwrap();
+        let kcp = inbound["streamSettings"]["kcpSettings"].as_object().expect("object");
+        for key in KCP_IGNORED_FIELDS {
+            assert!(!kcp.contains_key(*key), "{key}");
+        }
+        assert_eq!(kcp["seed"], "s");
+        assert_eq!(kcp["futureKey"], 1);
     }
 
     #[test]
@@ -1214,7 +1333,7 @@ mod tests {
         let mut inbound = json!({"streamSettings": {"network": "tcp"}});
         let mut draft = parse_inbound_stream(&inbound);
         draft.method = Some(StreamMethod::Mkcp);
-        draft.kcp.mtu = 2000;
+        draft.kcp.mtu = KCP_MTU_MIN - 1;
         let err = apply_inbound_stream(&mut inbound, &draft).unwrap_err();
         assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
         assert!(err.to_string().contains("mtu"));
@@ -1267,11 +1386,48 @@ mod tests {
     }
 
     #[test]
+    fn apply_round_trips_full_quic_params_and_rejects_what_the_core_rejects() {
+        // Roadmap §2.6 stage 3.1: all 17 fields survive a Save untouched…
+        let quic_params = json!({
+            "congestion": "force-brutal", "debug": false, "bbrProfile": "aggressive",
+            "brutalUp": "100 mbps", "brutalDown": "200 mbps", "brutalDisableLossCompensation": true,
+            "initStreamReceiveWindow": 16384, "maxStreamReceiveWindow": 8388608,
+            "initConnectionReceiveWindow": 0, "maxConnectionReceiveWindow": 20971520,
+            "maxIdleTimeout": 30, "keepAlivePeriod": 10, "disablePathMTUDiscovery": false,
+            "disableChromeParrot": true, "disableGSO": false, "maxIncomingStreams": 8,
+            "disableStatelessReset": true
+        });
+        let mut inbound = json!({
+            "streamSettings": {"network": "hysteria", "finalmask": {"quicParams": quic_params.clone()}}
+        });
+        let draft = parse_inbound_stream(&inbound);
+        assert!(draft.write_quic_params);
+        apply_inbound_stream(&mut inbound, &draft).unwrap();
+        assert_eq!(inbound["streamSettings"]["finalmask"]["quicParams"], quic_params);
+
+        // …and an edit the core's Build() refuses is refused before anything is written.
+        let mut broken = draft.clone();
+        broken.quic_params.brutal_up.clear();
+        let error = apply_inbound_stream(&mut inbound.clone(), &broken).unwrap_err();
+        assert!(
+            error.to_string().contains("streamSettings.finalmask.quicParams.congestion force-brutal requires brutalUp"),
+            "{error}"
+        );
+        // A number where the core wants a Bandwidth string is kept, not converted — and refused.
+        let mut numeric = json!({
+            "streamSettings": {"network": "hysteria", "finalmask": {"quicParams": {"brutalUp": 1000000}}}
+        });
+        let draft = parse_inbound_stream(&numeric);
+        let error = apply_inbound_stream(&mut numeric, &draft).unwrap_err();
+        assert!(error.to_string().contains("quicParams.brutalUp must be a string"), "{error}");
+    }
+
+    #[test]
     fn apply_without_finalmask_edits_preserves_existing_object_untouched() {
         let mut inbound = json!({
             "streamSettings": {
                 "network": "tcp",
-                "finalmask": {"tcp": [{"type": "fragment", "settings": {}}]}
+                "finalmask": {"tcp": [{"type": "fragment", "settings": {"length": "100-200"}}]}
             }
         });
         let before = inbound["streamSettings"]["finalmask"].clone();
@@ -1289,6 +1445,110 @@ mod tests {
         let err = apply_inbound_stream(&mut inbound, &draft).unwrap_err();
         assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
         assert!(err.to_string().contains("type"));
+    }
+
+    /// Roadmap §2.6 stage 1.1: `udphop` is client-only — writing it into an inbound is refused
+    /// before any mutation. An on-disk chain is always re-written by a Shell Save, so the layer
+    /// has to be removed first; without it the Save goes through.
+    #[test]
+    fn apply_rejects_client_only_udphop_layer_on_inbound() {
+        let original = json!({"streamSettings": {"network": "tcp", "finalmask": {"udp": [
+            {"type": "udphop", "settings": {"mode": "intervalRemote"}}
+        ]}}});
+        let mut inbound = original.clone();
+        let mut draft = parse_inbound_stream(&inbound);
+        assert_eq!(draft.finalmask_udp.len(), 1);
+        assert!(draft.write_finalmask_udp, "an on-disk chain is re-written");
+        let err = apply_inbound_stream(&mut inbound, &draft).unwrap_err();
+        assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
+        assert!(err.to_string().contains("client only"));
+        assert_eq!(inbound, original);
+
+        draft.finalmask_udp.clear();
+        apply_inbound_stream(&mut inbound, &draft).expect("layer removed");
+        assert_eq!(inbound["streamSettings"]["finalmask"]["udp"], json!([]));
+    }
+
+    #[test]
+    fn parse_flags_only_non_object_non_null_finalmask_as_foreign() {
+        for (finalmask, foreign) in [
+            (json!("udphop"), true),
+            (json!([{"type": "fragment"}]), true),
+            (json!(42), true),
+            (json!(false), true),
+            (json!(null), false),
+            (json!({"tcp": []}), false),
+        ] {
+            let inbound = json!({"streamSettings": {"network": "tcp", "finalmask": finalmask}});
+            let draft = parse_inbound_stream(&inbound);
+            assert_eq!(draft.finalmask_foreign, foreign, "{finalmask}");
+            if foreign {
+                assert!(!draft.writes_finalmask(), "{finalmask}: parse must not claim it");
+            }
+        }
+        assert!(!parse_inbound_stream(&json!({"streamSettings": {}})).finalmask_foreign);
+    }
+
+    #[test]
+    fn apply_keeps_foreign_finalmask_byte_for_byte_without_wrapping() {
+        let mut inbound = json!({
+            "streamSettings": {"network": "tcp", "finalmask": ["opaque", 1]}
+        });
+        let mut draft = parse_inbound_stream(&inbound);
+        draft.method = Some(StreamMethod::Ws); // an unrelated Stream edit
+        apply_inbound_stream(&mut inbound, &draft).unwrap();
+        assert_eq!(inbound["streamSettings"]["finalmask"], json!(["opaque", 1]));
+        assert_eq!(inbound["streamSettings"]["network"], "websocket");
+    }
+
+    #[test]
+    fn apply_rejects_finalmask_edit_over_foreign_value_and_leaves_inbound_unchanged() {
+        let original = json!({
+            "streamSettings": {"network": "tcp", "finalmask": "not-an-object"}
+        });
+        for edit in ["quic", "tcp", "udp"] {
+            let mut inbound = original.clone();
+            let mut draft = parse_inbound_stream(&inbound);
+            let layer = vec![FinalMaskLayerDraft {
+                layer_type: "salamander".to_owned(),
+                settings: json!({"password": "p"}),
+            }];
+            match edit {
+                "quic" => draft.write_quic_params = true,
+                "tcp" => (draft.finalmask_tcp, draft.write_finalmask_tcp) = (layer, true),
+                _ => (draft.finalmask_udp, draft.write_finalmask_udp) = (layer, true),
+            }
+            let err = apply_inbound_stream(&mut inbound, &draft).unwrap_err();
+            assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed, "{edit}");
+            let message = err.to_string();
+            assert!(message.contains("a string") && !message.contains("not-an-object"), "{message}");
+            assert!(!message.contains("_preserved"));
+            assert_eq!(inbound, original, "{edit}: nothing may change on rejection");
+        }
+    }
+
+    #[test]
+    fn apply_replaces_null_finalmask_with_an_object_when_edited() {
+        let mut inbound = json!({"streamSettings": {"network": "tcp", "finalmask": null}});
+        let mut draft = parse_inbound_stream(&inbound);
+        draft.finalmask_udp = vec![FinalMaskLayerDraft {
+            layer_type: "salamander".to_owned(),
+            settings: json!({"password": "pass"}),
+        }];
+        draft.write_finalmask_udp = true;
+        apply_inbound_stream(&mut inbound, &draft).unwrap();
+        assert_eq!(
+            inbound["streamSettings"]["finalmask"],
+            json!({"udp": [{"type": "salamander", "settings": {"password": "pass"}}]})
+        );
+    }
+
+    #[test]
+    fn apply_without_edits_keeps_null_finalmask() {
+        let mut inbound = json!({"streamSettings": {"network": "tcp", "finalmask": null}});
+        let draft = parse_inbound_stream(&inbound);
+        apply_inbound_stream(&mut inbound, &draft).unwrap();
+        assert_eq!(inbound["streamSettings"]["finalmask"], Value::Null);
     }
 
     #[test]

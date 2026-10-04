@@ -1,17 +1,17 @@
 [package]
 name = "feldjaeger-ssh"
-version = "0.1.0-1"
+version = "0.1.0-3"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "Backend-agnostic SSH transport library for Feldjaeger"
 readme = "README.md"
 
 [dependencies]
-russh = { version = "0.63.1", default-features = false, features = ["ring", "flate2", "rsa"] }
+russh = { version = "0.63.3", default-features = false, features = ["ring", "flate2", "rsa"] }
 tracing = "0.1.44"
-russh-sftp = "2.4.0"
+russh-sftp = "3.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
-tokio = { version = "1.53.1", features = ["io-util", "net", "rt", "sync", "time"] }
+tokio = { version = "1.53.2", features = ["io-util", "net", "rt", "sync", "time"] }
 
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread"] }

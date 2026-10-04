@@ -28,7 +28,10 @@ target
 # Added by user
 .claude
 .history
-docs
 Tasks
 Completed
 tests
+fixtures
+
+# Local Xray build for tests against the real core (XRAY_BIN fallback)
+/xray-bin/

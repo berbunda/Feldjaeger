@@ -209,6 +209,8 @@ pub enum InboundMutationSuccess {
     RawJson {
         /// Updated in-memory config after the replace.
         editable: EditableXrayConfig,
+        /// Merged index of the replaced inbound (for post-save warnings).
+        inbound_index: usize,
     },
 }
 
@@ -1155,7 +1157,10 @@ where
     match write_result {
         Ok(()) => InboundMutationOutcome {
             kind: InboundMutationKind::ReplaceRawJson,
-            result: Ok(InboundMutationSuccess::RawJson { editable }),
+            result: Ok(InboundMutationSuccess::RawJson {
+                editable,
+                inbound_index,
+            }),
         },
         Err(error) => InboundMutationOutcome {
             kind: InboundMutationKind::ReplaceRawJson,

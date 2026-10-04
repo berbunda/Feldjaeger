@@ -5,17 +5,22 @@ use crate::xray::config::errors::ConfigErrorKind;
 use serde_json::json;
 use std::path::PathBuf;
 
+// Config fixtures live in `src/xray/config/fixtures/`, not `tests/fixtures/`: the whole `tests`
+// directory is git-ignored, so fixtures there never reached a clean clone (same decision as the
+// FinalMask corpus, Roadmap §2.6 stage 1.5).
+
+/// Path of a config fixture, for the tests that parse from disk (`parse_path`).
 fn fixture(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("tests")
-        .join("fixtures")
-        .join("xray")
+        .join("src/xray/config/fixtures")
         .join(name)
 }
 
-fn read_fixture(name: &str) -> String {
-    std::fs::read_to_string(fixture(name))
-        .unwrap_or_else(|error| panic!("failed to read fixture {name}: {error}"))
+/// Text of a config fixture, embedded: a missing file is a compile error, not a failing test.
+macro_rules! read_fixture {
+    ($name:literal) => {
+        include_str!(concat!("fixtures/", $name))
+    };
 }
 
 #[test]
@@ -23,7 +28,7 @@ fn parse_single_config() {
     let parser = XrayConfigParser::new();
     let outcome = parser.parse_single_file(
         "/usr/local/etc/xray/config.json",
-        &read_fixture("minimal.json"),
+        read_fixture!("minimal.json"),
     );
 
     assert!(outcome.is_success());
@@ -72,7 +77,7 @@ fn parse_config_directory() {
 #[test]
 fn preserves_unknown_top_level_section() {
     let parser = XrayConfigParser::new();
-    let outcome = parser.parse_str(&read_fixture("with_unknown_sections.json"));
+    let outcome = parser.parse_str(read_fixture!("with_unknown_sections.json"));
 
     assert!(outcome.is_success());
     let sections = outcome.sections();
@@ -389,7 +394,7 @@ fn corrupted_routing_primitive_is_flagged_but_preserved() {
 #[test]
 fn invalid_json_returns_error_without_panic() {
     let parser = XrayConfigParser::new();
-    let outcome = parser.parse_single_file("config.json", &read_fixture("invalid.json"));
+    let outcome = parser.parse_single_file("config.json", read_fixture!("invalid.json"));
 
     assert!(!outcome.is_success());
     assert!(!outcome.is_partial());

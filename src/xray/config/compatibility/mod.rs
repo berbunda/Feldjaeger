@@ -3,8 +3,15 @@
 //! Wave A Save order: **G9→G10→G6→G5→G1→G2→G8→G12→G4→G3→G13** (G7 retired;
 //! G11 predicate+tests only until Wave B).
 
+mod core_version;
 mod matrix;
+mod warnings;
 
+pub use core_version::{CORE_FEATURES, CoreFeature, XrayCoreVersion};
+pub use warnings::{
+    CompatibilityWarning, CompatibilityWarningId, inbound_warnings, outbound_warnings,
+    with_warning_suffix,
+};
 pub use matrix::{
     allowed_security_modes, allowed_stream_methods, coerce_display_stream_method,
     coerce_security_mode_for_transport, g10_hysteria_requires_tls, g11_shadowsocks_tcp_only,

@@ -12,6 +12,7 @@
 use egui::{Color32, RichText, TextEdit, Ui};
 
 use crate::app::{ApplicationService, DnsPageState};
+use crate::gui::pages::lines_to_vec;
 use crate::xray::{DnsHostEntry, DnsServerEntry, DnsSettings, QueryStrategy};
 
 const MUTED_COLOR: Color32 = Color32::from_rgb(140, 140, 140);
@@ -672,10 +673,3 @@ fn optional_bool_combo(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, 
         });
 }
 
-fn lines_to_vec(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .collect()
-}

@@ -33,6 +33,7 @@ mod reverse_proxy;
 mod routing_settings;
 mod sections;
 mod stats_settings;
+mod stream;
 mod serialize;
 mod sourced_section;
 mod summary;
@@ -51,6 +52,8 @@ pub use burst_observatory_settings::{
     burst_observatory_settings_to_new_value, validate_burst_observatory_settings,
 };
 pub use compatibility::{
+    CompatibilityWarning, CompatibilityWarningId, inbound_warnings, outbound_warnings,
+    with_warning_suffix, CORE_FEATURES, CoreFeature, XrayCoreVersion,
     CompatibilityGateId, allowed_security_modes, allowed_stream_methods, check_inbound_compatibility,
     coerce_display_stream_method, coerce_security_mode_for_transport, effective_security,
     first_failing_gate, g10_hysteria_requires_tls, g11_shadowsocks_tcp_only,
@@ -109,8 +112,10 @@ pub use inbound_security::{
 pub use inbound_stream::{
     ADDRESS_PORT_STRATEGIES, DOMAIN_STRATEGIES, FinalMaskLayerDraft, GrpcStreamSettings,
     HappyEyeballsDraft, HysteriaStreamSettings, InboundStreamDraft, KCP_DEFAULT_DOWNLINK,
-    KCP_DEFAULT_MTU, KCP_DEFAULT_READ_BUFFER, KCP_DEFAULT_TTI, KCP_DEFAULT_UPLINK,
-    KCP_DEFAULT_WRITE_BUFFER, KCP_MTU_MAX, KCP_MTU_MIN, KCP_TTI_MAX, KCP_TTI_MIN,
+    KCP_CWND_MULTIPLIER_MIN, KCP_DEFAULT_CWND_MULTIPLIER, KCP_DEFAULT_MAX_SENDING_WINDOW,
+    KCP_DEFAULT_MTU, KCP_DEFAULT_TTI, KCP_DEFAULT_UPLINK, KCP_IGNORED_FIELDS,
+    KCP_LEGACY_OBFUSCATION_FIELDS,
+    KCP_MTU_MIN, KCP_TTI_MAX, KCP_TTI_MIN,
     KcpStreamSettings, QuicParamsDraft, SockoptDraft, StreamMethod, StreamMethodKey,
     TCP_CONGESTION_PRESETS, TCP_FINALMASK_TYPES, TPROXY_MODES, TcpFastOpenDraft, TcpNestedKey,
     TcpStreamSettings, UDP_FINALMASK_TYPES, XHTTP_DEFAULT_PADDING_FROM, XHTTP_DEFAULT_PADDING_TO,
@@ -121,9 +126,51 @@ pub use inbound_stream::{
     XHTTP_PATH_DEFAULT, XHTTP_PLACEMENTS, XHTTP_SESSION_ID_TABLES, XHTTP_UPLINK_METHODS,
     WsStreamSettings, XhttpCoreSettings, XhttpDownloadDraft, XhttpRange, XhttpStreamSettings,
     XmuxDraft, apply_inbound_stream, apply_tunnel_sockopt, finalmask_layers_to_value, join_ws_path_and_ed,
-    hysteria_salamander_obfs_password, parse_finalmask_layers, parse_inbound_stream, parse_sockopt,
+    hy2_share_obfs, parse_finalmask_layers, parse_inbound_stream, parse_sockopt,
     sockopt_to_value, split_ws_path_and_ed, validate_finalmask_layers, validate_kcp_settings,
     validate_sockopt, validate_xhttp_settings, xhttp_extra_json, xhttp_extra_object, xhttp_to_object,
+    FragmentMaskSettings, NoiseMaskItem, NoiseMaskSettings, RealmSettings, SalamanderSettings,
+    SudokuSettings, UdpHopSettings, XdnsSettings, XicmpSettings, fragment_mask_settings_to_value,
+    noise_mask_settings_to_value, parse_fragment_mask_settings, parse_noise_mask_settings,
+    parse_realm_settings, parse_salamander_settings, parse_sudoku_settings, parse_udphop_settings,
+    parse_xdns_settings, parse_xicmp_settings, realm_settings_to_value,
+    salamander_settings_to_value, sudoku_settings_to_value, udphop_settings_to_value,
+    xdns_settings_to_value, xicmp_settings_to_value, PacketValue, PortListValue, RangeValue,
+    parse_range_values, range_values_from_lines, range_values_to_lines,
+};
+pub use stream::{
+    QuicTransport, XHTTP3_CONGESTION_MODES, alpn_selects_http3, quic_transport_of,
+    validate_quic_params_for_transport, validate_stream_quic_params,
+    DIAL_HANDLING_UDP_FINALMASK_TYPES, LEGACY_UDP_HOP_MODE, LegacyUdpHopMigration,
+    QUIC_PARAMS_LEGACY_UDP_HOP_KEY, migrate_legacy_udp_hop, udphop_layer_from_legacy_udp_hop,
+    INBOUND_ONLY_QUIC_PARAMS_FIELDS, OUTBOUND_ONLY_QUIC_PARAMS_FIELDS, QUIC_BBR_PROFILES,
+    QUIC_CONGESTION_MODES, QUIC_KEEP_ALIVE_PERIOD_RANGE, QUIC_MAX_IDLE_TIMEOUT_RANGE,
+    QUIC_MIN_BRUTAL_BYTES_PER_SEC, QUIC_MIN_INCOMING_STREAMS, QUIC_MIN_RECEIVE_WINDOW,
+    parse_quic_params, quic_bandwidth_bytes_per_sec, quic_params_field_applies, validate_quic_params,
+    CLIENT_ONLY_UDP_FINALMASK_TYPES, FinalMaskChain, INBOUND_ONLY_SOCKOPT_FIELDS,
+    OUTBOUND_ONLY_SOCKOPT_FIELDS, StreamDirection, UDPHOP_DEFAULT_INTERVAL_SECS,
+    UDPHOP_LEGACY_SOCKOPT_KEY, UDPHOP_MIN_INTERVAL_SECS, UdpHopModes,
+    finalmask_layer_type_applies, parse_realm_url, parse_udphop_mode, sockopt_field_applies,
+    validate_udphop_settings, REALM_DEFAULT_PORT_MAP_LIFETIME_SECS,
+    REALM_DEFAULT_PORT_MAP_TIMEOUT_SECS, REALM_IP_MODES, RealmPortMapping, RealmScheme, RealmUrl,
+    realm_ip_mode_is_known, validate_realm_settings,
+    validate_finalmask_layer, MKCP_LEGACY_HEADERS, HEADER_CUSTOM_UDP_MODES,
+    MKCP_LEGACY_DEFAULT_DNS_DOMAIN, MkcpLegacyMode, MkcpLegacySettings, mkcp_legacy_settings_to_value,
+    parse_mkcp_legacy_settings, validate_mkcp_legacy_settings,
+    XMC_LEGACY_DEFAULT_USERNAME, XMC_MAX_PASSWORD_BYTES, XmcProfile,
+    XmcSettings, migrate_legacy_xmc_usernames, parse_xmc_settings, xmc_settings_to_value,
+    xmc_username_is_valid,
+    HeaderCustomItem, HeaderCustomItemKind, HeaderCustomSequences, HeaderCustomTcpGroup,
+    HeaderCustomTcpSettings, header_custom_tcp_settings_to_value, parse_header_custom_tcp_settings,
+    HEADER_CUSTOM_UDP_DEFAULT_MODE, HeaderCustomItems, HeaderCustomUdpGroup, HeaderCustomUdpSettings,
+    header_custom_udp_settings_to_value, parse_header_custom_udp_settings,
+    escape_packet_text, unescape_packet_text,
+    FRAGMENT_PACKETS_TLSHELLO, FragmentPackets, fragment_packets_mode, NoiseItemPayload, SALAMANDER_MIN_PASSWORD_BYTES,
+    SUDOKU_ASCII_MODES, SUDOKU_MAX_PADDING, validate_sudoku_custom_table, validate_sudoku_settings,
+    NOISE_EXP_KIND,
+    XDNS_DEFAULT_LABEL_LIMIT, XDNS_DEFAULT_LEN_LIMIT, XDNS_RECORD_TYPES, XDNS_RESOLVER_KINDS,
+    XdnsDomain, XdnsResolver, migrate_legacy_xdns_settings, xdns_has_legacy_fields,
+    xdns_record_type_name,
 };
 pub use json_diff::{
     JsonDiffEntry, JsonDiffKind, redacted_json_diff, redacted_json_diff_bytes,
@@ -158,7 +205,7 @@ pub use modify::{
     update_dns_settings, update_env_settings, update_fakedns_settings, update_geodata_settings,
     update_inbound_client,
     update_inbound_general,
-    update_inbound_shell,
+    update_inbound_shell, compose_inbound_shell, build_add_inbound_value,
     update_inbound_sniffing, update_log_settings, update_metrics_settings,
     update_observatory_settings,
     update_outbound_shell, update_policy_settings,
@@ -184,7 +231,10 @@ pub use outbound_edit::{
 };
 pub use outbound_protocol::{
     BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS, DnsRuleDraft,
-    FREEDOM_NOISE_TYPES, FragmentDraft, NoiseDraft, OutboundSettingsDraft,
+    FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS, FREEDOM_FINAL_RULE_NETWORKS,
+    FREEDOM_LEGACY_STRATEGY_KEYS, FREEDOM_NOISE_TYPES, FREEDOM_PROXY_PROTOCOL_VERSIONS,
+    FragmentDraft, FreedomFinalRuleDraft, FreedomSettingsDraft, LegacyDomainStrategyMigration,
+    NoiseDraft, OutboundSettingsDraft,
     apply_outbound_settings, is_shell_editable_protocol, parse_outbound_settings,
 };
 pub use parser::{ConfigParseOutcome, XrayConfigParser};

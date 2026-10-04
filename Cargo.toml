@@ -4,7 +4,7 @@ resolver = "3"
 
 [package]
 name = "feldjaeger"
-version = "0.5.16-6"
+version = "0.5.34-1"
 edition = "2024"
 license = "GPL-3.0-or-later"
 description = "Local desktop control panel for managing remote Xray servers over SSH"
@@ -18,25 +18,25 @@ path = "src/main.rs"
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 directories = "6.0.0"
-eframe = "0.36.1"
-egui = "0.36.1"
+eframe = "0.36.2"
+egui = "0.36.2"
 feldjaeger-ssh = { path = "feldjaeger-ssh" }
 qrcode = { version = "0.14.1", default-features = false }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
-tokio = { version = "1.53.1", features = ["rt", "time"] }
+tokio = { version = "1.53.2", features = ["rt", "time"] }
 tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "std"] }
-uuid = { version = "1.26.0", features = ["v4"] }
+uuid = { version = "1.27.0", features = ["v4"] }
 base64 = "0.23.1"
 x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets"] }
-rustls = { version = "0.23.43", default-features = false, features = ["aws-lc-rs", "std", "logging"] }
+rustls = { version = "0.23.45", default-features = false, features = ["aws-lc-rs", "std", "logging"] }
 x509-parser = "0.18.1"
 
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "macros", "time"] }
+tokio = { version = "1.53.2", features = ["rt", "rt-multi-thread", "macros", "time"] }
 
 [build-dependencies]
 embed-resource = "3.0.11"

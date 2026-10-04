@@ -732,6 +732,8 @@ pub struct RoutingRuleSummary {
     pub attrs_summary: Option<String>,
     /// Process match expressions.
     pub process: Vec<String>,
+    /// `localOS` match values (`runtime.GOOS`, e.g. `windows`/`linux`/`darwin`).
+    pub local_os: Vec<String>,
     /// Target outbound tag.
     pub outbound_tag: Option<String>,
     /// Target balancer tag.
@@ -965,6 +967,7 @@ impl RoutingRuleSummary {
             protocol: string_array_field(value, "protocol"),
             attrs_summary: attrs_summary_field(value),
             process: string_array_field(value, "process"),
+            local_os: string_array_field(value, "localOS"),
             outbound_tag,
             balancer_tag,
         };
@@ -1017,6 +1020,9 @@ impl RoutingRuleSummary {
         if !self.process.is_empty() {
             labels.push("Process".to_owned());
         }
+        if !self.local_os.is_empty() {
+            labels.push("Local OS".to_owned());
+        }
         labels
     }
 
@@ -1048,6 +1054,7 @@ impl RoutingRuleSummary {
             snippets.push(format!("attrs: {attrs}"));
         }
         push_list_snippet(&mut snippets, "process", &self.process);
+        push_list_snippet(&mut snippets, "localOS", &self.local_os);
         snippets
     }
 }

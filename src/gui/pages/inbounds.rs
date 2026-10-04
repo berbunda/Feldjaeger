@@ -15,18 +15,27 @@ use crate::app::{
     inbound_row_display, parse_inbound_stream,
 };
 use crate::gui::pages::users;
+use crate::gui::pages::stream_finalmask::{
+    FinalMaskEdit, show_finalmask_edit, show_foreign_finalmask_notice, show_quic_params_edit,
+};
+use crate::gui::pages::stream_sockopt::{
+    HELP_SOCKOPT_TPROXY, show_sockopt_edit, show_sockopt_readonly, sockopt_scope_note,
+    tproxy_combo_field,
+};
+use crate::gui::pages::{
+    lines_to_vec, optional_string_combo, persistent_multiline_list_row, resizable_multiline,
+};
 use crate::xray::{
-    ALPN_PRESETS, CERT_USAGE_PRESETS, CURVE_PRESETS, FINGERPRINT_PRESETS, FallbackDest,
+    ALPN_PRESETS, CERT_USAGE_PRESETS, CURVE_PRESETS, CompatibilityWarning, FINGERPRINT_PRESETS, FallbackDest,
     FallbackDestKind, FallbackObject, FinalMaskLayerDraft, InboundStreamDraft, InboundSummary,
-    KCP_MTU_MAX, KCP_MTU_MIN, KCP_TTI_MAX,
-    KCP_TTI_MIN, KcpStreamSettings, ShareSecurity, ShareTransport, SockoptDraft,
-    TCP_FINALMASK_TYPES, TLS_VERSION_PRESETS,
-    TPROXY_MODES, TUNNEL_NETWORKS, TcpFastOpenDraft,
-    UDP_FINALMASK_TYPES, CertificateDraft,
+    KCP_CWND_MULTIPLIER_MIN, KCP_DEFAULT_CWND_MULTIPLIER, KCP_DEFAULT_MAX_SENDING_WINDOW,
+    KCP_IGNORED_FIELDS, KCP_MTU_MIN, KCP_TTI_MAX, KCP_TTI_MIN, KcpStreamSettings, ShareSecurity, ShareTransport, StreamDirection,
+    TLS_VERSION_PRESETS, TUNNEL_NETWORKS, CertificateDraft,
     TlsSettingsDraft, XHTTP_DOWNLOAD_SECURITIES, XHTTP_MODES, XHTTP_MODE_DEFAULT, XHTTP_PADDING_METHODS,
     XHTTP_PATH_DEFAULT, XHTTP_PLACEMENTS, XHTTP_SESSION_ID_TABLES, XHTTP_UPLINK_METHODS,
     XhttpCoreSettings, XhttpDownloadDraft, XhttpRange, XhttpStreamSettings,
-    fallbacks_transport_compatible, parse_inbound_protocol, validate_port_map_target,
+    QuicTransport, alpn_selects_http3, fallbacks_transport_compatible, parse_inbound_protocol,
+    validate_port_map_target,
 };
 
 // ─── Field help text (Roadmap §3:124) ────────────────────────────────────────
@@ -83,7 +92,7 @@ const HELP_FALLBACK_NAME: &str =
      means any.";
 const HELP_FALLBACK_ALPN: &str =
     "Attempts to match the negotiated TLS ALPN result of the incoming connection. Empty means \
-     any.";
+     any. With REALITY no ALPN is ever negotiated, so only entries with an empty alpn are used.";
 const HELP_FALLBACK_PATH: &str =
     "Attempts to match the HTTP PATH of the first packet. Empty means any; when set it must \
      start with `/` (h2c is not supported).";
@@ -121,10 +130,6 @@ const HELP_TUNNEL_USER_LEVEL: &str =
 const HELP_TUNNEL_PORT_MAP: &str =
     "Maps a local port to a specific remote address/port, overriding rewriteAddress/rewritePort \
      for that one port. Ports not listed here fall back to the rewriteAddress/rewritePort above.";
-const HELP_SOCKOPT_TPROXY: &str =
-    "Enables OS-level transparent proxying via iptables (Linux only): \"redirect\" or \"tproxy\" \
-     mode, or off. An alternative to Xray-level followRedirect — usually only one is needed.";
-
 // Stream tab — method selector + TCP.
 const HELP_STREAM_METHOD: &str =
     "Transport carrying the proxy protocol on the wire (tcp/raw, WebSocket, mKCP, gRPC, XHTTP, \
@@ -195,65 +200,22 @@ const HELP_WS_ED: &str =
      a round trip. Leave empty to disable.";
 
 // Stream tab — mKCP.
-const HELP_MKCP_MTU: &str = "Maximum Transmission Unit, in the 576–1460 range. Default 1350.";
+const HELP_MKCP_MTU: &str =
+    "Maximum Transmission Unit, in bytes. Default 1350. The docs recommend 576–1460; Xray-core \
+     accepts any value from 21.";
 const HELP_MKCP_TTI: &str =
-    "Transmission Time Interval in milliseconds — how often mKCP sends data. Range 10–100 ms, \
-     default 50 ms; smaller values lower latency at the cost of more overhead.";
+    "Transmission Time Interval in milliseconds — how often mKCP sends data. Xray-core accepts \
+     10–1000 ms, default 50 ms; smaller values lower latency at the cost of more overhead.";
 const HELP_MKCP_UPLINK: &str =
     "Maximum uplink bandwidth this host will use, in MB/s. Default 5; 0 means unlimited.";
 const HELP_MKCP_DOWNLINK: &str =
     "Maximum downlink bandwidth this host will use, in MB/s. Default 20; 0 means unlimited.";
-const HELP_MKCP_CONGESTION: &str =
-    "Enables congestion control: Xray monitors network quality and adjusts throughput \
-     accordingly. Default false.";
-const HELP_MKCP_READ_BUFFER: &str = "Per-connection read buffer size, in MB. Default 2.";
-const HELP_MKCP_WRITE_BUFFER: &str = "Per-connection write buffer size, in MB. Default 2.";
-
-// Stream tab — Hysteria (finalmask.quicParams; transport itself is protocol-locked).
-const HELP_HY_QUIC_CONGESTION: &str =
-    "QUIC congestion-control algorithm for the Hysteria transport: reno, bbr, brutal, or \
-     force-brutal. Brutal variants target a fixed throughput instead of reacting to loss.";
-const HELP_HY_QUIC_BRUTAL_UP: &str =
-    "Target uplink rate for brutal/force-brutal congestion control (e.g. \"100 mbps\"). Ignored \
-     by reno/bbr.";
-const HELP_HY_QUIC_BRUTAL_DOWN: &str =
-    "Target downlink rate for brutal/force-brutal congestion control (e.g. \"100 mbps\"). \
-     Ignored by reno/bbr.";
-
-// Stream tab — FinalMask (streamSettings.finalmask; VLESS/Trojan only — Hysteria owns quicParams).
-const HELP_FINALMASK_SECTION: &str =
-    "The final layer of traffic camouflage, applied after transport-layer encryption (TLS/\
-     REALITY) has already been processed. `tcp[]` and `udp[]` are ordered chains of masking \
-     layers — the first entry is the innermost. `salamander` (udp) is the same obfuscation \
-     algorithm as Hysteria2's `obfs=salamander`.";
-
-// Stream tab — Sockopt (streamSettings.sockopt; method-independent).
-const HELP_SOCKOPT_TCP_FAST_OPEN: &str =
-    "Enables TCP Fast Open. `true`/`false`, or a positive integer to also set the accept queue \
-     length. Availability depends on OS support.";
-const HELP_SOCKOPT_ACCEPT_PROXY_PROTOCOL: &str =
-    "Inbound-only. When enabled, the peer must send a PROXY protocol v1/v2 header immediately \
-     after the TCP connection is established, so Xray can see the real source IP/port.";
-const HELP_SOCKOPT_V6ONLY: &str =
-    "Linux only. When enabled, a listener bound to `::` accepts IPv6 connections only (no \
-     IPv4-mapped addresses).";
-const HELP_SOCKOPT_TCP_MAX_SEG: &str = "Sets the maximum segment size (MSS) of TCP packets.";
-const HELP_SOCKOPT_TCP_KEEP_ALIVE_IDLE: &str =
-    "Seconds a TCP connection must be idle before Keep-Alive probes start.";
-const HELP_SOCKOPT_TCP_KEEP_ALIVE_INTERVAL: &str =
-    "Seconds between Keep-Alive probes once a TCP connection has entered the Keep-Alive state.";
-const HELP_SOCKOPT_TCP_USER_TIMEOUT: &str =
-    "TCP user timeout in milliseconds (RFC 5482) — how long unacknowledged data may sit before \
-     the connection is force-closed.";
-const HELP_SOCKOPT_TCP_WINDOW_CLAMP: &str =
-    "Caps the advertised TCP receive window size. The kernel uses the larger of this value and \
-     its own minimum.";
-const HELP_SOCKOPT_TRUSTED_X_FORWARDED_FOR: &str =
-    "For HTTP-based transports: source IP ranges allowed to set a trusted X-Forwarded-For \
-     header (e.g. a reverse proxy in front of Xray). One CIDR/IP per line.";
-const HELP_SOCKOPT_CUSTOM_SOCKOPT: &str =
-    "Escape hatch for socket options not exposed as dedicated fields above — a raw JSON array, \
-     platform-specific (Linux/Windows/Darwin). Advanced use only.";
+const HELP_MKCP_CWND_MULTIPLIER: &str =
+    "Congestion-window multiplier for mKCP sending. Leave empty for the Xray-core default (1); \
+     must be at least 1.";
+const HELP_MKCP_MAX_SENDING_WINDOW: &str =
+    "Upper bound of the sending buffer, in bytes — the buffer holds maxSendingWindow / mtu \
+     packets. Leave empty for the Xray-core default (2097152 = 2 MiB); must be at least mtu.";
 
 // Security tab — mode selector.
 const HELP_SECURITY_MODE: &str =
@@ -265,7 +227,8 @@ const HELP_SECURITY_MODE: &str =
 // Security tab — TLS.
 const HELP_TLS_ALPN: &str =
     "ALPN values offered during the TLS handshake. Default is [\"h2\", \"http/1.1\"]. Required \
-     to be non-empty when fallbacks are configured on the Protocol tab.";
+     to be non-empty when fallbacks are configured on the Protocol tab: [\"http/1.1\"], or \
+     [\"h2\", \"http/1.1\"] when a fallback matches alpn h2.";
 const HELP_TLS_SERVER_NAME: &str =
     "Server name Xray presents/expects for SNI. The server certificate's SAN must cover this \
      value.";
@@ -353,9 +316,10 @@ const HELP_REALITY_XVER: &str =
 const HELP_REALITY_SERVER_NAMES: &str =
     "Required. The SNI values REALITY accepts from clients (no wildcards). Should normally stay \
      consistent with `dest`.";
-const HELP_REALITY_ALPN: &str =
-    "ALPN values REALITY advertises to the camouflaged destination during the real TLS \
-     handshake. Rarely needs to be set explicitly.";
+const HELP_REALITY_IGNORED_ALPN: &str =
+    "realitySettings.alpn is not part of REALITY: neither the docs nor Xray-core's REALITYConfig \
+     have it, and the REALITY server negotiates no ALPN (NextProtos is nil). The key on disk has no \
+     effect; Feldjäger keeps it until you remove it.";
 const HELP_REALITY_PRIVATE_KEY: &str =
     "Required. Server private key for REALITY's key exchange — generate with the \"Generate \
      x25519\" button (runs the remote `xray x25519`).";
@@ -664,6 +628,17 @@ fn show_add_pane(ui: &mut Ui, service: &mut ApplicationService) {
             set_protocol_picker(ui, InboundClientProtocol::Tunnel);
             let _ = service.begin_add_inbound(InboundClientProtocol::Tunnel);
         }
+        if ui
+            .selectable_value(&mut picker, InboundClientProtocol::Tun, "TUN")
+            .on_hover_text(
+                "Local network-interface inbound — client-side use case; not recommended for \
+                 server-side management (Roadmap §4.1)",
+            )
+            .changed()
+        {
+            set_protocol_picker(ui, InboundClientProtocol::Tun);
+            let _ = service.begin_add_inbound(InboundClientProtocol::Tun);
+        }
     });
     ui.add_space(6.0);
 
@@ -671,6 +646,9 @@ fn show_add_pane(ui: &mut Ui, service: &mut ApplicationService) {
     let is_tunnel = service
         .inbound_editor_session()
         .is_some_and(|s| matches!(s.protocol, InboundProtocolDraft::Tunnel { .. }));
+    let is_tun = service
+        .inbound_editor_session()
+        .is_some_and(|s| matches!(s.protocol, InboundProtocolDraft::Tun { .. }));
 
     // General fields.
     show_add_general(ui, service);
@@ -702,11 +680,16 @@ fn show_add_pane(ui: &mut Ui, service: &mut ApplicationService) {
                 show_protocol_edit(ui, service);
                 ui.add_space(6.0);
             }
+            crate::app::InboundProtocolDraft::Tun { .. } => {
+                ui.strong("Protocol");
+                show_tun_protocol_edit(ui, service);
+                ui.add_space(6.0);
+            }
         }
     }
 
-    // Stream (IB-L3) — not used for Tunnel.
-    if !is_tunnel {
+    // Stream (IB-L3) — not used for Tunnel or TUN (no streamSettings at all).
+    if !is_tunnel && !is_tun {
         ui.strong("Stream");
         show_stream_edit(ui, service);
         ui.add_space(6.0);
@@ -828,6 +811,7 @@ fn show_detail_pane(ui: &mut Ui, service: &mut ApplicationService, rows: &[Inbou
     let mut tab = detail_tab(ui);
     let shell_ok = service.inbound_shell_edit_enabled(row.index);
     let is_tunnel = matches!(protocol, Some(InboundClientProtocol::Tunnel));
+    let has_stream_settings = protocol.is_none_or(InboundClientProtocol::has_stream_settings);
     let users_ok = protocol.is_some_and(|p| p.mutate_enabled());
     let is_security_proto = matches!(
         protocol,
@@ -842,10 +826,13 @@ fn show_detail_pane(ui: &mut Ui, service: &mut ApplicationService, rows: &[Inbou
         ui.selectable_value(&mut tab, InboundDetailTab::General, "General");
         ui.selectable_value(&mut tab, InboundDetailTab::Protocol, "Protocol");
 
-        // Stream tab: shell-editable protocols except Tunnel (tcp/none fixed).
-        let stream_enabled = shell_ok && !is_tunnel;
+        // Stream tab: shell-editable protocols except Tunnel (tcp/none fixed) and TUN (no
+        // streamSettings at all).
+        let stream_enabled = shell_ok && !is_tunnel && has_stream_settings;
         let stream_disabled_hint = if is_tunnel {
             "Stream is not used for Tunnel (tcp / none)"
+        } else if !has_stream_settings {
+            "Stream is not used for TUN (no streamSettings)"
         } else {
             "Stream editing requires a shell-editable inbound"
         };
@@ -889,7 +876,7 @@ fn show_detail_pane(ui: &mut Ui, service: &mut ApplicationService, rows: &[Inbou
                 users_ok,
                 egui::Button::selectable(tab == InboundDetailTab::Users, "Users"),
             )
-            .on_disabled_hover_text("Users are not available for Tunnel inbounds")
+            .on_disabled_hover_text("Users are not available for Tunnel or TUN inbounds")
             .clicked()
             && users_ok
         {
@@ -897,7 +884,9 @@ fn show_detail_pane(ui: &mut Ui, service: &mut ApplicationService, rows: &[Inbou
         } else if !users_ok && tab == InboundDetailTab::Users {
             tab = InboundDetailTab::General;
         }
-        if is_tunnel && matches!(tab, InboundDetailTab::Stream | InboundDetailTab::Security) {
+        if (is_tunnel || !has_stream_settings)
+            && matches!(tab, InboundDetailTab::Stream | InboundDetailTab::Security)
+        {
             tab = InboundDetailTab::Protocol;
         }
     });
@@ -1270,6 +1259,7 @@ fn show_protocol_readonly(
             show_fallbacks_readonly_from_row(ui, service, row);
         }
         "tunnel" => show_tunnel_protocol_readonly(ui, service, row),
+        "tun" => show_tun_protocol_readonly(ui, service, row),
         _ => {
             ui.label(
                 RichText::new("Protocol tab not available for this inbound type.")
@@ -1430,6 +1420,81 @@ fn show_tunnel_protocol_readonly(
     }
 }
 
+fn show_tun_protocol_readonly(ui: &mut Ui, service: &ApplicationService, row: &InboundSummary) {
+    let inbound_value = service
+        .loaded_config()
+        .editable()
+        .and_then(|e| e.sections().inbounds().get(row.index))
+        .map(|inbound| inbound.value());
+    let draft = inbound_value.and_then(crate::xray::parse_inbound_protocol);
+    let Some(InboundProtocolDraft::Tun {
+        name,
+        desc,
+        mtu,
+        gateway,
+        dns,
+        user_level,
+        auto_system_routing_table,
+        auto_outbounds_interface,
+    }) = draft
+    else {
+        ui.label(
+            RichText::new("TUN settings unavailable.")
+                .size(14.0)
+                .color(Color32::from_rgb(140, 140, 140)),
+        );
+        return;
+    };
+
+    ui.label(
+        RichText::new(
+            "Local network-interface inbound (no port, no streamSettings/security). Client-side \
+             use case — not recommended for server-side management (Roadmap §4.1).",
+        )
+        .size(12.0)
+        .color(Color32::from_rgb(140, 140, 140)),
+    );
+
+    egui::Grid::new("tun_protocol_view_grid")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("name");
+            ui.label(if name.is_empty() { "(unset)" } else { &name });
+            ui.end_row();
+            ui.label("desc");
+            ui.label(if desc.is_empty() { "(unset)" } else { &desc });
+            ui.end_row();
+            ui.label("mtu");
+            ui.label(if mtu == 0 { "(Xray default)".to_owned() } else { mtu.to_string() });
+            ui.end_row();
+            ui.label("userLevel");
+            ui.label(user_level.to_string());
+            ui.end_row();
+            ui.label("autoOutboundsInterface");
+            ui.label(if auto_outbounds_interface.is_empty() {
+                "(unset)"
+            } else {
+                &auto_outbounds_interface
+            });
+            ui.end_row();
+        });
+
+    ui.add_space(6.0);
+    ui.strong("gateway");
+    ui.label(if gateway.is_empty() { "(empty)".to_owned() } else { gateway.join(", ") });
+    ui.add_space(6.0);
+    ui.strong("dns");
+    ui.label(if dns.is_empty() { "(empty)".to_owned() } else { dns.join(", ") });
+    ui.add_space(6.0);
+    ui.strong("autoSystemRoutingTable");
+    ui.label(if auto_system_routing_table.is_empty() {
+        "(empty)".to_owned()
+    } else {
+        auto_system_routing_table.join(", ")
+    });
+}
+
 fn show_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
     let busy = service.is_inbound_shell_mutation_busy() || service.is_user_mutation_busy();
     let protocol_kind = service
@@ -1439,6 +1504,7 @@ fn show_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
             InboundProtocolDraft::Trojan { .. } => 1,
             InboundProtocolDraft::Hysteria { .. } => 2,
             InboundProtocolDraft::Tunnel { .. } => 3,
+            InboundProtocolDraft::Tun { .. } => 4,
         });
 
     let Some(kind) = protocol_kind else {
@@ -1530,6 +1596,10 @@ fn show_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
             let _ = busy;
             show_tunnel_protocol_edit(ui, service);
         }
+        4 => {
+            let _ = busy;
+            show_tun_protocol_edit(ui, service);
+        }
         _ => {}
     }
 }
@@ -1562,7 +1632,10 @@ fn show_fallbacks_edit(ui: &mut Ui, service: &mut ApplicationService, busy: bool
     ui.add_space(6.0);
     ui.strong("fallbacks");
     ui.label(
-        RichText::new("VLESS/Trojan · TCP + TLS/Reality only. Non-empty Security ALPN required when fallbacks are set.")
+        RichText::new(
+            "VLESS/Trojan · TCP + TLS/Reality only. TLS: a non-empty tlsSettings.alpn is required. \
+             REALITY negotiates no ALPN — only fallbacks with an empty alpn are used.",
+        )
             .size(12.0)
             .color(Color32::from_rgb(140, 140, 140)),
     );
@@ -1579,6 +1652,10 @@ fn show_fallbacks_edit(ui: &mut Ui, service: &mut ApplicationService, busy: bool
         let Some(session) = service.inbound_editor_session_mut() else {
             return;
         };
+        let reality = session
+            .security
+            .as_ref()
+            .is_some_and(|security| security.mode == InboundSecurityMode::Reality);
         let Some(fallbacks) = session.protocol.fallbacks_mut() else {
             return;
         };
@@ -1598,9 +1675,18 @@ fn show_fallbacks_edit(ui: &mut Ui, service: &mut ApplicationService, busy: bool
                         ui.end_row();
 
                         super::field_label(ui, "alpn", HELP_FALLBACK_ALPN);
-                        if ui.text_edit_singleline(&mut entry.alpn).changed() {
-                            dirty = true;
-                        }
+                        ui.horizontal(|ui| {
+                            if ui.text_edit_singleline(&mut entry.alpn).changed() {
+                                dirty = true;
+                            }
+                            if reality && !entry.alpn.trim().is_empty() {
+                                ui.label(
+                                    RichText::new("never matches with REALITY (no ALPN negotiated)")
+                                        .size(12.0)
+                                        .color(Color32::from_rgb(220, 160, 60)),
+                                );
+                            }
+                        });
                         ui.end_row();
 
                         super::field_label(ui, "path", HELP_FALLBACK_PATH);
@@ -1919,6 +2005,108 @@ fn show_tunnel_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
     }
 }
 
+fn show_tun_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
+    let Some(session) = service.inbound_editor_session_mut() else {
+        return;
+    };
+    let InboundProtocolDraft::Tun {
+        name,
+        desc,
+        mtu,
+        gateway,
+        dns,
+        user_level,
+        auto_system_routing_table,
+        auto_outbounds_interface,
+    } = &mut session.protocol
+    else {
+        return;
+    };
+
+    let mut dirty = false;
+    let mut name_text = name.clone();
+    let mut desc_text = desc.clone();
+    let mut mtu_value = *mtu as i64;
+    let mut level = *user_level as i64;
+    let mut auto_outbounds_interface_text = auto_outbounds_interface.clone();
+
+    ui.label(
+        RichText::new(
+            "Local network-interface inbound (no port, no streamSettings/security). Client-side \
+             use case — not recommended for server-side management (Roadmap §4.1).",
+        )
+        .size(12.0)
+        .color(Color32::from_rgb(140, 140, 140)),
+    );
+
+    egui::Grid::new("tun_protocol_edit_grid")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("name");
+            if ui.text_edit_singleline(&mut name_text).changed() {
+                dirty = true;
+            }
+            ui.end_row();
+
+            ui.label("desc");
+            if ui.text_edit_singleline(&mut desc_text).changed() {
+                dirty = true;
+            }
+            ui.end_row();
+
+            ui.label("mtu");
+            if ui
+                .add(egui::DragValue::new(&mut mtu_value).range(0..=u32::MAX as i64))
+                .on_hover_text("0 = Xray default")
+                .changed()
+            {
+                dirty = true;
+            }
+            ui.end_row();
+
+            ui.label("userLevel");
+            if ui
+                .add(egui::DragValue::new(&mut level).range(0..=u32::MAX as i64))
+                .changed()
+            {
+                dirty = true;
+            }
+            ui.end_row();
+
+            ui.label("autoOutboundsInterface");
+            if ui.text_edit_singleline(&mut auto_outbounds_interface_text).changed() {
+                dirty = true;
+            }
+            ui.end_row();
+        });
+
+    if persistent_multiline_list_row(ui, "gateway (one per line)", gateway, "tun_gateway") {
+        dirty = true;
+    }
+    if persistent_multiline_list_row(ui, "dns (one per line)", dns, "tun_dns") {
+        dirty = true;
+    }
+    if persistent_multiline_list_row(
+        ui,
+        "autoSystemRoutingTable (one per line, e.g. linux/windows/darwin/freebsd)",
+        auto_system_routing_table,
+        "tun_auto_system_routing_table",
+    ) {
+        dirty = true;
+    }
+
+    *name = name_text;
+    *desc = desc_text;
+    *mtu = mtu_value.clamp(0, u32::MAX as i64) as u32;
+    *user_level = level.max(0) as u64;
+    *auto_outbounds_interface = auto_outbounds_interface_text;
+
+    if dirty {
+        session.dirty = true;
+    }
+}
+
 // ─── Stream tab (IB-L3) ──────────────────────────────────────────────────────
 
 fn show_stream_tab(ui: &mut Ui, service: &mut ApplicationService, row: &InboundSummary) {
@@ -1962,11 +2150,34 @@ fn show_stream_tab(ui: &mut Ui, service: &mut ApplicationService, row: &InboundS
     });
     ui.add_space(8.0);
 
+    // Non-blocking warnings: for the draft while editing, for the saved inbound otherwise.
+    let warnings = if editing {
+        service.inbound_editor_warnings()
+    } else {
+        service.inbound_warnings_at(row.index)
+    };
+    show_compatibility_warnings(ui, &warnings);
+
     if editing {
         show_stream_edit(ui, service);
     } else {
         show_stream_readonly(ui, service, row);
     }
+}
+
+/// Non-blocking compatibility warnings (Roadmap §2.6 stage 0.3) — shown in yellow with their
+/// JSON location; unlike gates they never block Save.
+fn show_compatibility_warnings(ui: &mut Ui, warnings: &[CompatibilityWarning]) {
+    if warnings.is_empty() {
+        return;
+    }
+    for warning in warnings {
+        ui.label(
+            RichText::new(format!("Warning: {}", warning.text()))
+                .color(Color32::from_rgb(220, 160, 60)),
+        );
+    }
+    ui.add_space(6.0);
 }
 
 fn show_stream_readonly(ui: &mut Ui, service: &ApplicationService, row: &InboundSummary) {
@@ -1999,7 +2210,7 @@ fn show_stream_readonly(ui: &mut Ui, service: &ApplicationService, row: &Inbound
         egui::CollapsingHeader::new("Sockopt")
             .default_open(false)
             .show(ui, |ui| {
-                show_sockopt_readonly(ui, &draft.sockopt);
+                show_sockopt_readonly(ui, StreamDirection::Inbound, &draft.sockopt);
             });
     }
 }
@@ -2118,14 +2329,25 @@ fn show_stream_readonly_method_grid(ui: &mut Ui, draft: &InboundStreamDraft) {
                     ui.label("downlinkCapacity");
                     ui.label(format!("{} MB/s", draft.kcp.downlink_capacity));
                     ui.end_row();
-                    ui.label("congestion");
-                    ui.label(bool_label(draft.kcp.congestion));
+                    ui.label("cwndMultiplier");
+                    ui.label(
+                        draft
+                            .kcp
+                            .cwnd_multiplier
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| format!("default ({KCP_DEFAULT_CWND_MULTIPLIER})")),
+                    );
                     ui.end_row();
-                    ui.label("readBufferSize");
-                    ui.label(format!("{} MB", draft.kcp.read_buffer_size));
-                    ui.end_row();
-                    ui.label("writeBufferSize");
-                    ui.label(format!("{} MB", draft.kcp.write_buffer_size));
+                    ui.label("maxSendingWindow");
+                    ui.label(
+                        draft
+                            .kcp
+                            .max_sending_window
+                            .map(|v| format!("{v} bytes"))
+                            .unwrap_or_else(|| {
+                                format!("default ({KCP_DEFAULT_MAX_SENDING_WINDOW} bytes)")
+                            }),
+                    );
                     ui.end_row();
                 }
                 StreamMethod::Hysteria => {
@@ -2153,6 +2375,7 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
         InboundProtocolDraft::Trojan { .. } => "trojan",
         InboundProtocolDraft::Hysteria { .. } => "hysteria",
         InboundProtocolDraft::Tunnel { .. } => "tunnel",
+        InboundProtocolDraft::Tun { .. } => "tun",
     };
     let vision_active = session.vision_active;
     let allowed = selectable_stream_methods(protocol, vision_active);
@@ -2353,6 +2576,34 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
             if dirty {
                 session.dirty = true;
             }
+            // XHTTP runs over QUIC only with TLS ALPN exactly ["h3"] (Roadmap §2.6 stage 3.3).
+            let http3 = session.security.as_ref().is_some_and(|security| {
+                security.mode == InboundSecurityMode::Tls && alpn_selects_http3(&security.tls.alpn)
+            });
+            if http3 {
+                ui.add_space(8.0);
+                ui.separator();
+                if session.stream.finalmask_foreign {
+                    show_foreign_finalmask_notice(ui);
+                } else if show_quic_params_edit(
+                    ui,
+                    StreamDirection::Inbound,
+                    QuicTransport::XhttpH3,
+                    &mut session.stream.quic_params,
+                ) {
+                    session.stream.write_quic_params = true;
+                    session.dirty = true;
+                }
+            } else {
+                ui.label(
+                    RichText::new(
+                        "QUIC tuning (finalmask.quicParams) applies when XHTTP runs over HTTP/3: \
+                         security tls with alpn exactly [\"h3\"].",
+                    )
+                    .size(12.0)
+                    .color(Color32::from_rgb(140, 140, 140)),
+                );
+            }
         }
         StreamMethod::Grpc => {
             let mut service_name = session.stream.grpc.service_name.clone();
@@ -2423,7 +2674,7 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
         StreamMethod::Mkcp => {
             ui.label(
                 RichText::new(format!(
-                    "mKCP uses UDP — ensure firewall allows the listen port. Legacy header/seed removed by Xray; use FinalMask separately. Ranges: mtu {KCP_MTU_MIN}–{KCP_MTU_MAX}, tti {KCP_TTI_MIN}–{KCP_TTI_MAX} ms."
+                    "mKCP uses UDP — ensure firewall allows the listen port. Legacy header/seed are ignored by Xray-core; use FinalMask separately. Xray-core limits: mtu ≥ {KCP_MTU_MIN}, tti {KCP_TTI_MIN}–{KCP_TTI_MAX} ms, cwndMultiplier ≥ {KCP_CWND_MULTIPLIER_MIN}, maxSendingWindow ≥ mtu."
                 ))
                 .size(13.0)
                 .color(Color32::from_rgb(140, 140, 140)),
@@ -2433,9 +2684,18 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
             let mut tti = session.stream.kcp.tti.to_string();
             let mut uplink = session.stream.kcp.uplink_capacity.to_string();
             let mut downlink = session.stream.kcp.downlink_capacity.to_string();
-            let mut read_buf = session.stream.kcp.read_buffer_size.to_string();
-            let mut write_buf = session.stream.kcp.write_buffer_size.to_string();
-            let congestion = session.stream.kcp.congestion;
+            let mut cwnd = session
+                .stream
+                .kcp
+                .cwnd_multiplier
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            let mut window = session
+                .stream
+                .kcp
+                .max_sending_window
+                .map(|v| v.to_string())
+                .unwrap_or_default();
             egui::Grid::new("stream_mkcp_edit_grid")
                 .num_columns(2)
                 .spacing([16.0, 6.0])
@@ -2472,118 +2732,125 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                         }
                     }
                     ui.end_row();
-                    super::field_label(ui, "congestion", HELP_MKCP_CONGESTION);
-                    ComboBox::from_id_salt("stream_mkcp_congestion")
-                        .selected_text(if congestion { "true" } else { "false" })
-                        .width(120.0)
-                        .show_ui(ui, |ui| {
-                            for (label, value) in [("false", false), ("true", true)] {
-                                if ui.selectable_label(congestion == value, label).clicked()
-                                    && congestion != value
-                                {
-                                    session.stream.kcp.congestion = value;
-                                    session.dirty = true;
-                                }
-                            }
-                        });
-                    ui.end_row();
-                    super::field_label(ui, "readBufferSize (MB)", HELP_MKCP_READ_BUFFER);
-                    if ui.text_edit_singleline(&mut read_buf).changed() {
-                        if let Ok(v) = read_buf.trim().parse::<u64>() {
-                            session.stream.kcp.read_buffer_size = v;
+                    super::field_label(ui, "cwndMultiplier", HELP_MKCP_CWND_MULTIPLIER);
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut cwnd)
+                                .hint_text(format!("default {KCP_DEFAULT_CWND_MULTIPLIER}")),
+                        )
+                        .changed()
+                    {
+                        let trimmed = cwnd.trim();
+                        if trimmed.is_empty() {
+                            session.stream.kcp.cwnd_multiplier = None;
+                            session.dirty = true;
+                        } else if let Ok(v) = trimmed.parse::<u64>() {
+                            session.stream.kcp.cwnd_multiplier = Some(v);
                             session.dirty = true;
                         }
                     }
                     ui.end_row();
-                    super::field_label(ui, "writeBufferSize (MB)", HELP_MKCP_WRITE_BUFFER);
-                    if ui.text_edit_singleline(&mut write_buf).changed() {
-                        if let Ok(v) = write_buf.trim().parse::<u64>() {
-                            session.stream.kcp.write_buffer_size = v;
+                    super::field_label(
+                        ui,
+                        "maxSendingWindow (bytes)",
+                        HELP_MKCP_MAX_SENDING_WINDOW,
+                    );
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut window)
+                                .hint_text(format!("default {KCP_DEFAULT_MAX_SENDING_WINDOW}")),
+                        )
+                        .changed()
+                    {
+                        let trimmed = window.trim();
+                        if trimmed.is_empty() {
+                            session.stream.kcp.max_sending_window = None;
+                            session.dirty = true;
+                        } else if let Ok(v) = trimmed.parse::<u64>() {
+                            session.stream.kcp.max_sending_window = Some(v);
                             session.dirty = true;
                         }
                     }
                     ui.end_row();
                 });
+            // Keys the core ignores stay on disk until removed explicitly (Roadmap §2.6 0.6);
+            // the Stream-tab warnings above name each one. Legacy header/seed are kept for the
+            // FinalMask migration (stage 5.2).
+            if session.stream.kcp.has_ignored_fields() {
+                ui.add_space(4.0);
+                if ui
+                    .button(format!("Remove ignored fields ({})", KCP_IGNORED_FIELDS.join(", ")))
+                    .on_hover_text("Xray-core no longer reads these kcpSettings keys.")
+                    .clicked()
+                    && session.stream.kcp.remove_ignored_fields()
+                {
+                    session.dirty = true;
+                }
+            }
         }
         StreamMethod::Hysteria => {
             ui.label(
-                RichText::new("Hysteria transport (locked). Congestion via finalmask.quicParams.")
+                RichText::new("Hysteria transport (locked). QUIC tuning via finalmask.quicParams.")
                     .size(13.0)
                     .color(Color32::from_rgb(140, 140, 140)),
             );
-            let mut congestion = session.stream.quic_params.congestion.clone();
-            let mut up = session.stream.quic_params.brutal_up.clone();
-            let mut down = session.stream.quic_params.brutal_down.clone();
-            egui::Grid::new("stream_hy_quic_edit_grid")
-                .num_columns(2)
-                .spacing([16.0, 6.0])
-                .show(ui, |ui| {
-                    super::field_label(ui, "congestion", HELP_HY_QUIC_CONGESTION);
-                    if ui.text_edit_singleline(&mut congestion).changed() {
-                        session.stream.quic_params.congestion = congestion;
-                        session.stream.write_quic_params = true;
-                        session.dirty = true;
-                    }
-                    ui.end_row();
-                    super::field_label(ui, "brutalUp", HELP_HY_QUIC_BRUTAL_UP);
-                    if ui.text_edit_singleline(&mut up).changed() {
-                        session.stream.quic_params.brutal_up = up;
-                        session.stream.write_quic_params = true;
-                        session.dirty = true;
-                    }
-                    ui.end_row();
-                    super::field_label(ui, "brutalDown", HELP_HY_QUIC_BRUTAL_DOWN);
-                    if ui.text_edit_singleline(&mut down).changed() {
-                        session.stream.quic_params.brutal_down = down;
-                        session.stream.write_quic_params = true;
-                        session.dirty = true;
-                    }
-                    ui.end_row();
-                });
+            if session.stream.finalmask_foreign {
+                show_foreign_finalmask_notice(ui);
+            } else if show_quic_params_edit(ui, StreamDirection::Inbound, QuicTransport::Hysteria, &mut session.stream.quic_params) {
+                session.stream.write_quic_params = true;
+                session.dirty = true;
+            }
         }
     }
 
-    if session.stream.method != Some(StreamMethod::Hysteria) && matches!(protocol, "vless" | "trojan")
-    {
+    // Hysteria is QUIC over UDP: its FinalMask editor offers only `udp[]` (Roadmap §2.6 stage
+    // 4.1). A foreign `finalmask` was already reported by the Hysteria branch above.
+    let udp_only = session.stream.method == Some(StreamMethod::Hysteria);
+    if matches!(protocol, "vless" | "trojan" | "hysteria") && !(udp_only && session.stream.finalmask_foreign) {
         ui.add_space(8.0);
         ui.separator();
         ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            super::help_button(ui, "FinalMask", HELP_FINALMASK_SECTION);
-            ui.strong("FinalMask");
-        });
-        ui.label(
-            RichText::new(
-                "Advanced streamSettings.finalmask masking layers. Order matters — the first entry is the innermost layer.",
-            )
-            .size(12.0)
-            .color(Color32::from_rgb(140, 140, 140)),
-        );
         let reality_conflict = matches!(
             session.security.as_ref().map(|s| s.mode),
             Some(InboundSecurityMode::Reality)
         ) && !session.stream.finalmask_tcp.is_empty();
-        if reality_conflict {
-            ui.label(
-                RichText::new(
-                    "Reality is incompatible with FinalMask tcp layers; Save will be blocked (G4).",
-                )
-                .color(Color32::from_rgb(220, 160, 60)),
-            );
-        }
-        ui.add_space(4.0);
-        ui.label(RichText::new("tcp").strong());
-        if show_finalmask_layers_edit(ui, "tcp", TCP_FINALMASK_TYPES, &mut session.stream.finalmask_tcp) {
+        let edit = if session.stream.finalmask_foreign {
+            show_foreign_finalmask_notice(ui);
+            FinalMaskEdit::default()
+        } else {
+            show_finalmask_edit(
+                ui,
+                StreamDirection::Inbound,
+                &mut session.stream.finalmask_tcp,
+                &mut session.stream.finalmask_udp,
+                reality_conflict
+                    .then_some("Reality is incompatible with FinalMask tcp layers; Save will be blocked (G4)."),
+                udp_only,
+            )
+        };
+        if edit.tcp {
             session.stream.write_finalmask_tcp = true;
             session.dirty = true;
         }
-        ui.add_space(6.0);
-        ui.label(RichText::new("udp").strong());
-        if show_finalmask_layers_edit(ui, "udp", UDP_FINALMASK_TYPES, &mut session.stream.finalmask_udp) {
+        if edit.udp {
             session.stream.write_finalmask_udp = true;
             session.dirty = true;
         }
     }
+
+    // A hy2 link carries only a plain salamander `obfs`; when this chain needs more, Share is
+    // disabled — say so next to the chain that causes it (Roadmap §2.6 stage 4.1). Asked after
+    // this frame's edits, so the session borrow ends here and is taken again below.
+    if udp_only && let Some(reason) = service.editor_hy2_share_blocked_reason() {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(format!("Share links (hy2://) are disabled: {reason}"))
+                .color(Color32::from_rgb(220, 160, 60)),
+        );
+    }
+    let Some(session) = service.inbound_editor_session_mut() else {
+        return;
+    };
 
     if matches!(protocol, "vless" | "trojan" | "hysteria") {
         ui.add_space(8.0);
@@ -2593,491 +2860,16 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
             .default_open(false)
             .show(ui, |ui| {
                 ui.label(
-                    RichText::new(
-                        "streamSettings.sockopt — low-level socket options; applies regardless of transport method. Outbound-only fields (mark, domainStrategy, dialerProxy, tcpcongestion, interface, tcpMptcp, addressPortStrategy, happyEyeballs) are preserved but not yet editable here.",
-                    )
-                    .size(12.0)
-                    .color(Color32::from_rgb(140, 140, 140)),
+                    RichText::new(sockopt_scope_note(StreamDirection::Inbound))
+                        .size(12.0)
+                        .color(Color32::from_rgb(140, 140, 140)),
                 );
                 ui.add_space(4.0);
-                if show_sockopt_edit(ui, &mut session.stream.sockopt) {
+                if show_sockopt_edit(ui, StreamDirection::Inbound, &mut session.stream.sockopt) {
                     session.stream.write_sockopt = true;
                     session.dirty = true;
                 }
             });
-    }
-}
-
-/// Editor for one `finalmask.tcp` / `finalmask.udp` layer chain; returns true when the layer
-/// list changed. `id_suffix` distinguishes tcp/udp widget ids.
-fn show_finalmask_layers_edit(
-    ui: &mut Ui,
-    id_suffix: &str,
-    type_presets: &[&str],
-    layers: &mut Vec<FinalMaskLayerDraft>,
-) -> bool {
-    let mut dirty = false;
-    let mut remove_idx: Option<usize> = None;
-    let mut move_up_idx: Option<usize> = None;
-    let mut move_down_idx: Option<usize> = None;
-
-    for idx in 0..layers.len() {
-        ui.add_space(4.0);
-        ui.group(|ui| {
-            ui.horizontal(|ui| {
-                ui.label(format!("layer[{idx}]"));
-                let mut layer_type = layers[idx].layer_type.clone();
-                egui::ComboBox::from_id_salt(format!("finalmask_{id_suffix}_type_{idx}"))
-                    .selected_text(if layer_type.is_empty() {
-                        "(pick type)"
-                    } else {
-                        layer_type.as_str()
-                    })
-                    .show_ui(ui, |ui| {
-                        for &preset in type_presets {
-                            ui.selectable_value(&mut layer_type, preset.to_owned(), preset);
-                        }
-                    });
-                if ui.text_edit_singleline(&mut layer_type).changed() {
-                    layers[idx].layer_type = layer_type.clone();
-                    dirty = true;
-                } else if layer_type != layers[idx].layer_type {
-                    layers[idx].layer_type = layer_type;
-                    dirty = true;
-                }
-                if ui.small_button("Up").on_hover_text("Move up").clicked() && idx > 0 {
-                    move_up_idx = Some(idx);
-                }
-                if ui.small_button("Down").on_hover_text("Move down").clicked() && idx + 1 < layers.len() {
-                    move_down_idx = Some(idx);
-                }
-                if ui.button("Remove").clicked() {
-                    remove_idx = Some(idx);
-                }
-            });
-
-            let mut settings_text =
-                serde_json::to_string_pretty(&layers[idx].settings).unwrap_or_default();
-            ui.label(
-                RichText::new("settings (JSON object)")
-                    .size(12.0)
-                    .color(Color32::from_rgb(140, 140, 140)),
-            );
-            if resizable_multiline(
-                ui,
-                &mut settings_text,
-                4,
-                &format!("finalmask_{id_suffix}_settings_{idx}"),
-            )
-            .changed()
-            {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&settings_text) {
-                    if value.is_object() {
-                        layers[idx].settings = value;
-                        dirty = true;
-                    }
-                }
-            }
-        });
-    }
-
-    if let Some(idx) = remove_idx {
-        layers.remove(idx);
-        dirty = true;
-    } else if let Some(idx) = move_up_idx {
-        layers.swap(idx, idx - 1);
-        dirty = true;
-    } else if let Some(idx) = move_down_idx {
-        layers.swap(idx, idx + 1);
-        dirty = true;
-    }
-
-    ui.add_space(4.0);
-    if ui.button(format!("Add {id_suffix} layer")).clicked() {
-        layers.push(FinalMaskLayerDraft::default());
-        dirty = true;
-    }
-
-    dirty
-}
-
-/// `sockopt.tproxy` combo (documented presets) + free-text fallback. Shared by the Stream tab's
-/// full Sockopt editor and the Tunnel Protocol tab's narrow tproxy field (Roadmap §2.3:88).
-/// Returns true when changed.
-fn tproxy_combo_field(ui: &mut Ui, id_salt: &str, tproxy: &mut String) -> bool {
-    let mut value = tproxy.clone();
-    ui.horizontal(|ui| {
-        egui::ComboBox::from_id_salt(id_salt)
-            .selected_text(if value.is_empty() {
-                "(unset)"
-            } else {
-                value.as_str()
-            })
-            .show_ui(ui, |ui| {
-                for &preset in TPROXY_MODES {
-                    ui.selectable_value(&mut value, preset.to_owned(), preset);
-                }
-            });
-        ui.text_edit_singleline(&mut value);
-    });
-    if value != *tproxy {
-        *tproxy = value;
-        true
-    } else {
-        false
-    }
-}
-
-/// Editor for `streamSettings.sockopt` (Roadmap §2.3:87). Inbound-applicable fields only —
-/// outbound-only fields stay typed/round-tripped via [`SockoptDraft::extras`]-adjacent fields
-/// with no widget yet. Returns true when any field changed.
-fn show_sockopt_edit(ui: &mut Ui, sockopt: &mut SockoptDraft) -> bool {
-    let mut dirty = false;
-    let mut tcp_max_seg = sockopt
-        .tcp_max_seg
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-    let mut tcp_keep_alive_idle = sockopt
-        .tcp_keep_alive_idle
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-    let mut tcp_keep_alive_interval = sockopt
-        .tcp_keep_alive_interval
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-    let mut tcp_user_timeout = sockopt
-        .tcp_user_timeout
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-    let mut tcp_window_clamp = sockopt
-        .tcp_window_clamp
-        .map(|v| v.to_string())
-        .unwrap_or_default();
-    let mut trusted_x_forwarded_for = sockopt.trusted_x_forwarded_for.join("\n");
-    let mut custom_sockopt_text = sockopt
-        .custom_sockopt
-        .as_ref()
-        .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-        .unwrap_or_default();
-
-    egui::Grid::new("stream_sockopt_edit_grid")
-        .num_columns(2)
-        .spacing([16.0, 6.0])
-        .show(ui, |ui| {
-            super::field_label(ui, "tproxy", HELP_SOCKOPT_TPROXY);
-            if tproxy_combo_field(ui, "sockopt_tproxy", &mut sockopt.tproxy) {
-                dirty = true;
-            }
-            ui.end_row();
-
-            super::field_label(ui, "tcpFastOpen", HELP_SOCKOPT_TCP_FAST_OPEN);
-            if show_tcp_fast_open_edit(ui, &mut sockopt.tcp_fast_open) {
-                dirty = true;
-            }
-            ui.end_row();
-
-            super::field_label(ui, "acceptProxyProtocol", HELP_SOCKOPT_ACCEPT_PROXY_PROTOCOL);
-            let mut accept_proxy_protocol = sockopt.accept_proxy_protocol;
-            if ui.checkbox(&mut accept_proxy_protocol, "").changed() {
-                sockopt.accept_proxy_protocol = accept_proxy_protocol;
-                dirty = true;
-            }
-            ui.end_row();
-
-            super::field_label(ui, "V6Only", HELP_SOCKOPT_V6ONLY);
-            let mut v6_only = sockopt.v6_only;
-            if ui.checkbox(&mut v6_only, "").changed() {
-                sockopt.v6_only = v6_only;
-                dirty = true;
-            }
-            ui.end_row();
-
-            super::field_label(ui, "tcpMaxSeg", HELP_SOCKOPT_TCP_MAX_SEG);
-            if ui
-                .add(egui::TextEdit::singleline(&mut tcp_max_seg).hint_text("optional; integer"))
-                .changed()
-            {
-                let trimmed = tcp_max_seg.trim();
-                if trimmed.is_empty() {
-                    sockopt.tcp_max_seg = None;
-                    dirty = true;
-                } else if let Ok(value) = trimmed.parse::<u64>() {
-                    sockopt.tcp_max_seg = Some(value);
-                    dirty = true;
-                }
-            }
-            ui.end_row();
-
-            super::field_label(ui, "tcpKeepAliveIdle (s)", HELP_SOCKOPT_TCP_KEEP_ALIVE_IDLE);
-            if ui
-                .add(
-                    egui::TextEdit::singleline(&mut tcp_keep_alive_idle)
-                        .hint_text("optional; seconds"),
-                )
-                .changed()
-            {
-                let trimmed = tcp_keep_alive_idle.trim();
-                if trimmed.is_empty() {
-                    sockopt.tcp_keep_alive_idle = None;
-                    dirty = true;
-                } else if let Ok(value) = trimmed.parse::<i64>() {
-                    sockopt.tcp_keep_alive_idle = Some(value);
-                    dirty = true;
-                }
-            }
-            ui.end_row();
-
-            super::field_label(ui, "tcpKeepAliveInterval (s)", HELP_SOCKOPT_TCP_KEEP_ALIVE_INTERVAL);
-            if ui
-                .add(
-                    egui::TextEdit::singleline(&mut tcp_keep_alive_interval)
-                        .hint_text("optional; seconds"),
-                )
-                .changed()
-            {
-                let trimmed = tcp_keep_alive_interval.trim();
-                if trimmed.is_empty() {
-                    sockopt.tcp_keep_alive_interval = None;
-                    dirty = true;
-                } else if let Ok(value) = trimmed.parse::<i64>() {
-                    sockopt.tcp_keep_alive_interval = Some(value);
-                    dirty = true;
-                }
-            }
-            ui.end_row();
-
-            super::field_label(ui, "tcpUserTimeout (ms)", HELP_SOCKOPT_TCP_USER_TIMEOUT);
-            if ui
-                .add(
-                    egui::TextEdit::singleline(&mut tcp_user_timeout)
-                        .hint_text("optional; milliseconds"),
-                )
-                .changed()
-            {
-                let trimmed = tcp_user_timeout.trim();
-                if trimmed.is_empty() {
-                    sockopt.tcp_user_timeout = None;
-                    dirty = true;
-                } else if let Ok(value) = trimmed.parse::<u64>() {
-                    sockopt.tcp_user_timeout = Some(value);
-                    dirty = true;
-                }
-            }
-            ui.end_row();
-
-            super::field_label(ui, "tcpWindowClamp", HELP_SOCKOPT_TCP_WINDOW_CLAMP);
-            if ui
-                .add(
-                    egui::TextEdit::singleline(&mut tcp_window_clamp)
-                        .hint_text("optional; integer"),
-                )
-                .changed()
-            {
-                let trimmed = tcp_window_clamp.trim();
-                if trimmed.is_empty() {
-                    sockopt.tcp_window_clamp = None;
-                    dirty = true;
-                } else if let Ok(value) = trimmed.parse::<u64>() {
-                    sockopt.tcp_window_clamp = Some(value);
-                    dirty = true;
-                }
-            }
-            ui.end_row();
-
-            super::field_label(
-                ui,
-                "trustedXForwardedFor (one per line)",
-                HELP_SOCKOPT_TRUSTED_X_FORWARDED_FOR,
-            );
-            if ui
-                .add(egui::TextEdit::multiline(&mut trusted_x_forwarded_for).desired_rows(2))
-                .changed()
-            {
-                sockopt.trusted_x_forwarded_for = lines_to_vec(&trusted_x_forwarded_for);
-                dirty = true;
-            }
-            ui.end_row();
-        });
-
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        super::help_button(ui, "customSockopt", HELP_SOCKOPT_CUSTOM_SOCKOPT);
-        ui.label(
-            RichText::new("customSockopt (JSON array; advanced)")
-                .size(12.0)
-                .color(Color32::from_rgb(140, 140, 140)),
-        );
-    });
-    if resizable_multiline(ui, &mut custom_sockopt_text, 3, "sockopt_custom_sockopt").changed() {
-        let trimmed = custom_sockopt_text.trim();
-        if trimmed.is_empty() {
-            sockopt.custom_sockopt = None;
-            dirty = true;
-        } else if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
-            && value.is_array()
-        {
-            sockopt.custom_sockopt = Some(value);
-            dirty = true;
-        }
-    }
-
-    dirty
-}
-
-/// `sockopt.tcpFastOpen` editor: `bool | number` union — unset / false / true / custom backlog.
-fn show_tcp_fast_open_edit(ui: &mut Ui, value: &mut TcpFastOpenDraft) -> bool {
-    let mut dirty = false;
-    let label = match *value {
-        TcpFastOpenDraft::Unset => "(unset)",
-        TcpFastOpenDraft::Bool(false) => "false",
-        TcpFastOpenDraft::Bool(true) => "true",
-        TcpFastOpenDraft::Backlog(_) => "custom backlog",
-    };
-    ui.horizontal(|ui| {
-        egui::ComboBox::from_id_salt("sockopt_tcp_fast_open")
-            .selected_text(label)
-            .show_ui(ui, |ui| {
-                if ui
-                    .selectable_label(matches!(value, TcpFastOpenDraft::Unset), "(unset)")
-                    .clicked()
-                    && !matches!(value, TcpFastOpenDraft::Unset)
-                {
-                    *value = TcpFastOpenDraft::Unset;
-                    dirty = true;
-                }
-                if ui
-                    .selectable_label(matches!(value, TcpFastOpenDraft::Bool(false)), "false")
-                    .clicked()
-                    && !matches!(value, TcpFastOpenDraft::Bool(false))
-                {
-                    *value = TcpFastOpenDraft::Bool(false);
-                    dirty = true;
-                }
-                if ui
-                    .selectable_label(matches!(value, TcpFastOpenDraft::Bool(true)), "true")
-                    .clicked()
-                    && !matches!(value, TcpFastOpenDraft::Bool(true))
-                {
-                    *value = TcpFastOpenDraft::Bool(true);
-                    dirty = true;
-                }
-                if ui
-                    .selectable_label(
-                        matches!(value, TcpFastOpenDraft::Backlog(_)),
-                        "custom backlog",
-                    )
-                    .clicked()
-                    && !matches!(value, TcpFastOpenDraft::Backlog(_))
-                {
-                    *value = TcpFastOpenDraft::Backlog(0);
-                    dirty = true;
-                }
-            });
-        if let TcpFastOpenDraft::Backlog(n) = value {
-            let mut text = n.to_string();
-            if ui
-                .add(egui::TextEdit::singleline(&mut text).desired_width(80.0))
-                .changed()
-                && let Ok(parsed) = text.trim().parse::<u64>()
-            {
-                *value = TcpFastOpenDraft::Backlog(parsed);
-                dirty = true;
-            }
-        }
-    });
-    dirty
-}
-
-/// Compact read-only summary of populated `sockopt` fields (only-inbound fields plus shared
-/// fields; outbound-only fields aren't rendered here — see [`show_sockopt_edit`]).
-fn show_sockopt_readonly(ui: &mut Ui, sockopt: &SockoptDraft) {
-    let mut any = false;
-    egui::Grid::new("stream_sockopt_view_grid")
-        .num_columns(2)
-        .spacing([16.0, 6.0])
-        .show(ui, |ui| {
-            if !sockopt.tproxy.is_empty() {
-                ui.label("tproxy");
-                ui.label(sockopt.tproxy.as_str());
-                ui.end_row();
-                any = true;
-            }
-            match sockopt.tcp_fast_open {
-                TcpFastOpenDraft::Unset => {}
-                TcpFastOpenDraft::Bool(b) => {
-                    ui.label("tcpFastOpen");
-                    ui.label(bool_label(b));
-                    ui.end_row();
-                    any = true;
-                }
-                TcpFastOpenDraft::Backlog(n) => {
-                    ui.label("tcpFastOpen");
-                    ui.label(format!("backlog {n}"));
-                    ui.end_row();
-                    any = true;
-                }
-            }
-            if sockopt.accept_proxy_protocol {
-                ui.label("acceptProxyProtocol");
-                ui.label("true");
-                ui.end_row();
-                any = true;
-            }
-            if sockopt.v6_only {
-                ui.label("V6Only");
-                ui.label("true");
-                ui.end_row();
-                any = true;
-            }
-            if let Some(seg) = sockopt.tcp_max_seg {
-                ui.label("tcpMaxSeg");
-                ui.label(seg.to_string());
-                ui.end_row();
-                any = true;
-            }
-            if let Some(idle) = sockopt.tcp_keep_alive_idle {
-                ui.label("tcpKeepAliveIdle");
-                ui.label(format!("{idle} s"));
-                ui.end_row();
-                any = true;
-            }
-            if let Some(interval) = sockopt.tcp_keep_alive_interval {
-                ui.label("tcpKeepAliveInterval");
-                ui.label(format!("{interval} s"));
-                ui.end_row();
-                any = true;
-            }
-            if let Some(timeout) = sockopt.tcp_user_timeout {
-                ui.label("tcpUserTimeout");
-                ui.label(format!("{timeout} ms"));
-                ui.end_row();
-                any = true;
-            }
-            if let Some(clamp) = sockopt.tcp_window_clamp {
-                ui.label("tcpWindowClamp");
-                ui.label(clamp.to_string());
-                ui.end_row();
-                any = true;
-            }
-            if !sockopt.trusted_x_forwarded_for.is_empty() {
-                ui.label("trustedXForwardedFor");
-                ui.label(sockopt.trusted_x_forwarded_for.join(", "));
-                ui.end_row();
-                any = true;
-            }
-            if sockopt.custom_sockopt.is_some() {
-                ui.label("customSockopt");
-                ui.label("set (see Edit / Preview diff)");
-                ui.end_row();
-                any = true;
-            }
-        });
-    if !any {
-        ui.label(
-            RichText::new("No sockopt fields set.")
-                .size(13.0)
-                .color(Color32::from_rgb(140, 140, 140)),
-        );
     }
 }
 
@@ -3125,7 +2917,7 @@ fn show_security_tab(ui: &mut Ui, service: &mut ApplicationService, row: &Inboun
             let save = ui
                 .add_enabled(!busy && !alpn_blocked, egui::Button::new("Save"))
                 .on_disabled_hover_text(if alpn_blocked {
-                    "Fallbacks require a non-empty ALPN list in the Security tab"
+                    "Fallbacks on TLS require a non-empty ALPN list in the Security tab"
                 } else {
                     ""
                 });
@@ -3240,7 +3032,7 @@ fn session_fallbacks_missing_alpn(session: &InboundEditorSession) -> bool {
     ) {
         return true;
     }
-    security.active_alpn().is_empty()
+    security.fallbacks_missing_alpn()
 }
 
 fn show_security_readonly(
@@ -3358,9 +3150,12 @@ fn show_security_readonly(
                 ui.label("serverNames");
                 ui.label(security.reality.server_names.join(", "));
                 ui.end_row();
-                if !security.reality.alpn.is_empty() {
+                if security.reality.has_ignored_alpn() {
                     ui.label("alpn");
-                    ui.label(security.reality.alpn.join(", "));
+                    ui.label(
+                        RichText::new("on disk — not a REALITY setting, ignored by Xray-core")
+                            .color(Color32::from_rgb(220, 160, 60)),
+                    );
                     ui.end_row();
                 }
                 ui.label("shortIds");
@@ -3548,15 +3343,12 @@ fn show_security_edit(ui: &mut Ui, service: &mut ApplicationService) {
             });
             ui.add_space(4.0);
 
-            if has_fallbacks
-                && matches!(
-                    security.mode,
-                    InboundSecurityMode::Tls | InboundSecurityMode::Reality
-                )
-            {
+            if has_fallbacks && security.fallbacks_missing_alpn() {
                 ui.label(
                     RichText::new(
-                        "Fallbacks require a non-empty ALPN list on this Security tab. Save is blocked until ALPN is set.",
+                        "Fallbacks on TLS require a non-empty ALPN list on this Security tab \
+                         ([\"http/1.1\"], or [\"h2\", \"http/1.1\"] for h2 fallbacks). Save is blocked \
+                         until ALPN is set.",
                     )
                     .color(Color32::from_rgb(220, 160, 60)),
                 );
@@ -3999,11 +3791,24 @@ fn show_reality_settings_edit(
             }
             ui.end_row();
 
-            super::field_label(ui, "alpn", HELP_REALITY_ALPN);
-            if string_tag_multi_select(ui, "reality_alpn", &mut reality.alpn, ALPN_PRESETS) {
-                dirty = true;
+            if reality.has_ignored_alpn() {
+                super::field_label(ui, "alpn", HELP_REALITY_IGNORED_ALPN);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("not a REALITY setting — ignored by Xray-core")
+                            .color(Color32::from_rgb(220, 160, 60)),
+                    );
+                    if ui
+                        .button("Remove alpn")
+                        .on_hover_text("Drops streamSettings.realitySettings.alpn on Save.")
+                        .clicked()
+                        && reality.remove_ignored_alpn()
+                    {
+                        dirty = true;
+                    }
+                });
+                ui.end_row();
             }
-            ui.end_row();
 
             super::field_label(ui, "privateKey", HELP_REALITY_PRIVATE_KEY);
             if ui
@@ -4183,79 +3988,6 @@ fn show_reality_limit_fallback_edit(
     dirty
 }
 
-fn lines_to_vec(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .collect()
-}
-
-fn resizable_multiline(
-    ui: &mut Ui,
-    text: &mut String,
-    rows: usize,
-    id: &str,
-) -> egui::Response {
-    egui::ScrollArea::vertical()
-        .id_salt(id)
-        .max_height(160.0)
-        .show(ui, |ui| {
-            ui.add(
-                egui::TextEdit::multiline(text)
-                    .desired_rows(rows)
-                    .desired_width(f32::INFINITY)
-                    .code_editor(),
-            )
-        })
-        .inner
-}
-
-fn optional_string_combo(
-    ui: &mut Ui,
-    id: &str,
-    value: &mut String,
-    presets: &[&str],
-) -> bool {
-    let mut dirty = false;
-    let display = if value.is_empty() {
-        "(default)".to_owned()
-    } else {
-        value.clone()
-    };
-    egui::ComboBox::from_id_salt(id)
-        .selected_text(display)
-        .show_ui(ui, |ui| {
-            if ui
-                .selectable_label(value.is_empty(), "(default)")
-                .clicked()
-            {
-                value.clear();
-                dirty = true;
-            }
-            for preset in presets {
-                if ui
-                    .selectable_label(value == *preset, *preset)
-                    .clicked()
-                {
-                    *value = (*preset).to_owned();
-                    dirty = true;
-                }
-            }
-        });
-    if ui
-        .add(
-            egui::TextEdit::singleline(value)
-                .desired_width(140.0)
-                .hint_text("custom"),
-        )
-        .changed()
-    {
-        dirty = true;
-    }
-    dirty
-}
-
 /// Multi-select from presets; selected values shown as removable tags.
 fn string_tag_multi_select(
     ui: &mut Ui,
@@ -4269,11 +4001,8 @@ fn string_tag_multi_select(
             let mut remove_idx = None;
             for (idx, tag) in selected.iter().enumerate() {
                 ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(tag.as_str())
-                            .size(12.0)
-                            .color(Color32::from_rgb(220, 220, 230)),
-                    );
+                    // Theme-aware: a fixed near-white read as greyed-out on the light theme.
+                    ui.label(RichText::new(tag.as_str()).size(12.0).strong());
                     if ui.small_button("×").clicked() {
                         remove_idx = Some(idx);
                     }
@@ -4949,6 +4678,7 @@ fn import_protocol_wire(protocol: InboundClientProtocol) -> &'static str {
         InboundClientProtocol::Trojan => "trojan",
         InboundClientProtocol::Hysteria => "hysteria",
         InboundClientProtocol::Tunnel => "tunnel",
+        InboundClientProtocol::Tun => "tun",
     }
 }
 
@@ -5114,7 +4844,7 @@ fn show_import_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                                 preview.email_hint.clone(),
                                 preview.user_id.clone(),
                             ),
-                            InboundClientProtocol::Tunnel => {}
+                            InboundClientProtocol::Tunnel | InboundClientProtocol::Tun => {}
                         }
                         closed = true;
                     }
@@ -5232,7 +4962,7 @@ fn apply_import_to_new_inbound(ui: &Ui, service: &mut ApplicationService, previe
         InboundClientProtocol::Vless => "UUID",
         InboundClientProtocol::Trojan => "password",
         InboundClientProtocol::Hysteria => "auth",
-        InboundClientProtocol::Tunnel => "credential",
+        InboundClientProtocol::Tunnel | InboundClientProtocol::Tun => "credential",
     };
     service.show_status_message(format!(
         "Inbound draft created from import. Save it, then add the user via the Users tab — \

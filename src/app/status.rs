@@ -438,6 +438,9 @@ pub enum StatusSeverity {
 pub struct StatusSnapshot {
     /// Transient current operation.
     pub operation: CurrentOperation,
+    /// Last informational message; stays visible after the transient
+    /// [`CurrentOperation::Message`] expires until the user dismisses it.
+    pub notification: Option<String>,
     /// Persistent SSH connection state.
     pub ssh: SshStatus,
     /// Persistent Xray service state.
@@ -448,6 +451,7 @@ impl Default for StatusSnapshot {
     fn default() -> Self {
         Self {
             operation: CurrentOperation::Ready,
+            notification: None,
             ssh: SshStatus::Disconnected,
             xray: XrayStatus::unknown(),
         }

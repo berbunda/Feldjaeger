@@ -128,6 +128,8 @@ pub struct WarpCredentials {
     pub mtu: Option<u32>,
     /// Optional domain strategy from the generated outbound.
     pub domain_strategy: Option<String>,
+    /// `remoteDNS` — resolves names *inside* the tunnel (Xray-core `remoteDNS`); empty when absent.
+    pub remote_dns: Vec<String>,
     /// Full generated outbound JSON value (preserves unknown supported fields).
     pub outbound_value: Value,
 }
@@ -142,6 +144,7 @@ impl fmt::Debug for WarpCredentials {
             .field("reserved", &self.reserved.as_ref().map(|_| "[PRESENT]"))
             .field("mtu", &self.mtu)
             .field("domain_strategy", &self.domain_strategy)
+            .field("remote_dns", &self.remote_dns)
             .field("outbound_value", &"[REDACTED]")
             .finish()
     }

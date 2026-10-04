@@ -10,6 +10,7 @@
 use egui::{Color32, RichText, TextEdit, Ui};
 
 use crate::app::{ApiSettingsPageState, ApplicationService};
+use crate::gui::pages::lines_to_vec;
 use crate::xray::KNOWN_API_SERVICES;
 
 /// Renders the API Settings page.
@@ -291,14 +292,6 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
         .size(12.0)
         .color(Color32::from_rgb(140, 140, 140)),
     );
-}
-
-fn lines_to_vec(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .collect()
 }
 
 fn show_notice(ui: &mut Ui) {

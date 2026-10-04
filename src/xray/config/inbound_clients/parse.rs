@@ -29,6 +29,10 @@ pub fn parse_inbound_client(
             ConfigModifyErrorKind::UnsupportedInbound,
             "Tunnel inbound has no client objects".to_owned(),
         )),
+        InboundClientProtocol::Tun => Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::UnsupportedInbound,
+            "TUN inbound has no client objects".to_owned(),
+        )),
     }
 }
 

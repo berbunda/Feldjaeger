@@ -1164,7 +1164,10 @@ fn replace_and_remove_wireguard_outbound() {
 #[test]
 fn add_freedom_outbound_shell_writes_settings() {
     use super::outbound_edit::OutboundGeneral;
-    use super::outbound_protocol::{FragmentDraft, NoiseDraft, OutboundSettingsDraft};
+    use super::outbound_protocol::{
+        FragmentDraft, FreedomFinalRuleDraft, FreedomSettingsDraft, NoiseDraft,
+        OutboundSettingsDraft,
+    };
 
     let mut config = single_file_editable(r#"{"outbounds":[]}"#);
     let outcome = add_outbound_shell(
@@ -1175,8 +1178,8 @@ fn add_freedom_outbound_shell_writes_settings() {
                 send_through: Some("0.0.0.0".to_owned()),
                 proxy_settings: None,
             },
-            settings: OutboundSettingsDraft::Freedom {
-                domain_strategy: "UseIP".to_owned(),
+            settings: OutboundSettingsDraft::Freedom(FreedomSettingsDraft {
+                sockopt_domain_strategy: "UseIP".to_owned(),
                 redirect: "127.0.0.1:3366".to_owned(),
                 user_level: 1,
                 fragment: Some(FragmentDraft {
@@ -1191,7 +1194,10 @@ fn add_freedom_outbound_shell_writes_settings() {
                     delay: "10-16".to_owned(),
                     extras: Default::default(),
                 }],
-            },
+                proxy_protocol: 2,
+                final_rules: vec![FreedomFinalRuleDraft::new("block")],
+                ..FreedomSettingsDraft::default()
+            }),
             preferred_source_file: None,
         },
     )
@@ -1201,7 +1207,10 @@ fn add_freedom_outbound_shell_writes_settings() {
     let outbound = config.sections().outbounds()[idx].value();
     assert_eq!(outbound["protocol"], "freedom");
     assert_eq!(outbound["sendThrough"], "0.0.0.0");
-    assert_eq!(outbound["settings"]["domainStrategy"], "UseIP");
+    assert!(outbound["settings"].get("domainStrategy").is_none());
+    assert_eq!(outbound["streamSettings"], serde_json::json!({"sockopt": {"domainStrategy": "UseIP"}}));
+    assert_eq!(outbound["settings"]["proxyProtocol"], 2);
+    assert_eq!(outbound["settings"]["finalRules"], serde_json::json!([{"action": "block"}]));
     assert_eq!(outbound["settings"]["redirect"], "127.0.0.1:3366");
     assert_eq!(outbound["settings"]["userLevel"], 1);
     assert_eq!(outbound["settings"]["fragment"]["packets"], "tlshello");
@@ -1213,14 +1222,15 @@ fn add_freedom_outbound_shell_writes_settings() {
 #[test]
 fn update_freedom_outbound_shell_edits_settings_and_preserves_unrelated_fields() {
     use super::outbound_edit::{OutboundGeneral, OutboundRef};
-    use super::outbound_protocol::OutboundSettingsDraft;
+    use super::outbound_protocol::{OutboundSettingsDraft, parse_outbound_settings};
 
     let mut config = single_file_editable(
         r#"{
             "outbounds":[{
                 "tag":"direct",
                 "protocol":"freedom",
-                "settings":{"domainStrategy":"AsIs","futureField":"keep"},
+                "settings":{"futureField":"keep"},
+                "streamSettings":{"sockopt":{"domainStrategy":"AsIs","dialerProxy":"chain","futureSockopt":1}},
                 "mux":{"enabled":true}
             }]
         }"#,
@@ -1229,6 +1239,12 @@ fn update_freedom_outbound_shell_edits_settings_and_preserves_unrelated_fields()
     let expected_fingerprint = config
         .outbound_object_fingerprint(index)
         .expect("fingerprint");
+    let mut settings =
+        parse_outbound_settings(config.sections().outbounds()[index].value()).expect("freedom draft");
+    let OutboundSettingsDraft::Freedom(draft) = &mut settings else {
+        panic!("freedom draft expected");
+    };
+    draft.sockopt_domain_strategy = "UseIPv4".to_owned();
 
     update_outbound_shell(
         &mut config,
@@ -1242,21 +1258,80 @@ fn update_freedom_outbound_shell_edits_settings_and_preserves_unrelated_fields()
                 send_through: None,
                 proxy_settings: None,
             },
-            settings: OutboundSettingsDraft::Freedom {
-                domain_strategy: "UseIPv4".to_owned(),
-                redirect: String::new(),
-                user_level: 0,
-                fragment: None,
-                noises: Vec::new(),
-            },
+            settings,
         },
     )
     .expect("update freedom outbound shell");
 
     let outbound = config.sections().outbounds()[index].value();
-    assert_eq!(outbound["settings"]["domainStrategy"], "UseIPv4");
+    assert_eq!(
+        outbound["streamSettings"],
+        serde_json::json!({"sockopt": {"domainStrategy": "UseIPv4", "dialerProxy": "chain", "futureSockopt": 1}})
+    );
+    assert!(outbound["settings"].get("domainStrategy").is_none());
     assert_eq!(outbound["settings"]["futureField"], "keep");
     assert_eq!(outbound["mux"]["enabled"], true);
+}
+
+/// Shell Save of a Freedom outbound with the legacy `settings.domainStrategy` (Roadmap §2.4:105):
+/// without the explicit migration the key is preserved byte-for-byte and flagged; the migration
+/// moves it into `sockopt` (or, on a conflict, keeps `sockopt` and only drops the legacy key).
+#[test]
+fn freedom_legacy_domain_strategy_is_preserved_then_migrated() {
+    use super::compatibility::outbound_warnings;
+    use super::outbound_edit::{OutboundRef, parse_outbound_general};
+    use super::outbound_protocol::{
+        LegacyDomainStrategyMigration, OutboundSettingsDraft, parse_outbound_settings,
+    };
+
+    let save = |raw: &str, migrate: bool| {
+        let mut config = single_file_editable(raw);
+        let original = config.sections().outbounds()[0].value().clone();
+        let mut settings = parse_outbound_settings(&original).expect("freedom draft");
+        let OutboundSettingsDraft::Freedom(draft) = &mut settings else {
+            panic!("freedom draft expected");
+        };
+        let migration = migrate.then(|| draft.migrate_legacy_domain_strategy());
+        let expected_fingerprint = config.outbound_object_fingerprint(0).expect("fingerprint");
+        update_outbound_shell(
+            &mut config,
+            UpdateOutboundShellRequest {
+                outbound_ref: OutboundRef {
+                    outbound_index: 0,
+                    expected_fingerprint,
+                },
+                general: parse_outbound_general(&original),
+                settings,
+            },
+        )
+        .expect("save");
+        (original, config.sections().outbounds()[0].value().clone(), migration)
+    };
+
+    let legacy = r#"{"outbounds":[{"tag":"direct","protocol":"freedom",
+        "settings":{"domainStrategy":"UseIPv4","redirect":":443"},
+        "streamSettings":{"sockopt":{"mark":255}}}]}"#;
+    let (original, untouched, _) = save(legacy, false);
+    assert_eq!(untouched, original, "no migration → nothing changes");
+    assert_eq!(outbound_warnings(&untouched).len(), 1);
+    assert_eq!(outbound_warnings(&untouched)[0].location, "settings.domainStrategy");
+
+    let (_, migrated, migration) = save(legacy, true);
+    assert_eq!(migration, Some(LegacyDomainStrategyMigration::Moved { value: "UseIPv4".to_owned() }));
+    assert_eq!(migrated["settings"], serde_json::json!({"redirect": ":443"}));
+    assert_eq!(
+        migrated["streamSettings"]["sockopt"],
+        serde_json::json!({"mark": 255, "domainStrategy": "UseIPv4"})
+    );
+    assert!(outbound_warnings(&migrated).is_empty());
+
+    let conflict = r#"{"outbounds":[{"tag":"direct","protocol":"freedom",
+        "settings":{"domainStrategy":"UseIPv4"},
+        "streamSettings":{"sockopt":{"domainStrategy":"ForceIPv6"}}}]}"#;
+    let (_, resolved, migration) = save(conflict, true);
+    assert!(matches!(migration, Some(LegacyDomainStrategyMigration::SockoptWins { .. })));
+    assert_eq!(resolved["settings"], serde_json::json!({}));
+    assert_eq!(resolved["streamSettings"]["sockopt"]["domainStrategy"], "ForceIPv6");
 }
 
 #[test]
@@ -1330,6 +1405,7 @@ fn add_blackhole_outbound_shell_writes_settings() {
             },
             settings: OutboundSettingsDraft::Blackhole {
                 response_type: "http".to_owned(),
+                custom_response_data: String::new(),
                 response_extras: Default::default(),
             },
             preferred_source_file: None,
@@ -1377,6 +1453,7 @@ fn update_blackhole_outbound_shell_edits_settings_and_preserves_unrelated_fields
             },
             settings: OutboundSettingsDraft::Blackhole {
                 response_type: "http".to_owned(),
+                custom_response_data: String::new(),
                 response_extras: Default::default(),
             },
         },
@@ -2503,7 +2580,7 @@ fn finalmask_tcp_ok_with_tls_security() {
     let mut stream = InboundStreamDraft::default();
     stream.finalmask_tcp = vec![FinalMaskLayerDraft {
         layer_type: "fragment".to_owned(),
-        settings: serde_json::json!({"packets": "tlshello"}),
+        settings: serde_json::json!({"packets": "tlshello", "length": "100-200"}),
     }];
     stream.write_finalmask_tcp = true;
     add_inbound(
@@ -3410,7 +3487,8 @@ fn duplicate_outbound_appends_unique_tag_copy() {
             "outbounds":[{
                 "tag":"direct",
                 "protocol":"freedom",
-                "settings":{"domainStrategy":"UseIP"}
+                "settings":{},
+                "streamSettings":{"sockopt":{"domainStrategy":"UseIP"}}
             }]
         }"#,
     );
@@ -3425,7 +3503,7 @@ fn duplicate_outbound_appends_unique_tag_copy() {
         .expect("array");
     assert_eq!(outbounds[0]["tag"], "direct");
     assert_eq!(outbounds[1]["tag"], "direct-copy");
-    assert_eq!(outbounds[1]["settings"]["domainStrategy"], "UseIP");
+    assert_eq!(outbounds[1]["streamSettings"]["sockopt"]["domainStrategy"], "UseIP");
 
     duplicate_outbound(
         &mut config,
@@ -3865,6 +3943,139 @@ fn sockopt_shell_save_edits_field_and_preserves_unknown_field() {
     assert_eq!(sockopt["tproxy"], "redirect");
     assert_eq!(sockopt["acceptProxyProtocol"], true);
     assert_eq!(sockopt["futureField"], "keep-me");
+}
+
+/// Roadmap §2.6 stage 3.3: XHTTP over HTTP/3 (TLS ALPN exactly ["h3"]) has no `brutal`
+/// congestion — Xray-core accepts the config and panics on every connection — so Shell Save
+/// refuses it; the same `quicParams` is fine once ALPN no longer selects HTTP/3.
+#[test]
+fn shell_save_refuses_brutal_congestion_on_xhttp3_only() {
+    use super::inbound_protocol::InboundProtocolDraft;
+    use super::inbound_stream::parse_inbound_stream;
+    use super::modify::{UpdateInboundShellRequest, update_inbound_shell};
+
+    let config_with = |alpn: &str| {
+        single_file_editable(&format!(
+            r#"{{
+                "inbounds":[{{
+                    "tag":"vless-xh3",
+                    "protocol":"vless",
+                    "listen":"0.0.0.0",
+                    "port":443,
+                    "settings":{{"clients":[],"decryption":"none"}},
+                    "streamSettings":{{
+                        "network":"xhttp",
+                        "xhttpSettings":{{"path":"/x"}},
+                        "security":"tls",
+                        "tlsSettings":{{"alpn":{alpn},"certificates":[{{"certificateFile":"/c.pem","keyFile":"/k.pem"}}]}},
+                        "finalmask":{{"quicParams":{{"congestion":"bbr"}}}}
+                    }}
+                }}]
+            }}"#
+        ))
+    };
+    let save = |config: &mut super::editable::EditableXrayConfig, congestion: &str| {
+        let inbound_ref = shell_ref(config, 0);
+        let mut stream = parse_inbound_stream(&config.file_roots()["/etc/xray/config.json"]["inbounds"][0]);
+        assert!(stream.write_quic_params);
+        stream.quic_params.congestion = congestion.to_owned();
+        update_inbound_shell(
+            config,
+            UpdateInboundShellRequest {
+                inbound_ref,
+                general: InboundGeneral {
+                    tag: Some("vless-xh3".to_owned()),
+                    listen: Some("0.0.0.0".to_owned()),
+                    port: Some(443),
+                },
+                protocol: InboundProtocolDraft::Vless {
+                    decryption: "none".to_owned(),
+                    fallbacks: Vec::new(),
+                },
+                stream,
+                sniffing: SniffingSettings::default(),
+                security: None,
+            },
+        )
+    };
+
+    let mut h3 = config_with(r#"["h3"]"#);
+    let error = save(&mut h3, "brutal").unwrap_err();
+    assert!(
+        error.to_string().contains("streamSettings.finalmask.quicParams.congestion \"brutal\" is not supported on XHTTP/3"),
+        "{error}"
+    );
+    assert_eq!(
+        h3.file_roots()["/etc/xray/config.json"]["inbounds"][0]["streamSettings"]["finalmask"]["quicParams"]["congestion"],
+        "bbr",
+        "a refused Save leaves the inbound as it was"
+    );
+    save(&mut h3, "force-brutal").expect_err("force-brutal still needs brutalUp");
+    save(&mut h3, "reno").expect("reno is fine on XHTTP/3");
+
+    let mut h2 = config_with(r#"["h2"]"#);
+    save(&mut h2, "brutal").expect("XHTTP over TCP never reads quicParams");
+}
+
+/// Roadmap §2.6 stage 0.5: a non-object `finalmask` survives a Shell Save untouched (no
+/// `_preserved` wrapper), and a FinalMask edit over it is rejected instead of overwriting it.
+#[test]
+fn shell_save_keeps_foreign_finalmask_and_rejects_editing_it() {
+    use super::inbound_protocol::InboundProtocolDraft;
+    use super::inbound_stream::{FinalMaskLayerDraft, parse_inbound_stream};
+    use super::modify::{UpdateInboundShellRequest, update_inbound_shell};
+
+    let mut config = single_file_editable(
+        r#"{
+            "inbounds":[{
+                "tag":"vless-foreign-fm",
+                "protocol":"vless",
+                "listen":"0.0.0.0",
+                "port":443,
+                "settings":{"clients":[],"decryption":"none"},
+                "streamSettings":{"network":"tcp","security":"none","finalmask":"legacy-string"}
+            }]
+        }"#,
+    );
+    let request = |config: &EditableXrayConfig, tag: &str| {
+        let stream =
+            parse_inbound_stream(&config.file_roots()["/etc/xray/config.json"]["inbounds"][0]);
+        assert!(stream.finalmask_foreign);
+        UpdateInboundShellRequest {
+            inbound_ref: shell_ref(config, 0),
+            general: InboundGeneral {
+                tag: Some(tag.to_owned()),
+                listen: Some("0.0.0.0".to_owned()),
+                port: Some(443),
+            },
+            protocol: InboundProtocolDraft::Vless {
+                decryption: "none".to_owned(),
+                fallbacks: Vec::new(),
+            },
+            stream,
+            sniffing: SniffingSettings::default(),
+            security: None,
+        }
+    };
+
+    // An unrelated edit (tag rename) saves and leaves `finalmask` exactly as it was.
+    let rename = request(&config, "vless-renamed");
+    update_inbound_shell(&mut config, rename).expect("shell save");
+    let inbound = &config.file_roots()["/etc/xray/config.json"]["inbounds"][0];
+    assert_eq!(inbound["tag"], "vless-renamed");
+    assert_eq!(inbound["streamSettings"]["finalmask"], "legacy-string");
+
+    // A FinalMask edit is rejected; the on-disk value is still not wrapped or replaced.
+    let mut edit = request(&config, "vless-renamed");
+    edit.stream.finalmask_udp = vec![FinalMaskLayerDraft {
+        layer_type: "salamander".to_owned(),
+        settings: serde_json::json!({"password": "p"}),
+    }];
+    edit.stream.write_finalmask_udp = true;
+    let err = update_inbound_shell(&mut config, edit).expect_err("foreign finalmask edit");
+    assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
+    let inbound = &config.file_roots()["/etc/xray/config.json"]["inbounds"][0];
+    assert_eq!(inbound["streamSettings"]["finalmask"], "legacy-string");
 }
 
 #[test]

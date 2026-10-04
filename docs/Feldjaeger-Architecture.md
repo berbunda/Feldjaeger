@@ -360,10 +360,11 @@ feldjaeger-ssh/src/russh/
 
 ## 6.5	Зависимости (feldjaeger-ssh/Cargo.toml)
 ```rust
-russh = { version = "0.62", default-features = false, features = ["ring", "flate2", "rsa"] }
-russh-sftp = "2.3"
-tokio = { version = "1", features = ["io-util", "net", "rt", "sync"] }
-log = "0.4"
+russh = { version = "0.63.3", default-features = false, features = ["ring", "flate2", "rsa"] }
+tracing = "0.1.44"
+russh-sftp = "3.0.1"
+serde = { version = "1.0.229", features = ["derive"] }
+tokio = { version = "1.53.2", features = ["io-util", "net", "rt", "sync", "time"] }
 ```
 
 ## 6.6	Пример
@@ -2255,7 +2256,7 @@ GUI → ApplicationService (InboundShellDrafts + InboundRef)
   - Symmetric strip `tlsSettings` ↔ `realitySettings` на смене mode; unknown `security` → read-only open + Save `ValidationFailed`
   - Hysteria transport (`StreamMethod::Hysteria`, `hysteriaSettings`, typed `finalmask.quicParams`); Tunnel — transport tcp locked (matrix), Shell Save по-прежнему не мутирует `streamSettings`/`security` в целом, кроме узкого `sockopt.tproxy` (Roadmap §2.3:88, `apply_tunnel_sockopt`) — всё остальное (network/tlsSettings/прочие sockopt-поля) preserve on disk
   - WebSocket transport (`StreamMethod::Ws`, `wsSettings`: `path` / `host` / `acceptProxyProtocol` / Early Data `ed`; extras preserve incl. client-only `headers`); wire write всегда `websocket` (read `ws`|`websocket`); не для Hysteria
-  - mKCP transport (`StreamMethod::Mkcp`, `kcpSettings`: `mtu` / `tti` / `uplinkCapacity` / `downlinkCapacity` / `congestion` / `readBufferSize` / `writeBufferSize`; documented defaults на выборе метода; hard-validate ranges Save; extras preserve incl. legacy `header`/`seed`); wire write всегда `mkcp` (read `kcp`|`mkcp`); не для Hysteria
+  - mKCP transport (`StreamMethod::Mkcp`, `kcpSettings` — поля `KCPConfig` ядра, §65: `mtu` / `tti` / `uplinkCapacity` / `downlinkCapacity` + опциональные `cwndMultiplier` / `maxSendingWindow`; defaults ядра на выборе метода; hard-validate как `KCPConfig.Build()`; ядром игнорируемые `congestion`/`readBufferSize`/`writeBufferSize` и legacy `header`/`seed` — extras preserve + предупреждения); wire write всегда `mkcp` (read `kcp`|`mkcp`); не для Hysteria
   - XHTTP transport (`StreamMethod::Xhttp`, `xhttpSettings` Wave C3): `host`/`path`/`mode` + `headers` + ranges (`xPaddingBytes`, `scMaxEachPostBytes`, `scMinPostsIntervalMs`, `scStreamUpServerSecs`, …) + bools (`noSSEHeader`/`noGRPCHeader`) + placement/obfs + nested `xmux` + one-level `downloadSettings` (nested xhttp без рекурсивного download); documented defaults на выборе метода; Save пишет typed surface; hard-validate mode/placement/xmux conflict/ranges; extras preserve; не для Hysteria
   - Shared fallbacks (Wave C2 + TLS advanced): `settings.fallbacks[]` для VLESS / Trojan на вкладке Protocol; полный `FallbackObject` (`name` / `alpn` / `path` / typed `dest` / `xver`); только TCP|raw + tls|reality; Hysteria/Tunnel — без секции; на Save: auto-strip при несовместимом Stream/Security; иначе `require_alpn_for_fallbacks` — non-empty `tlsSettings.alpn` / `realitySettings.alpn` (GUI tag multi-select; без auto-patch); extras preserve; empty list → omit key
   - При выборе WS / mKCP / XHTTP в GUI: auto-coerce security — Trojan → `tls` (WS/mKCP); VLESS Reality→WS/mKCP → `none` (TLS сохраняется) — `coerce_security_mode_for_transport`; выбор mKCP / XHTTP сбрасывает draft на documented defaults
@@ -2268,7 +2269,7 @@ GUI → ApplicationService (InboundShellDrafts + InboundRef)
   - Inbound tag rename (через General-таб composed Shell Save, отдельного Rename-действия нет) — warn+list на routing `inboundTag` refs, не блокирует: проактивное предупреждение в форме, пока draft-тег отличается от текущего и ссылки ещё есть; после Save, если тег реально сменился, статус-бар повторяет оставшиеся ссылки (Roadmap §3:119, `inbound_tag_reference_preview` / `inbound_stale_tag_references`)
   - Outbound Delete UI (любой protocol) + hard-block по `outboundTag` / `balancers[].selector` (prefix); Edit/Duplicate outbound — backlog
   - Delete / Duplicate inbound shell protocols (VLESS/Trojan/Hysteria/Tunnel) — Duplicate по-прежнему shell-only
-  - REALITY advanced (`show`, `xver`, `minClientVer`, `maxClientVer`, `maxTimeDiff`, `limitFallbackUpload`/`limitFallbackDownload` с `afterBytes`/`bytesPerSec`/`burstBytesPerSec`) — GUI на Security tab; FinalMask editor (`inbound_stream/finalmask.rs`): typed `FinalMaskLayerDraft` (`type` + raw JSON `settings`) для `streamSettings.finalmask.tcp[]`/`.udp[]`; presets `TCP_FINALMASK_TYPES` (`header-custom`/`fragment`/`sudoku`) и `UDP_FINALMASK_TYPES` (`header-custom`/`mkcp-legacy`/`noise`/`salamander`/`sudoku`/`xdns`/`xicmp`/`realm`) + free-text fallback; Add/Remove/Move up-down; VLESS/Trojan, не Hysteria (Hysteria уже владеет `finalmask.quicParams`); G4 предупреждение inline при Reality + non-empty `finalmask.tcp`
+  - REALITY advanced (`show`, `xver`, `minClientVer`, `maxClientVer`, `maxTimeDiff`, `limitFallbackUpload`/`limitFallbackDownload` с `afterBytes`/`bytesPerSec`/`burstBytesPerSec`) — GUI на Security tab; FinalMask editor (`stream/finalmask.rs`, до §63 — `inbound_stream/finalmask.rs`): typed `FinalMaskLayerDraft` (`type` + raw JSON `settings`) для `streamSettings.finalmask.tcp[]`/`.udp[]`; presets `TCP_FINALMASK_TYPES` (`header-custom`/`fragment`/`sudoku`/`xmc`) и `UDP_FINALMASK_TYPES` (`header-custom`/`mkcp-legacy`/`noise`/`salamander`/`sudoku`/`xdns`/`xicmp`/`realm`/`udphop`) + free-text fallback; Add/Remove/Move up-down; VLESS/Trojan, не Hysteria (Hysteria уже владеет `finalmask.quicParams`); G4 предупреждение inline при Reality + non-empty `finalmask.tcp`. Типизированные формы `settings` для `fragment`/`salamander`/`sudoku`/`realm`/`udphop`/`noise`/`xdns`/`xicmp` (`stream/finalmask_layers.rs`, Roadmap §2.3:89) `mkcp-legacy` (`stream/finalmask_mkcp.rs`, §73) и `header-custom` (`stream/finalmask_header_custom.rs`: TCP §74, UDP §75), `xmc` (`stream/finalmask_xmc.rs`, §76); любой непредставимый слой — raw-JSON редактор; help по каждому типу и полю, пресеты `fragment.packets`/`noise.type`/`sudoku.ascii` — §77. Правило «без потерь или raw», shape-preserving значения, персистентные draft'ы форм и некритичные предупреждения — §62 (Roadmap §2.6, этап 0)
   - Sockopt editor (Roadmap §2.3:87) — typed `streamSettings.sockopt` для VLESS/Trojan/Hysteria (method-independent); GUI-редактируемые поля: `tproxy`/`tcpFastOpen`/`acceptProxyProtocol`/`V6Only`/`tcpMaxSeg`/`tcpKeepAliveIdle`/`tcpKeepAliveInterval`/`tcpUserTimeout`/`tcpWindowClamp`/`trustedXForwardedFor`/`customSockopt` (raw JSON); read-only summary на Stream tab в view-режиме; outbound-only поля (`mark`/`domainStrategy`/`dialerProxy`/`tcpcongestion`/`interface`/`tcpMptcp`/`addressPortStrategy`/`happyEyeballs`) типизированы в `SockoptDraft`, но без GUI-виджетов и без нового CompatibilityGate — нет ни одного пересечения с G1–G12
 - Вне scope / backlog:
   - Outbound sockopt GUI — `SockoptDraft`/`parse_sockopt`/`sockopt_to_value` уже общие для inbound/outbound streamSettings; Freedom Outbound Shell теперь существует (§35) но не редактирует `streamSettings` вовсе (только `settings.fragment`/`noises` — вне scope §2.4:94); GUI-редактор для outbound sockopt по-прежнему backlog
@@ -2285,10 +2286,13 @@ GUI (inbounds.rs + users.rs)
       ShareMaterialStore (retained PublicKey/encryption после Save)
       selectable_stream_methods (protocol×Vision) + allowed_security_modes (matrix ∩ security)
       coerce_security_mode_for_transport (на смене Stream, напр. Reality→WS/mKCP)
+      inbound_editor_warnings / inbound_warnings_at               # §62.5, non-blocking
     → update_inbound_shell / add_inbound / user mutate
-      → apply_inbound_protocol (incl. settings.fallbacks)
-      → apply_inbound_stream + apply_inbound_security
-      → reconcile_inbound_fallbacks (strip | require ALPN)
+      → compose_inbound_shell (Shell Save; общий с warnings, §62.5):
+          apply_inbound_general + apply_inbound_protocol (incl. settings.fallbacks)
+          → apply_inbound_stream + apply_inbound_security
+          → reconcile_inbound_fallbacks (strip | require ALPN)
+          → apply_inbound_sniffing
       → check_inbound_compatibility / first_failing_gate(&Value)   # G12 local file-or-PEM
       → finish_modification snapshots
     → run_update_inbound_shell / run_add_inbound (SSH)
@@ -2298,17 +2302,20 @@ GUI (inbounds.rs + users.rs)
             backup → atomic write
             → xray run -c|-confdir … -test (IB-L6)
             → on fail: restore backup → XrayValidationFailed
+    → poll_inbound_mutation (Shell Save / Add / Raw JSON):
+        статус-бар + with_warning_suffix(inbound_warnings_at(index))   # §62.5
 ```
 
 Ключевые модули:
 | Область | Путь |
 | ------- | ---- |
-| Shell / Add | `modify.rs` (`update_inbound_shell`, `add_inbound`), `inbound_ops.rs` (remote TLS path probe) |
+| Shell / Add | `modify.rs` (`update_inbound_shell`, `add_inbound`; `pub compose_inbound_shell` — все `apply_*` без gates; `pub build_add_inbound_value` — §62.5), `inbound_ops.rs` (remote TLS path probe) |
 | Protocol | `inbound_protocol/` (VLESS `decryption` + fallbacks; Trojan fallbacks; Hysteria `version`; Tunnel `allowedNetwork` / rewrite / `portMap` / `followRedirect` / `userLevel`) |
 | Fallbacks | `inbound_fallbacks/` (`FallbackObject`, typed `FallbackDest` Port\|TcpAddr\|UnixSocket; `parse`/`apply`/`validate`; `fallbacks_transport_compatible`; `reconcile_inbound_fallbacks`; `require_alpn_for_fallbacks`) |
-| Stream | `inbound_stream/` (tcp/raw\|xhttp\|grpc\|websocket\|mkcp\|hysteria; `XhttpStreamSettings`/`XhttpCoreSettings`/`XmuxDraft`/`XhttpDownloadDraft` + `validate_xhttp_settings` / `xhttp_extra_json`; `WsStreamSettings` + `join/split_ws_path_and_ed`; `KcpStreamSettings` + `validate_kcp_settings`; `hysteriaSettings`; `QuicParamsDraft`; `finalmask/` submodule: `FinalMaskLayerDraft` + `TCP_FINALMASK_TYPES`/`UDP_FINALMASK_TYPES` + `parse_finalmask_layers`/`finalmask_layers_to_value`/`validate_finalmask_layers` (VLESS/Trojan `finalmask.tcp`/`.udp`; not Hysteria); `sockopt` submodule: `SockoptDraft`/`TcpFastOpenDraft`/`HappyEyeballsDraft` + `parse_sockopt`/`sockopt_to_value`/`validate_sockopt` (method-independent; VLESS/Trojan/Hysteria; `write_sockopt` dirty-flag gates typed-write vs raw clone-through, same pattern as `write_finalmask_tcp`/`.udp`); `other_method` preserve) |
+| Stream | `inbound_stream/` (tcp/raw\|xhttp\|grpc\|websocket\|mkcp\|hysteria; `XhttpStreamSettings`/`XhttpCoreSettings`/`XmuxDraft`/`XhttpDownloadDraft` + `validate_xhttp_settings` / `xhttp_extra_json`; `WsStreamSettings` + `join/split_ws_path_and_ed`; `KcpStreamSettings` + `validate_kcp_settings`; `hysteriaSettings`; `other_method` preserve). Реэкспортирует всё из общего direction-aware модуля `stream/` (§63): `quic_params`: `QuicParamsDraft` + `parse_quic_params`/`quic_params_to_value`; `finalmask`: `FinalMaskLayerDraft` + `TCP_FINALMASK_TYPES`/`UDP_FINALMASK_TYPES` + `parse_finalmask_layers`/`finalmask_layers_to_value`/`validate_finalmask_layers` (VLESS/Trojan `finalmask.tcp`/`.udp`; not Hysteria); `finalmask_layers` submodule: typed `settings` per layer type (`FragmentMaskSettings`/`SalamanderSettings`/`SudokuSettings`/`RealmSettings`/`UdpHopSettings`/`NoiseMaskSettings`/`XdnsSettings`/`XicmpSettings` + `parse_*`/`*_to_value`; правило «без потерь или raw», §62.3); `values` submodule: shape-preserving `RangeValue`/`PortListValue`/`PacketValue` (§62.2); `sockopt` submodule: `SockoptDraft`/`TcpFastOpenDraft`/`HappyEyeballsDraft` + `parse_sockopt`/`sockopt_to_value`/`validate_sockopt` (method-independent; VLESS/Trojan/Hysteria; `write_sockopt` dirty-flag gates typed-write vs raw clone-through, same pattern as `write_finalmask_tcp`/`.udp`; direction table `INBOUND_ONLY_SOCKOPT_FIELDS`/`OUTBOUND_ONLY_SOCKOPT_FIELDS` + `sockopt_field_applies`, §63) |
+| Stream editors (GUI) | `gui/pages/stream_finalmask.rs` (`show_finalmask_edit`, `show_quic_params_edit`, формы слоёв, `FinalMaskForm`), `gui/pages/stream_sockopt.rs` (`show_sockopt_edit` / `show_sockopt_readonly` с `StreamDirection`, `tproxy_combo_field`) — §63 |
 | Security | `inbound_security/` (none\|tls\|reality; `TlsSettingsDraft` + `CertificateDraft` vec; Reality `alpn` + advanced `show`/`xver`/`minClientVer`/`maxClientVer`/`maxTimeDiff`/`RealityLimitFallbackDraft` (`limitFallbackUpload`/`limitFallbackDownload`); presets в `alpn.rs`; unknown → `security_unknown`) |
-| Gates / matrix | `compatibility/` (`mod.rs` Save order Wave A + G12 per-entry; `matrix.rs` wire table + `allowed_*` / `selectable_stream_methods` / `coerce_security_mode_for_transport`; tunnel ⇒ tcp + none; ws×reality / mkcp×reality запрещены; fallbacks используют `normalized_method` + `effective_security` без отдельного Gx) |
+| Gates / matrix / warnings | `compatibility/` (`warnings.rs` — некритичные `CompatibilityWarning` + `inbound_warnings` / `with_warning_suffix`, §62.5; `mod.rs` Save order Wave A + G12 per-entry; `matrix.rs` wire table + `allowed_*` / `selectable_stream_methods` / `coerce_security_mode_for_transport`; tunnel ⇒ tcp + none; ws×reality / mkcp×reality запрещены; fallbacks используют `normalized_method` + `effective_security` без отдельного Gx) |
 | SSH / SFTP | `feldjaeger-ssh` (`SshSession::path_is_file` via SFTP metadata) |
 | Remote CLI | `remote_cli/` (`x25519`, `vlessenc`, `mldsa65`, `config_test`) |
 | Diff IB-L5 | `json_diff.rs` + shared render `gui::pages::json_diff_preview()` — used by Inbound Shell Preview (`inbounds.rs`) and Users tab Add/Edit dialogs (`users.rs`, Roadmap §3:120: `preview_add_user_diff` / `preview_update_user_diff`) |
@@ -2331,7 +2338,7 @@ GUI (inbounds.rs + users.rs)
 | --- | --------- |
 | General | tag / listen / scalar port; non-scalar `port` (range string / array / mixed list) shown read-only with its raw shape and preserved byte-for-byte on Save — never coerced to scalar (Roadmap §3:118, `raw_port_display`); duplicate tag hard-block; tag rename shows a proactive warning (`inbound_tag_reference_preview`) when the draft tag still has routing `inboundTag` refs, and the post-Save status message repeats the stale refs if the tag actually changed (`inbound_stale_tag_references`) — v1 warn+list, never blocks (Roadmap §3:119) |
 | Protocol | VLESS decryption + Generate `vlessenc` + shared fallbacks editor; Trojan shared fallbacks (clients → Users); Hysteria `version=2` (fixed); Tunnel — network combo, rewrite address/port, `followRedirect`, `sockopt.tproxy` (combo + free text, shared widget with Stream-tab Sockopt; Roadmap §2.3:88), `userLevel`, portMap table (add/edit/delete + target validation) |
-| Stream | tcp/raw \| xhttp \| grpc \| websocket \| mkcp \| hysteria; combo через `selectable_stream_methods` (protocol×Vision; security coerce отдельно); Hy protocol locks hysteria; XHTTP: full allowlist + headers From/To ranges + XMUX + one-level download; WS: path/host/acceptProxyProtocol/`ed`; mKCP: full `kcpSettings` + congestion ComboBox + range hard-validate; quicParams congestion/brutalUp/Down; Sockopt (VLESS/Trojan/Hysteria, method-independent): `tproxy`/`tcpFastOpen`/`acceptProxyProtocol`/`V6Only`/keep-alive+timeout+window fields/`trustedXForwardedFor`/`customSockopt` (raw JSON); outbound-only sockopt поля preserve-only; `other_method` preserve; coerce display без dirty-on-open; Tunnel — tab disabled (tcp/none fixed; on-disk `streamSettings` preserved on Shell Save except the narrow `sockopt.tproxy` field exposed on the Protocol tab) |
+| Stream | вверху (view и edit) — жёлтые некритичные предупреждения с JSON-путём (`show_compatibility_warnings`: edit — по черновику `inbound_editor_warnings`, view — по сохранённому `inbound_warnings_at`; §62.5); FinalMask `tcp[]`/`udp[]` — типизированные формы слоёв с draft'ом, переживающим кадры egui, и raw-JSON fallback (§62.3–§62.4); tcp/raw \| xhttp \| grpc \| websocket \| mkcp \| hysteria; combo через `selectable_stream_methods` (protocol×Vision; security coerce отдельно); Hy protocol locks hysteria; XHTTP: full allowlist + headers From/To ranges + XMUX + one-level download; WS: path/host/acceptProxyProtocol/`ed`; mKCP: `kcpSettings` по `KCPConfig` ядра (cwndMultiplier/maxSendingWindow, пусто = дефолт ядра) + hard-validate как `Build()` + кнопка «Remove ignored fields» (§65); quicParams — все 17 полей `QuicParamsConfig` + валидация как `Build()`, client-only поля на inbound — только если заданы (§78); у XHTTP при TLS alpn ровно ["h3"] — тот же редактор для XHTTP/3 (congestion reno/bbr/force-brutal, §80); Sockopt (VLESS/Trojan/Hysteria, method-independent): `tproxy`/`tcpFastOpen`/`acceptProxyProtocol`/`V6Only`/keep-alive+timeout+window fields/`trustedXForwardedFor`/`customSockopt` (raw JSON); outbound-only sockopt поля preserve-only; `other_method` preserve; coerce display без dirty-on-open; Tunnel — tab disabled (tcp/none fixed; on-disk `streamSettings` preserved on Shell Save except the narrow `sockopt.tproxy` field exposed on the Protocol tab) |
 | Security | VLESS none\|tls\|reality; Trojan tls\|reality; Hysteria tls; WS / mKCP ⇒ none\|tls (Reality greyed); TLS (полный TLSObject + multi-entry certificates cards; ALPN/curves tags; ECH collapse); Reality keygen + ALPN tags; unknown security read-only + Apply mode; Tunnel — tab disabled |
 | Sniffing | как §33 (NoWrite / create / preserve unknown) |
 | Users | §32; protocol dispatch VLESS/Trojan/Hysteria; blocked while shell dirty; Vision на xhttp → G3 ValidationFailed; Tunnel — tab disabled (`mutate_enabled` false) |
@@ -2346,7 +2353,7 @@ GUI (inbounds.rs + users.rs)
   - `certificateFile` / `keyFile`, inline `certificate` / `key` (PEM lines), `ocspStapling`, `oneTimeLoading`, `usage` (`encipherment`\|`verify`\|`issue`), `buildChain` (только при `usage=issue`), `extras` (unknown per-cert keys).
 - Unknown keys на уровне `tlsSettings` → `TlsSettingsDraft.extras` (исключая `certificates` и typed keys).
 - UI-флаг `enable_ech` (parse: true если любой ECH-поле непусто) — секция ECH скрыта, пока `false`.
-- Reality: typed `realitySettings.alpn` в `RealitySettingsDraft` (тот же tag-виджет; нужен для fallbacks gate).
+- Reality: typed `realitySettings.alpn` в `RealitySettingsDraft` (тот же tag-виджет; нужен для fallbacks gate). **Отменено в 0.5.32-2 (§82):** у REALITY нет `alpn`, ключ хранится как unknown с предупреждением.
 
 ### GUI
 - Certificates: карточки как у fallbacks (`ui.group`); Add / Remove; Remove disabled при `len == 1`; без reorder (MVP).
@@ -2378,7 +2385,7 @@ GUI (inbounds.rs + users.rs)
 - Допустимо только при `protocol ∈ {vless,trojan}` ∧ transport `tcp|raw` ∧ security `tls|reality` (`fallbacks_transport_compatible` / `fallbacks_compatible_on_inbound`).
 - Порядок Shell Save / Add: protocol → stream → security → `reconcile_inbound_fallbacks` → sniffing → gates.
   - Несовместимый Stream/Security → auto-strip `settings.fallbacks` (без отдельного CompatibilityGate).
-  - Совместимый + непустой список → `require_alpn_for_fallbacks`: non-empty `tlsSettings.alpn` или `realitySettings.alpn` (иначе `ValidationFailed`); auto-patch удалён — пользователь задаёт ALPN на Security tab (tags).
+  - Совместимый + непустой список → `require_alpn_for_fallbacks`: non-empty `tlsSettings.alpn` или `realitySettings.alpn` (иначе `ValidationFailed`; с 0.5.32-2 — только `tlsSettings.alpn` как `StringList`, REALITY без требования, §82); auto-patch удалён — пользователь задаёт ALPN на Security tab (tags).
 - GUI: hint «будут сняты при Save», если draft непустой, а текущий Stream/Security несовместим; редактор не блокируется; отдельно — notify/Save-block при пустом Security ALPN.
 - Hysteria / Tunnel: секция fallbacks не показывается.
 
@@ -2414,6 +2421,8 @@ Dual API: wire-string matrix в `compatibility/matrix.rs` (`ws` → `websocket`,
 
 Wave A/C1: Tls в candidates; Hy stream только для protocol hysteria; Tunnel ⇒ только Tcp + None; WS / mKCP для VLESS/Trojan (не Hysteria). Exotic `other_method` не coerce — preserve + Save hard-block. Unknown `security` не coerce в `none`. Fallbacks (C2) не добавляют отдельный Gx — strip + require ALPN через `reconcile_inbound_fallbacks` после stream/security.
 
+Gates и предупреждения — два разных механизма (Roadmap §2.6, этап 0.3; подробно §62.5): gate (`CompatibilityGateId`) **блокирует** Save / Add / client mutate, предупреждение (`CompatibilityWarningId`, `compatibility/warnings.rs`) Save **никогда** не блокирует — оно отмечает конфигурацию, которую ядро принимает, но которая делает не то, что кажется (как правило, ключ, молча игнорируемый текущим Xray-core). Предупреждения не входят в `first_failing_gate` и не имеют порядка Save; их порядок — порядок в конфиге. Текущий набор: `QuicParamsUdpHopIgnored` (outbound), `QuicParamsUdpHopClientOnly` (inbound, любое ядро; §79), `QuicParamsUnusedTransport` (`quicParams` не на Hysteria/XHTTP-h3; §80), `UdpHopSockoptIgnored` (версионные — с учётом версии ядра из Discovery), `RequiresNewerCore` (маска новее установленного ядра; §67), а также mKCP (§65) и Freedom (§66). G4 по-прежнему gate — его перевод в два предупреждения запланирован в этапе 5.1 Roadmap §2.6 (Reality и `finalmask.tcp` штатно композируются в ядре: `tcp/hub.go`, `tcp/dialer.go`); после этого строка G4 в таблице выше и тесты `g4_*` / `finalmask_tcp_blocked_by_g4_with_reality_security` должны быть обновлены.
+
 ## 34.8	IB-L5 / IB-L6
 - Preview changes: structural path diff `original_serialized` vs `serialized`; secrets (`password`, `privateKey`, `id`, `auth`, …) → `[REDACTED]`. Preview идёт тем же Shell/Add pipeline (incl. fallbacks reconcile), поэтому strip / ALPN ValidationFailed видны до Save.
 - `-test`: после успешного write; confdir install → `-confdir`; fail → restore backup; Status Bar / `XrayValidationFailed`. Skip если binary path неизвестен. G12 = local material check (file or PEM); remote file existence для non-empty paths — `verify_remote_tls_cert_paths` перед write (Shell Save / Add).
@@ -2425,7 +2434,7 @@ Wave A/C1: Tls в candidates; Hy stream только для protocol hysteria; T
   - WebSocket (`ShareTransport::Ws`): `type=ws` + `path` (+ optional `host`); path может включать `?ed=N`; только с TLS — `security=none` / Reality → отказ (`build_share_uri` + `ApplicationService::build_client_share_uri`)
   - mKCP (`ShareTransport::Kcp`): `type=kcp` (без seed/header query); только с TLS — `security=none` / Reality → отказ
   - XHTTP (`ShareTransport::Xhttp`): `type=xhttp` path + optional host/mode + `extra=` (URL-encoded JSON advanced allowlist)
-  - `hy2://auth@host:port` — full query parity (Roadmap §3:121): optional `sni` / `insecure`; hop — host:port заменяется на Hysteria2 "port hopping" синтаксис (`443,5000-6000`) через `port_hop_syntax()`/`first_hop_port()` (`inbound_edit/general.rs`), если `port` не скаляр (переиспользует §3:118); obfs — read-only детект `finalmask.udp[]` слоя `type: "salamander"` (`hysteria_salamander_obfs_password()`, `inbound_stream/finalmask.rs`) → `obfs=salamander&obfs-password=`; FinalMask UDP editor для Hysteria по-прежнему не реализован (Wave A ограничила это VLESS/Trojan) — только чтение уже существующего на диске; pin — `pinSHA256`: SHA-256 DER-хеш реального сертификата, вычисляется async через `ApplicationService::start_fetch_cert_pin` (SFTP-чтение `certificateFile`, зеркалит паттерн Generate x25519/mldsa65; `src/xray/cert_pin.rs::cert_pin_sha256` — PEM или raw DER, hex lowercase, тот же формат что апстрим hysteria `sha256.Sum256(rawCert)`), кнопка "Fetch cert pin" на Security tab (Hysteria + TLS + certificateFile only); результат кэшируется в `ShareMaterialStore` (`merge_cert_pin`, новое поле `InboundShareMaterial.cert_pin_sha256` / sidecar `certPinSha256`) — не блокирует Copy share URI, pin просто отсутствует пока не выбран Fetch
+  - `hy2://auth@host:port` — full query parity (Roadmap §3:121): optional `sni` / `insecure`; hop — host:port заменяется на Hysteria2 "port hopping" синтаксис (`443,5000-6000`) через `port_hop_syntax()`/`first_hop_port()` (`inbound_edit/general.rs`), если `port` не скаляр (переиспользует §3:118); obfs — read-only детект `finalmask.udp[]` слоя `type: "salamander"` (`hysteria_salamander_obfs_password()`, `inbound_stream/finalmask.rs`) → `obfs=salamander&obfs-password=`; FinalMask UDP editor для Hysteria по-прежнему не реализован (Wave A ограничила это VLESS/Trojan) — только чтение уже существующего на диске (с 0.5.33-0 заменено: редактор `finalmask.udp` для Hysteria и `hy2_share_obfs()` по типизированным слоям, §83); pin — `pinSHA256`: SHA-256 DER-хеш реального сертификата, вычисляется async через `ApplicationService::start_fetch_cert_pin` (SFTP-чтение `certificateFile`, зеркалит паттерн Generate x25519/mldsa65; `src/xray/cert_pin.rs::cert_pin_sha256` — PEM или raw DER, hex lowercase, тот же формат что апстрим hysteria `sha256.Sum256(rawCert)`), кнопка "Fetch cert pin" на Security tab (Hysteria + TLS + certificateFile only); результат кэшируется в `ShareMaterialStore` (`merge_cert_pin`, новое поле `InboundShareMaterial.cert_pin_sha256` / sidecar `certPinSha256`) — не блокирует Copy share URI, pin просто отсутствует пока не выбран Fetch
 - Host = Connection host; port = inbound port (или `port_hop` для hy2); Reality: `pbk`/`sid`/`sni`/`fp=chrome`/`spx=/`.
 - `pbk`: session Generate → `ShareMaterialStore` → local fallback (`x25519_local::public_key_from_private_key`, derives `pbk` from `realitySettings.privateKey`, no SSH round-trip; result cached back into `ShareMaterialStore`). Client `encryption` — только из Generate / `ShareMaterialStore` (нет local fallback).
 - QR code (Roadmap §3:122): «Show QR code» рядом с «Copy share URI» во всех 3 Users context menus (VLESS/Trojan/Hysteria) — открывает независимое от Add/Edit/Delete окно (своя temp-data запись, `qr_dialog_id`) с QR + read-only полем URI + Copy. Рендер — `gui::pages::qr_code(ui, data)`: `qrcode::QrCode::new` (crate `qrcode = "0.14.1"`, `default-features = false` — без `image`/`svg`/`pic`) → модули рисуются painter'ом напрямую как залитые прямоугольники (без текстур), с обязательной 4-модульной quiet-zone по краям (требование стандарта QR); при encode-ошибке (теоретически возможно для очень длинных `extra=`/hy2 URI) возвращает `Err` вместо паники, диалог показывает текст ошибки вместо QR.
@@ -2454,11 +2463,11 @@ Wave A/C1: Tls в candidates; Hy stream только для protocol hysteria; T
 - Тесты: `modify_tests` (`replace_inbound_raw_json_replaces_whole_object`, `replace_inbound_raw_json_works_for_unsupported_protocol`, `replace_inbound_raw_json_fingerprint_mismatch`, `replace_inbound_raw_json_rejects_non_object`, `replace_inbound_raw_json_rejects_duplicate_tag`, `replace_outbound_raw_json_replaces_whole_object`, `replace_outbound_raw_json_fingerprint_mismatch`).
 
 ## 34.12	Тесты и QA
-- Unit: `modify_tests` (Vision+xhttp G3, Reality round-trip, Trojan Add Reality, Hysteria user add/update/delete, Tunnel add/shell save/`from_wire`/`dokodemo-door` None, `wave_c2_*` fallbacks require ALPN + WS strip, `finalmask_tcp_ok_with_tls_security` / `finalmask_tcp_blocked_by_g4_with_reality_security`); `inbound_fallbacks` (dest variants, extras round-trip, strip, TLS/Reality require ALPN, path validate, transport matrix); `inbound_protocol` (Tunnel parse/apply round-trip, `portMap` target forms); `inbound_security` (полный TLS parse/apply/round-trip/strip, multi-entry certificates, Reality alpn, Reality advanced fields round-trip (`parse_reality_reads_advanced_fields` / `apply_reality_roundtrip_advanced_fields`), unknown hard-fail); `compatibility` + `matrix` (G9/G10/G12 multi-entry + PEM + verify-without-key Save, G11, G4 top-level `finalmask.tcp` path (+ nested-shape no-false-positive + empty/absent pass), `tunnel` tcp×none, `allowed_*` / `selectable_*` / WS/mKCP coerce, `websocket×reality` / `mkcp×reality`); `share_uri` (hy2 + TLS + WS/mKCP TLS / reject none + XHTTP extra=); `inbound_stream` (ws alias→websocket, kcp alias→mkcp, full `kcpSettings` defaults/write, xhttp defaults/write/validate/download/extra, range validate, path↔ed, drop old `*Settings`, `finalmask` submodule: parse/apply/validate `tcp[]`/`udp[]` layers + malformed-shape fallback + quicParams-sibling preservation, `sockopt` submodule: known-fields+extras parse, `tcpFastOpen` bool/backlog/unset/unrecognized-shape, `customSockopt`/`happyEyeballs` valid/invalid-shape, full round-trip, default→`{}`; `inbound_stream` parse/apply: write-flag set on valid object / stays false + raw preserve on malformed shape / unknown future field survives edit-unrelated-field cycle) / protocol; `app/users` (`selected_users_protocol`, `hysteria_row_display`); `modify_tests` (`sockopt_shell_save_edits_field_and_preserves_unknown_field`, `tunnel_shell_save_edits_tproxy_and_preserves_other_stream_fields` — full `update_inbound_shell` round-trip via `apply_tunnel_sockopt`; existing `tunnel_shell_save_preserves_stream_and_unknown_settings` re-verified unaffected for the untouched/`write_sockopt=false` case); `inbound_stream` (`apply_tunnel_sockopt_noop_when_not_edited` / `apply_tunnel_sockopt_writes_only_sockopt_key` / `apply_tunnel_sockopt_creates_stream_settings_when_absent`); `x25519_local` (`derives_fixture_public_key`, `rejects_empty_and_bad_length`); `app/service` (`vless_share_uri_derives_pbk_from_private_key_without_ephemeral`, `preview_add_user_diff_redacts_and_does_not_mutate`, `preview_update_user_diff_shows_email_change_without_mutating`); `xray/cert_pin` (PEM/DER hashing, first-cert-of-chain, empty-input reject, Roadmap §3:121); `inbound_edit/general` (`port_hop_syntax_*`, `first_hop_port_*`); `inbound_stream/finalmask` (`salamander_obfs_password_*`); `share_uri` (`builds_hy2_with_port_hop` / `_with_salamander_obfs` / `_with_pin_sha256` / `_ignores_blank_optional_fields`, `builds_vless_tls_ws` alpn assertion); `app/share_material` (`merge_cert_pin_stores_and_ignores_blank`, `roundtrip_json` extended for `certPinSha256`); `app/inbound_ops` (`stale_tag_references_*`).
+- Unit: `modify_tests` (Vision+xhttp G3, Reality round-trip, Trojan Add Reality, Hysteria user add/update/delete, Tunnel add/shell save/`from_wire`/`dokodemo-door` None, `wave_c2_*` fallbacks require ALPN + WS strip, `finalmask_tcp_ok_with_tls_security` / `finalmask_tcp_blocked_by_g4_with_reality_security`); `inbound_fallbacks` (dest variants, extras round-trip, strip, TLS/Reality require ALPN, path validate, transport matrix); `inbound_protocol` (Tunnel parse/apply round-trip, `portMap` target forms); `inbound_security` (полный TLS parse/apply/round-trip/strip, multi-entry certificates, Reality alpn, Reality advanced fields round-trip (`parse_reality_reads_advanced_fields` / `apply_reality_roundtrip_advanced_fields`), unknown hard-fail); `compatibility` + `matrix` (G9/G10/G12 multi-entry + PEM + verify-without-key Save, G11, G4 top-level `finalmask.tcp` path (+ nested-shape no-false-positive + empty/absent pass), `tunnel` tcp×none, `allowed_*` / `selectable_*` / WS/mKCP coerce, `websocket×reality` / `mkcp×reality`); `share_uri` (hy2 + TLS + WS/mKCP TLS / reject none + XHTTP extra=); `inbound_stream` (ws alias→websocket, kcp alias→mkcp, full `kcpSettings` defaults/write, xhttp defaults/write/validate/download/extra, range validate, path↔ed, drop old `*Settings`, `finalmask` submodule: parse/apply/validate `tcp[]`/`udp[]` layers + malformed-shape fallback + quicParams-sibling preservation, `sockopt` submodule: known-fields+extras parse, `tcpFastOpen` bool/backlog/unset/unrecognized-shape, `customSockopt`/`happyEyeballs` valid/invalid-shape, full round-trip, default→`{}`; `inbound_stream` parse/apply: write-flag set on valid object / stays false + raw preserve on malformed shape / unknown future field survives edit-unrelated-field cycle) / protocol; `app/users` (`selected_users_protocol`, `hysteria_row_display`); `modify_tests` (`sockopt_shell_save_edits_field_and_preserves_unknown_field`, `tunnel_shell_save_edits_tproxy_and_preserves_other_stream_fields` — full `update_inbound_shell` round-trip via `apply_tunnel_sockopt`; existing `tunnel_shell_save_preserves_stream_and_unknown_settings` re-verified unaffected for the untouched/`write_sockopt=false` case); `inbound_stream` (`apply_tunnel_sockopt_noop_when_not_edited` / `apply_tunnel_sockopt_writes_only_sockopt_key` / `apply_tunnel_sockopt_creates_stream_settings_when_absent`); `x25519_local` (`derives_fixture_public_key`, `rejects_empty_and_bad_length`); `app/service` (`vless_share_uri_derives_pbk_from_private_key_without_ephemeral`, `preview_add_user_diff_redacts_and_does_not_mutate`, `preview_update_user_diff_shows_email_change_without_mutating`); `xray/cert_pin` (PEM/DER hashing, first-cert-of-chain, empty-input reject, Roadmap §3:121); `inbound_edit/general` (`port_hop_syntax_*`, `first_hop_port_*`); `inbound_stream/finalmask` (`salamander_obfs_password_*`); `share_uri` (`builds_hy2_with_port_hop` / `_with_salamander_obfs` / `_with_pin_sha256` / `_ignores_blank_optional_fields`, `builds_vless_tls_ws` alpn assertion); `app/share_material` (`merge_cert_pin_stores_and_ignores_blank`, `roundtrip_json` extended for `certPinSha256`); `app/inbound_ops` (`stale_tag_references_*`). FinalMask этап 0 (shape-preserving значения, «без потерь или raw», GUI-draft'ы на реальных кадрах egui, некритичные предупреждения) — §62.7.
 - Ручной QA: eng-review test plan `~/.gstack/projects/Feldjaeger/*eng-review-test-plan*`; `docs/ui.md`; Hysteria shell + Users CRUD — enabled (Wave A complete для §2.2:69); Tunnel shell — Roadmap §2.2:70; WebSocket Stream — Roadmap §2.3:80; mKCP Stream — Roadmap §2.3:81; XHTTP advanced — Roadmap §2.3:82; Shared fallbacks — Roadmap §2.3:83; TLS advanced — Roadmap §2.3:84; Multi-entry certificates + remote path check — Roadmap §2.3:85 / §2.5:104; REALITY advanced + FinalMask editor — Roadmap §2.3:86; Sockopt editor — Roadmap §2.3:87; Tunnel tproxy follow-up — Roadmap §2.3:88.
 
 ## 34.13	Документация
-- Этот раздел; §32–§33 (слои); `docs/ui.md`; `docs/Feldjaeger Roadmap.md` — Wave 0 + Wave A (incl. Hysteria Users) + Tunnel shell + Wave C1 WebSocket + mKCP + Wave C2 fallbacks + Wave C3 XHTTP + TLS advanced + multi-entry certificates / remote SFTP probe + REALITY advanced fields + FinalMask `tcp[]`/`udp[]` editor (§2.3:86) + Sockopt editor (§2.3:87) + Tunnel tproxy follow-up (§2.3:88) shipped; C1 remainder (httpupgrade) + Waves B–D backlog; outbound `sockopt` GUI (typed, but no widget yet — §34.1 backlog) остаётся вне scope §35 (Freedom не трогает `streamSettings`).
+- Этот раздел; §32–§33 (слои); `docs/ui.md`; `docs/Feldjaeger Roadmap.md` — Wave 0 + Wave A (incl. Hysteria Users) + Tunnel shell + Wave C1 WebSocket + mKCP + Wave C2 fallbacks + Wave C3 XHTTP + TLS advanced + multi-entry certificates / remote SFTP probe + REALITY advanced fields + FinalMask `tcp[]`/`udp[]` editor (§2.3:86) + Sockopt editor (§2.3:87) + Tunnel tproxy follow-up (§2.3:88) shipped; C1 remainder (httpupgrade) + Waves B–D backlog; outbound `sockopt` GUI (typed, but no widget yet — §34.1 backlog) остаётся вне scope §35 (Freedom не трогает `streamSettings`). FinalMask — полная реализация (Roadmap §2.6): этап 0 (0.1–0.3) — §62; остальные этапы — backlog Roadmap §2.6.
 
 # 35	Outbounds Shell: Freedom + Blackhole (Roadmap §2.4:94, §2.4:95)
 
@@ -2467,7 +2476,7 @@ Wave A/C1: Tls в candidates; Hy stream только для protocol hysteria; T
 Первый Outbound Shell в Feldjäger — до этого outbounds были read-only таблицей + Delete UI (§2.4:97) + внутренний mutate API, используемый только Cloudflare WARP (§31) для собственного managed WireGuard outbound. §2.4:94 добавил Add / Edit General + Protocol для Freedom (`protocol: "freedom"`); §2.4:95 расширил тот же механизм на Blackhole (`protocol: "blackhole"`) — второй, структурно куда более простой shell-editable outbound-протокол.
 
 - В scope (shipped):
-  - Add / Edit Freedom outbound: `tag` (rename запрещён на Edit — см. §35.4), `sendThrough`, Protocol: `domainStrategy` (reuse `DOMAIN_STRATEGIES` пресетов из `streamSettings.sockopt.domainStrategy` — тот же список значений, другое расположение в JSON), `redirect`, `userLevel`, `fragment` (`packets`/`length`/`interval`, toggle-able блок), `noises[]` (`type`/`packet`/`delay`, add/edit/delete таблица; пресеты `rand`/`str`/`hex`/`base64`) — §2.4:94
+  - Add / Edit Freedom outbound (поля Protocol пересмотрены по документации в §66: `domainStrategy` → `streamSettings.sockopt.domainStrategy`, + `proxyProtocol`, `finalRules[]`): `tag` (rename запрещён на Edit — см. §35.4), `sendThrough`, Protocol: `domainStrategy` (reuse `DOMAIN_STRATEGIES` пресетов из `streamSettings.sockopt.domainStrategy` — тот же список значений, другое расположение в JSON), `redirect`, `userLevel`, `fragment` (`packets`/`length`/`interval`, toggle-able блок), `noises[]` (`type`/`packet`/`delay`, add/edit/delete таблица; пресеты `rand`/`str`/`hex`/`base64`) — §2.4:94
   - Add / Edit Blackhole outbound: `tag`/`sendThrough` (то же General, что и Freedom), Protocol: `response.type` (`none`|`http`, combo+free-text; пусто = ключ `response` отсутствует целиком = Xray default `none`) — §2.4:95
   - Общий General слой (`OutboundGeneral`/`OutboundRef`/`outbound_edit`) и общий Add/Edit/Save GUI-каркас (`OutboundEditorSession`) переиспользуются между протоколами без дублирования — только `OutboundSettingsDraft` ветвится по протоколу (`Freedom { .. }` / `Blackhole { .. }`)
   - Fingerprint-checked Shell Save (мирроринг inbound `InboundRef`/`with_inbound_mut`, но через clone-mutate-`replace_outbound_value` вместо отдельного `with_outbound_mut` — см. §35.3), общий для обоих протоколов
@@ -2486,7 +2495,7 @@ Wave A/C1: Tls в candidates; Hy stream только для protocol hysteria; T
 | Область | Путь |
 | ------- | ---- |
 | General | `outbound_edit/mod.rs` — `OutboundGeneral { tag, send_through }`, `OutboundRef { outbound_index, expected_fingerprint }` (мирроринг `InboundRef`, без typed protocol-поля — протокол не влияет на General); `parse_outbound_general` / `apply_outbound_general`. Общий для Freedom и Blackhole без изменений с §2.4:94 |
-| Protocol | `outbound_protocol/mod.rs` — `OutboundSettingsDraft::Freedom { domain_strategy, redirect, user_level, fragment: Option<FragmentDraft>, noises: Vec<NoiseDraft> }` и `OutboundSettingsDraft::Blackhole { response_type: String, response_extras: Map<String, Value> }`; `FragmentDraft`/`NoiseDraft` — typed + `extras: Map<String, Value>` каждый (per-entry unknown-key preserve, тот же паттерн что `FallbackObject`); Blackhole хранит extras флэт (`response_extras`) вместо отдельного draft-struct — `response` содержит только `type` по документации, отдельная struct была бы избыточной; `is_shell_editable_protocol(protocol: &str) -> bool` — единый источник истины для списка shell-editable протоколов (`freedom`, `blackhole`), используется и в `validate_outbound_object`, и в `ApplicationService::build_outbound_ref`; `ensure_settings_object` — private twin инбаундового хелпера (settings живёт в отдельном JSON location у outbound, поэтому не шарится) |
+| Protocol | (Freedom с §66 — `OutboundSettingsDraft::Freedom(FreedomSettingsDraft)` в `outbound_protocol/freedom.rs`) `outbound_protocol/mod.rs` — `OutboundSettingsDraft::Freedom { domain_strategy, redirect, user_level, fragment: Option<FragmentDraft>, noises: Vec<NoiseDraft> }` и `OutboundSettingsDraft::Blackhole { response_type: String, response_extras: Map<String, Value> }`; `FragmentDraft`/`NoiseDraft` — typed + `extras: Map<String, Value>` каждый (per-entry unknown-key preserve, тот же паттерн что `FallbackObject`); Blackhole хранит extras флэт (`response_extras`) вместо отдельного draft-struct — `response` содержит только `type` по документации, отдельная struct была бы избыточной; `is_shell_editable_protocol(protocol: &str) -> bool` — единый источник истины для списка shell-editable протоколов (`freedom`, `blackhole`), используется и в `validate_outbound_object`, и в `ApplicationService::build_outbound_ref`; `ensure_settings_object` — private twin инбаундового хелпера (settings живёт в отдельном JSON location у outbound, поэтому не шарится) |
 | Mutate API | `modify.rs`: `AddOutboundShellRequest` / `add_outbound_shell` (строит skeleton `{"protocol": <из draft>, "settings":{}}` — protocol строка выводится из `OutboundSettingsDraft`-варианта через `outbound_settings_protocol_name`, применяет General+Protocol, делегирует в существующий `add_outbound`); `UpdateOutboundShellRequest` / `update_outbound_shell` (fingerprint-check по индексу через `outbound_object_fingerprint`, clone текущего outbound `Value`, apply General+Protocol in place на клоне — preserve любых нетронутых ключей типа `mux`/`streamSettings`/`proxySettings`/неизвестных `settings`-полей — затем делегирует в существующий `replace_outbound` по исходному tag, что и даёт rename-guard бесплатно). Обе функции протокол-агностичны — Blackhole не потребовал изменений сигнатур |
 | Validation gate | `validate_outbound_object` (`modify.rs`) ослаблен: принимает `protocol` `"wireguard"` или `is_shell_editable_protocol(...)` (`"freedom"`/`"blackhole"`) |
 
@@ -2508,7 +2517,7 @@ Wave A/C1: Tls в candidates; Hy stream только для protocol hysteria; T
 - "Add Outbound" — теперь `ui.menu_button` с двумя пунктами, Freedom и Blackhole (было: единственная кнопка под Freedom в §2.4:94), каждый вызывает свой `ApplicationService::begin_add_outbound_freedom()`/`begin_add_outbound_blackhole()` (оба тонкие обёртки над общим приватным `begin_add_outbound(settings)`).
 - Контекстное меню строки: Edit активен, когда `row.kind()` — `OutboundKind::Freedom` или `OutboundKind::Blackhole` (иначе disabled hint "Shell editing is available for Freedom and Blackhole outbounds only"); Delete — без изменений (§2.4:97); Duplicate — по-прежнему disabled (§2.4:98, backlog).
 - Единая панель редактора (без вкладок — ни Freedom, ни Blackhole не используют Stream/Security/Sniffing/Users), заголовок и подпись Protocol-секции подставляют имя протокола динамически (`outbound_protocol_label`, выведено из активного варианта `OutboundSettingsDraft`): General grid (`tag` — editable только на Add, на Edit — read-only label с hover-подсказкой про §2.4:99; `sendThrough`) → Protocol-секция диспетчеризуется по варианту:
-  - Freedom: `domainStrategy` combo+free-text, `redirect`, `userLevel` DragValue, `fragment` toggle + 3-поле grid, `noises` add/edit/delete таблица (combo `type` из `FREEDOM_NOISE_TYPES` + `packet`/`delay` text fields)
+  - Freedom (с §66: `sockopt.domainStrategy`, `proxyProtocol`, `finalRules[]`, предупреждения + «Migrate to sockopt»): `domainStrategy` combo+free-text, `redirect`, `userLevel` DragValue, `fragment` toggle + 3-поле grid, `noises` add/edit/delete таблица (combo `type` из `FREEDOM_NOISE_TYPES` + `packet`/`delay` text fields)
   - Blackhole: `response.type` combo (`BLACKHOLE_RESPONSE_TYPES` = `none`/`http`) + free-text
   → Save/Cancel.
 - `ApplicationService`: `outbound_editor_session()`/`_mut()`, `begin_add_outbound_freedom()`, `begin_add_outbound_blackhole()`, `begin_edit_outbound_shell(index)` (протокол-агностичен — гейтится через `is_shell_editable_protocol`), `cancel_outbound_editor_session()`, `start_add_outbound_shell()`, `start_save_outbound_shell()`; `is_outbound_mutation_busy()` расширен на `CurrentOperation::AddingOutbound`/`UpdatingOutboundShell`; `poll_outbound_mutation()` получил match-ветки на `OutboundMutationSuccess::Add`/`Update` (очищают `outbound_editor_session`, вызывают `replace_loaded_editable`) — ни один из этих методов не потребовал изменений под §2.4:95, кроме нового `begin_add_outbound_blackhole()`.
@@ -5687,3 +5696,2400 @@ show_vless_settings_edit(ui, service)`, новая функция `show_vless_se
 `api`/`routing`/`policy`/`observatory`/`burstObservatory`/`stats`/`metrics`/`env`/`version`/
 `geodata`/`reverse` — все реализованы (`reverse` — в объёме, уточнённом с пользователем: VLESS-
 native механизм, не legacy `bridges`/`portals`, см. §61.1).
+
+# 62	FinalMask — этап 0: подготовка (Roadmap §2.6, пункты 0.1–0.3)
+
+## 62.1	Цель и границы
+
+Roadmap §2.6 «FinalMask — полная реализация» вырос из аудита 2026-09-28: сверка редактора FinalMask
+(§34.1, Roadmap §2.3:86 / §2.3:89) с документацией <https://xtls.github.io/en/config/transports/finalmask.html>
+и — как с источником истины при расхождениях — с `XTLS/Xray-core@main`
+(`infra/conf/transport_finalmask.go`, `infra/conf/transport_internet.go`,
+`transport/internet/{tcp,splithttp}/*`). Документация отстаёт от ядра (нет `xmc`, нет UDP-маски
+`udphop`, `udpHop` всё ещё описан в `quicParams`).
+
+Найденные проблемы, которые закрывает этап 0 (остальные — этапы 1–7 Roadmap §2.6):
+- **потеря данных в типизированных формах масок** (§2.3:89): поля читались string-only аксессором,
+  поэтому числовые `length`/`delay`/`maxSplit`/`rand`/`reset`/`interval`/`packetSize`/`remotePorts`
+  и байтовые массивы `packet` молча выбрасывались при следующей записи;
+- **самопроизвольная перезапись** `settings`: immediate-mode GUI каждый кадр заново выводил форму из
+  `settings` и писал обратно нормализованный JSON — inbound помечался изменённым от простого
+  просмотра, а набираемый текст «схлопывался»;
+- **нет механизма некритичных предупреждений**: compatibility gates умеют только блокировать Save,
+  а для дрейфа схемы ядра (ключ молча игнорируется) нужна жёлтая строка, а не блок.
+
+Решения пользователя, зафиксированные в аудите и влияющие на архитектуру этого и следующих этапов:
+G4 → два некритичных предупреждения (этап 5.1); полные формы для `header-custom`/`xmc`/`mkcp-legacy`
+(этап 2); общий direction-aware stream-модуль (0.4); Outbound FinalMask — только после
+Outbound-редактора `streamSettings` (Tier 4 §4.2 → этап 7). Порядок: этап 0 → 1 → … → 6, затем §4.2,
+затем этап 7.
+
+Статус этапа 0: 0.1–0.3 реализованы (версии 0.5.16-6 → 0.5.17-0), 0.4 — §63 (0.5.17-1),
+0.5 — §64 (0.5.17-2), 0.6 — §65 (0.5.18-0); 0.7 (таблица «тип маски / поле → минимальная версия
+Xray-core») — backlog.
+
+> Пути в §62 — на момент 0.1–0.3. С 0.4 (§63) `values.rs`, `finalmask_layers.rs`, `finalmask.rs`,
+> `sockopt.rs` лежат в `src/xray/config/stream/`; `FinalMaskForm` и формы слоёв — в
+> `gui/pages/stream_finalmask.rs`; `SourcedTextBuffer` и `finalmask_multiline_list_row` (теперь
+> `persistent_multiline_list_row`) — в `gui/pages/mod.rs`. Поведение не менялось.
+
+## 62.2	Shape-preserving значения (0.1, `inbound_stream/values.rs`)
+
+Часть полей FinalMask в Xray-core принимает несколько JSON-форм (`infra/conf/common.go`,
+`transport_finalmask.go`). Новый модуль заменяет для них `string_field` в `finalmask_layers.rs`:
+
+| Тип | Поле ядра | Формы | Где используется |
+| --- | --------- | ----- | ---------------- |
+| `RangeValue` | `Int32Range` | число (`int32`) \| строка `ParseRangeString` (`"5"`, `"10-20"`, `"-5-5"`, `"-10--5"`) | `fragment.length`/`delay`/`maxSplit`/`lengths[]`/`delays[]`, `noise.reset`, `noise[].rand`/`randRange`/`delay`, `salamander.packetSize`, `udphop.interval` |
+| `PortListValue` | `PortList` | число \| строка `"443"`, `"20000-30000,40000"`, `"env:NAME"` | `udphop.remotePorts` |
+| `PacketValue` | `packet` + sibling `type` | строка (`str`/`hex`/`base64`, либо base64 под `array`) \| массив байт (`array`) | `noise[].packet` (далее — items `header-custom`, этап 2) |
+
+Принцип: значение хранит редактируемый `text` **и** JSON-форму, в которой было прочитано (приватные
+поля `quoted` / `form`), поэтому нетронутое значение пишется обратно байт-в-байт:
+- `RangeValue`/`PortListValue`: прочитанное как строка остаётся строкой (`"100"`); прочитанное как
+  число или новое — пишется числом, если `text` — целое, иначе строкой (`"10-20"`). Пустой `text` =
+  ключ отсутствует (`to_value` → `None`).
+- `PacketValue`: байтовый массив редактируется как `"1, 2, 255"` (парсер принимает также пробелы и
+  `[…]`) и пишется обратно массивом, пока текст разбирается как байты; строка остаётся строкой даже
+  при `type: "array"`; новое значение становится массивом только при `type` `array`/пусто (дефолт
+  Xray) и разбираемом тексте.
+- Списки (`lengths[]`/`delays[]`): `range_values_to_lines` / `range_values_from_lines` —
+  строка *n* наследует форму `previous[n]` **по позиции**; сдвиг формы после вставки строки меняет
+  лишь эквивалентные `5` ↔ `"5"`, но не смысл.
+- Непредставимая форма (float, bool, объект, массив не из байт) → `parse` возвращает `None`.
+
+Валидация зеркалит ядро: `RangeValue::bounds`/`validate` — `ParseRangeString` +
+`Int32Range.UnmarshalJSON` (ведущий `-` сдвигает разделитель на второй дефис, перестановка границ
+как `ensureOrder`; значения вне `i32` **отклоняются** — ядро молча усекает их в строках, Feldjäger
+сознательно строже); `PortListValue::validate` — `PortList.UnmarshalJSON` (порты `0..=65535`,
+сегменты `PORT`/`FROM-TO`, `env:` пропускается — разрешается в рантайме); `PacketValue::validate(type)`
+— `PraseByteSlice` (включая base64-строку под `array`: Go декодирует JSON-строку в `[]byte` как base64).
+Методы валидации **пока не подключены к Save** — это этап 1.4 (per-type валидация как `Build()`).
+
+## 62.3	Правило «без потерь или raw» (`inbound_stream/finalmask_layers.rs`)
+
+`finalmask.rs` моделирует *цепочку* слоёв (`FinalMaskLayerDraft { type, settings }`, `settings` —
+непрозрачный JSON). `finalmask_layers.rs` (Roadmap §2.3:89) поднимает до типизированных структур
+слои с небольшой стабильной схемой: `FragmentMaskSettings`, `SalamanderSettings`, `SudokuSettings`,
+`RealmSettings`, `UdpHopSettings` (переиспользует `SockoptDraft`), `NoiseMaskSettings`/`NoiseMaskItem`,
+`XdnsSettings`, `XicmpSettings` — каждая с парой `parse_*` / `*_to_value` и `extras: Map` для
+неизвестных ключей. `header-custom`/`mkcp-legacy`/`xmc` сознательно остаются на raw-JSON
+(`docs/rules.md`: «rare/advanced → generic JSON»; полные формы — этап 2). В presets добавлены
+`xmc` (`TCP_FINALMASK_TYPES`) и `udphop` (`UDP_FINALMASK_TYPES`).
+
+Правило этапа 0.1 для **всех** `parse_*`: каждый известный ключ либо представлен без потерь, либо
+`parse_*` возвращает `None`, и GUI показывает для слоя уже существующий raw-JSON редактор. Известный
+ключ с непредставимой формой (число вместо строки, float в `lengths`, объект вместо bool и т.п.)
+больше никогда не отбрасывается молча. Вспомогательные читатели (`string_field`,
+`string_array_field`, `bool_field`, `object_field`) возвращают `Option<…>`: `None` = «форма не та».
+
+```
+settings (JSON) ──parse_*──► Some(draft) ──► типизированная форма ──*_to_value──► settings
+                     │
+                     └─────► None ─────────► show_finalmask_raw_json_edit (без потерь)
+```
+
+Нормализация при записи остаётся допустимой (канонические camelCase вместо legacy-алиасов `sudoku`,
+выброшенный `"dgram": false`, обрезанные пробелы), но `parse → to_value` — неподвижная точка после
+одной нормализации (тест `parse_to_value_is_idempotent_after_one_normalization`). Чтобы нормализация
+не срабатывала от простого просмотра — §62.4.
+
+## 62.4	GUI FinalMask-форм без самопроизвольной перезаписи (0.2, `gui/pages/inbounds.rs`)
+
+Корень проблемы: egui — immediate-mode, форма каждый кадр строилась заново из `settings`. Два сбоя:
+1. простое отображение формы переписывало `settings` выходом `*_to_value` и помечало inbound
+   изменённым (dirty-on-open);
+2. набираемый текст нормализовался на следующем кадре: `"1,"` в байтовом `packet` схлопывался в
+   `"1"`, Enter в конце списка «один на строку» пропадал, ещё не валидный JSON в raw-редакторе
+   откатывался.
+
+Решение — draft/текстовый буфер в temp-памяти egui (`ctx.data_mut().insert_temp`, образец —
+`api_console.rs`) **вместе со снимком `settings`** (`source`), из которого он получен. Буфер
+используется, пока `settings == source`, и заново выводится при любом внешнем изменении (вкладка
+Raw JSON, Move up/down, Cancel, другой inbound). Ключ состояния — `make_persistent_id((…, id_suffix, idx))`.
+
+| Элемент | Роль |
+| ------- | ---- |
+| `FinalMaskForm<D>` + `FinalMaskFormState<D> { source, draft }` | Общая обвязка всех 8 типизированных форм: `begin(ui, settings, id_suffix, idx, parse)` берёт сохранённый draft или парсит `settings` (`None` → вызывающий показывает raw JSON); `finish(ui, settings, to_value)` пишет **только** если draft изменён за кадр (`draft != before`) **и** итоговый JSON отличается от `settings`, затем сохраняет состояние. Тела форм не менялись — между `begin`/`finish` они редактируют `form.draft`. |
+| `SourcedTextBuffer<S> { source, text }` + `load_text_buffer` / `store_text_buffer` | Текстовый буфер, привязанный к значению, из которого отрисован. |
+| `show_finalmask_raw_json_edit` | Raw-JSON редактор `settings` (fallback для DSL-типов и непредставимых слоёв): невалидный текст остаётся в буфере с пометкой «Not applied: …» вместо тихого отката; не-объект — «Not applied: settings must be a JSON object». |
+| `finalmask_multiline_list_row` | Список «один на строку» (`Vec<String>`) с персистентным буфером — пустые строки в процессе набора сохраняются. |
+| `finalmask_range_list_row` | То же для `Vec<RangeValue>` (`fragment.lengths`/`delays`) поверх `range_values_*_lines` — форма значения сохраняется по позиции строки. |
+
+Поля форм переведены на `.text` shape-preserving значений; у `noise.packet` — подсказка формата
+(`array: 1, 2, 255 · str/hex/base64: text`). Диспетчер `show_finalmask_settings_edit` выбирает форму
+по `type` слоя, всё прочее — raw JSON.
+
+## 62.5	Инфраструктура некритичных предупреждений (0.3)
+
+### Модель (`xray/config/compatibility/warnings.rs`)
+
+Gate (`CompatibilityGateId`) блокирует Save; предупреждение — никогда. Предупреждение отмечает
+конфигурацию, которую ядро принимает, но которая делает не то, что кажется. Xray-core декодирует
+JSON без `DisallowUnknownFields` (в т.ч. при `xray.json.strict`), поэтому удалённый из схемы ключ не
+даёт ни ошибки, ни строки в логе ядра — только Feldjäger может о нём сообщить.
+
+- `CompatibilityWarningId` — стабильные id (как у gates) + `message()` без секретов.
+- `CompatibilityWarning { id, location }` — `location` — JSON-путь внутри inbound
+  (`streamSettings.finalmask.udp[1].settings.sockopt`): `rules.md` запрещает абстракциям скрывать
+  связь с местом в исходной конфигурации; `text()` → `"<location>: <message>"`.
+- `inbound_warnings(&Value) -> Vec<CompatibilityWarning>` — чистая функция над JSON одного inbound;
+  порядок = порядок в конфиге.
+- `with_warning_suffix(message, &warnings)` — дописывает `" Warnings: a; b"` к статусу, если
+  предупреждения есть.
+
+В модуль попадают **только** факты, проверенные по `XTLS/Xray-core@main`:
+
+| Id | Условие | Основание | Исправление |
+| -- | ------- | --------- | ----------- |
+| `QuicParamsUdpHopIgnored` | `streamSettings.finalmask.quicParams.udpHop` присутствует | port hopping перенесён в UDP-маску `udphop` (XTLS/Xray-core#6327); в `QuicParamsConfig` поля нет | с 0.5.31 — только outbound; на inbound `QuicParamsUdpHopClientOnly` + «Remove udpHop» (§79) |
+| `UdpHopSockoptIgnored` | `sockopt` в `settings` слоя `finalmask.udp[]` типа `udphop` | удалён из маски (XTLS/Xray-core#6754); в `UDPHop` поля нет | кнопка удаления — этап 1.1 |
+
+Следующие кандидаты в этот же механизм по Roadmap §2.6: legacy `xdns.domain` (1.3), mKCP
+`congestion`/`readBufferSize`/`writeBufferSize` (0.6 — реализовано, §65, вместе с `header`/`seed`), версия ядра ниже минимальной для маски (0.7 — реализовано, §67),
+матрица «маска × транспорт» (4.3), G4 → два предупреждения (5.1), FinalMask без передачи в
+share-ссылке (6.1).
+
+### Единый код сборки: `compose_inbound_shell` (`xray/config/modify.rs`)
+
+Композиция Shell Save вынесена из `update_inbound_shell` в `pub fn compose_inbound_shell(inbound,
+protocol, general, protocol_draft, stream, security, sniffing)` — все `apply_*` (general → protocol →
+stream/security или `apply_tunnel_sockopt` для Tunnel → `reconcile_inbound_fallbacks` → sniffing)
+**без** gates (уникальность tag, compatibility, проверка clients). `update_inbound_shell` вызывает её
+внутри `with_inbound_mut`, затем `check_inbound_compatibility`. `build_add_inbound_value` стал `pub`
+для Add-сессий. Итог: предупреждения считаются ровно по тому JSON, который запишет Save / Add —
+отдельного «предсказателя» результата нет, и он не может разойтись с Save.
+
+### `ApplicationService` (`app/service.rs`)
+
+- `inbound_editor_warnings(&mut self)` — по **черновику** открытой сессии: `compose_session_inbound`
+  (Edit — клон on-disk inbound + `compose_inbound_shell`; Add — `build_add_inbound_value(
+  add_request_from_session(..))`) → `inbound_warnings`. Пусто без сессии и пока черновик не
+  собирается (ошибку покажет сам Save). Кэш `InboundWarningsCache { session, base, warnings }` —
+  ключ «снимок сессии + on-disk inbound», т.к. сборка клонирует inbound и прогоняет все `apply_*`;
+  поэтому вызов каждый кадр дешёвый. Без сессии (в т.ч. после Cancel) первый же вызов сбрасывает
+  кэш в `None`.
+- `inbound_warnings_at(index)` — по **сохранённому** inbound из `loaded_config` (view-режим,
+  статус после записи); пусто для неизвестного индекса.
+- Статус-бар: `poll_inbound_mutation` для Shell Save, Add и Raw JSON дописывает
+  `with_warning_suffix(…, inbound_warnings_at(index))`. Для Raw JSON в
+  `InboundMutationSuccess::RawJson` добавлено поле `inbound_index` (`app/inbound_ops.rs`).
+- Рефакторинг попутно: `session_client_protocol` и `add_request_from_session` — общий код сборки
+  `AddInboundRequest` из сессии (убран дубликат в `preview_inbound_shell_diff`).
+
+### GUI и поток данных
+
+```
+Stream tab (inbounds.rs)
+  editing ? service.inbound_editor_warnings()      # черновик: появление/исчезновение без Save
+          : service.inbound_warnings_at(row.index) # сохранённый inbound
+  → show_compatibility_warnings(ui, &warnings)      # жёлтые строки "Warning: <path>: <message>"
+  → show_stream_edit / show_stream_readonly
+
+Save / Add / Raw JSON → … → write_config_validated
+  → poll_inbound_mutation → show_status_message(with_warning_suffix(msg, inbound_warnings_at(i)))
+```
+
+Предупреждения показываются вверху Stream-таба в обоих режимах; Save ими не блокируется, и GUI не
+вычисляет их сам (`rules.md`: GUI не разбирает JSON и не обращается к модели конфигурации напрямую —
+только через `ApplicationService`).
+
+## 62.6	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Shape-preserving значения | `xray/config/inbound_stream/values.rs` (новый: `RangeValue`, `PortListValue`, `PacketValue`, `parse_range_values`, `range_values_to_lines`/`range_values_from_lines`) |
+| Типизированные слои | `xray/config/inbound_stream/finalmask_layers.rs` (правило «без потерь или raw», переход на `values.rs`), `inbound_stream/finalmask.rs` (presets `xmc`/`udphop`), `inbound_stream/mod.rs` (реэкспорты) |
+| Предупреждения | `xray/config/compatibility/warnings.rs` (новый), `compatibility/mod.rs` (реэкспорт) |
+| Сборка без gates | `xray/config/modify.rs` (`compose_inbound_shell`, `pub build_add_inbound_value`) |
+| App-слой | `app/service.rs` (`inbound_editor_warnings`, `inbound_warnings_at`, `InboundWarningsCache`, `compose_session_inbound`, `add_request_from_session`, суффикс статуса), `app/inbound_ops.rs` (`RawJson.inbound_index`) |
+| GUI | `gui/pages/inbounds.rs` (`FinalMaskForm`, `SourcedTextBuffer`, `show_finalmask_raw_json_edit`, `finalmask_multiline_list_row`, `finalmask_range_list_row`, `show_compatibility_warnings`) |
+
+## 62.7	Тесты
+
+- `inbound_stream::values::tests` — 14 (0.1): сохранение формы число/строка, absent/`null`,
+  отказ на непредставимых формах, новое целое → число, число, отредактированное в диапазон → строка,
+  `bounds` по `ParseRangeString`, списки по позиции, `PortList` round-trip + валидация, байтовый
+  `packet` round-trip, строка под `type: "array"`, форма нового `packet` по `type`, валидация как
+  `PraseByteSlice`.
+- `inbound_stream::finalmask_layers::tests` — `numeric_and_byte_array_values_round_trip_unchanged`,
+  `unrepresentable_known_keys_fall_back_to_raw_json` (0.1), `parse_to_value_is_idempotent_after_one_normalization`
+  (0.2, 8 типов слоёв) + существующие round-trip тесты каждого типа.
+- `gui::pages::inbounds::finalmask_form_tests` — 5 GUI-тестов на реальных кадрах egui
+  (`Context::run_ui`, 0.2): отображение 7 типов слоёв не меняет `settings`; реальная правка пишется,
+  эквивалентный ввод (`"1,"`) не пишется, но сохраняется в буфере; внешнее изменение сбрасывает
+  draft; raw-JSON редактор сохраняет ещё не валидный текст; список сохраняет набираемый перевод строки.
+- `compatibility::warnings::tests` — 5 (0.3): чистый inbound, `udphop.sockopt` с путём слоя,
+  legacy `quicParams.udpHop`, порядок = порядок в конфиге, суффикс только при наличии предупреждений.
+- `app::service::tests` — 3 (0.3): `inbound_warnings_at_reports_the_saved_inbound`,
+  `editor_warnings_follow_the_unsaved_draft` (появление/исчезновение без Save, кэш, сброс при Cancel),
+  `editor_warnings_are_empty_while_the_draft_does_not_compose`.
+- `modify_tests` подтверждают, что вынос `compose_inbound_shell` не изменил поведение Shell Save.
+- Итог этапа: 1133 passed / 9 pre-existing fixture failures (каталог `tests/fixtures` в `.gitignore`,
+  см. этап 1.5 Roadmap §2.6); `clippy` без новых предупреждений (68, было 70 до 0.2).
+- Не проверено вручную: Save на живом SSH-хосте с `xray run -test` над конфигом с FinalMask — тот же
+  caveat, что в §40–§61.
+
+# 63	FinalMask — этап 0.4: общий direction-aware stream-модуль (Roadmap §2.6)
+
+## 63.1	Цель и границы
+
+`streamSettings` на inbound и outbound имеет одинаковую форму на проводе, но часть полей имеет
+смысл только на одной стороне соединения: `sockopt.acceptProxyProtocol` настраивает слушающий сокет,
+`sockopt.dialerProxy` — исходящий; в этапе 7 то же коснётся client-only полей FinalMask
+(`xicmp.dgram`, `xdns.resolvers`, `fragment` `tlshello`, `udphop`). До 0.4 модели и редакторы
+FinalMask / `quicParams` / `sockopt` жили внутри inbound-кода (`inbound_stream/`, `inbounds.rs`
+на 6675 строк), и переиспользовать их для Outbound `streamSettings` (Tier 4 §4.2 → этап 7) было
+нельзя без копирования.
+
+Этот пункт — **рефакторинг без изменения поведения** inbound-редактора: вынести эти блоки в общий
+модуль с явным направлением. В scope:
+- модель: `src/xray/config/stream/` + `StreamDirection { Inbound, Outbound }`;
+- GUI: `gui/pages/stream_finalmask.rs`, `gui/pages/stream_sockopt.rs`;
+- общие GUI-хелперы (`lines_to_vec` ×4 копии, `resizable_multiline`, `optional_string_combo`) →
+  `gui/pages/mod.rs`.
+
+Вне scope: транспортные `*Settings` (`tcpSettings`/`xhttpSettings`/`wsSettings`/`kcpSettings`/
+`hysteriaSettings`) остаются в `inbound_stream` и переедут вместе с Outbound-редактором
+`streamSettings` (§4.2); виджеты outbound-only полей `sockopt` (Tier 4 §4.2 A3) и client-only
+подсказки FinalMask (этап 7) не добавлялись — для `StreamDirection::Outbound` пока нет вызывающей
+страницы.
+
+## 63.2	Модель (`src/xray/config/stream/`)
+
+```
+xray/config/
+├── stream/                    ← direction-aware, общий для inbound/outbound
+│   ├── mod.rs                 StreamDirection + реэкспорты
+│   ├── finalmask.rs           цепочки tcp[]/udp[] (перенесён без изменений)
+│   ├── finalmask_layers.rs    типизированные settings слоёв (перенесён без изменений)
+│   ├── values.rs              RangeValue / PortListValue / PacketValue (перенесён без изменений)
+│   ├── quic_params.rs         QuicParamsDraft + parse_quic_params + quic_params_to_value (новый)
+│   └── sockopt.rs             SockoptDraft + таблица применимости по направлению
+└── inbound_stream/            транспортные *Settings + apply_inbound_stream / apply_tunnel_sockopt
+    └── mod.rs                 pub use crate::xray::config::stream::{…}  — API inbound не изменился
+```
+
+- **`StreamDirection`** (`Inbound` — `inbounds[].streamSettings`, слушающая сторона; `Outbound` —
+  `outbounds[].streamSettings`, исходящая; `as_str()`). Экспортируется через `crate::xray`.
+- **Модели остаются direction-neutral и lossless.** Направление *не* участвует в parse/write: поле,
+  не применимое к стороне, всё равно читается и пишется обратно без изменений (`rules.md`: unknown /
+  unsupported fields must be preserved). `StreamDirection` решает только, что предлагает редактор.
+- **`sockopt`**: `INBOUND_ONLY_SOCKOPT_FIELDS` (`acceptProxyProtocol`, `trustedXForwardedFor`,
+  `V6Only`), `OUTBOUND_ONLY_SOCKOPT_FIELDS` (`mark`, `domainStrategy`, `dialerProxy`,
+  `tcpcongestion`, `interface`, `tcpMptcp`, `addressPortStrategy`, `happyEyeballs`) и
+  `sockopt_field_applies(key, direction)`. Классификация взята из уже существовавших doc-комментариев
+  полей `SockoptDraft`; ключ не из списков (shared-поля, `customSockopt`, неизвестные будущие ключи)
+  считается общим — ошибка в сторону «показать», а не «спрятать».
+- **`quicParams`**: `QuicParamsDraft` и `parse_quic_params` перенесены из `inbound_stream/mod.rs`;
+  инлайн-запись из `apply_inbound_stream` вынесена в `quic_params_to_value` (та же семантика:
+  непустые типизированные поля — trimmed-строками, затем extras без перезаписи типизированных) —
+  чтобы Outbound и XHTTP-h3 (этап 3.3) писали `quicParams` тем же кодом.
+- Файлы перенесены обычным `mv` (индекс git не трогался); в `sockopt.rs` поправлены intra-doc ссылки
+  на `inbound_stream::TcpStreamSettings`/`WsStreamSettings` и `inbound_security::TlsSettingsDraft`,
+  которые раньше были относительными (`super::…`).
+
+## 63.3	GUI: общие stream-редакторы
+
+Контракт общих редакторов: они **меняют только переданный draft и возвращают «изменено»**; флаги
+сессии (`write_finalmask_tcp`/`_udp`, `write_quic_params`, `write_sockopt`, `dirty`) выставляет
+вызывающая страница. Так редактор не знает про `InboundEditorSession` и подходит будущей
+Outbound-сессии без изменений.
+
+| Модуль | API | Примечание |
+| ------ | --- | ---------- |
+| `gui/pages/stream_finalmask.rs` | `show_finalmask_edit(ui, direction, tcp, udp, notice) -> FinalMaskEdit { tcp, udp }` | Заголовок секции + help, опциональная жёлтая строка `notice` (сейчас — предупреждение G4 от Inbounds; G4 → предупреждения в этапе 5.1), цепочки `tcp[]`/`udp[]`. Внутри — прежние `show_finalmask_layers_edit` / `show_finalmask_settings_edit` / 8 типизированных форм / `FinalMaskForm` / raw-JSON редактор (§62.3–§62.4), без изменений логики. |
+| | `show_quic_params_edit(ui, &mut QuicParamsDraft) -> bool` | Вместо трёх копий «clone → edit → записать поле + флаг + dirty» — прямое редактирование draft. |
+| `gui/pages/stream_sockopt.rs` | `show_sockopt_edit(ui, direction, &mut SockoptDraft) -> bool`, `show_sockopt_readonly(ui, direction, &SockoptDraft)` | Строки inbound-only полей (`acceptProxyProtocol`, `V6Only`, `trustedXForwardedFor`) рендерятся по `sockopt_field_applies`; для `Inbound` набор строк тот же, что до 0.4. |
+| | `sockopt_scope_note(direction) -> String` | Серая поясняющая строка; список полей берётся из констант модели, а не хардкодится в тексте. |
+| | `tproxy_combo_field`, `HELP_SOCKOPT_TPROXY` (`pub(crate)`) | Общие с узким полем `sockopt.tproxy` на Protocol-табе Tunnel (Roadmap §2.3:88). |
+| `gui/pages/mod.rs` | `lines_to_vec`, `resizable_multiline`, `optional_string_combo` | Были в `inbounds.rs`; `lines_to_vec` — ещё и копии в `api_settings.rs`/`dns.rs`/`routing.rs` (удалены). |
+| | `SourcedTextBuffer` + `load_text_buffer` / `store_text_buffer`, `persistent_multiline_list_row` | Механизм §62.4 стал общим: список «один на строку» (бывш. `finalmask_multiline_list_row`) уже использовался TUN-формой (`gateway`/`dns`) — вне FinalMask имя вводило в заблуждение. |
+
+Направление протягивается вниз по цепочке: `show_finalmask_edit(direction)` →
+`show_finalmask_layers_edit` → `show_finalmask_settings_edit` → `show_udphop_settings_edit` →
+вложенный `show_sockopt_edit(direction)` для legacy `udphop.sockopt` (сам ключ удалён ядром — см.
+§62.5 `UdpHopSockoptIgnored`, убирается из формы в этапе 1.1). Сейчас это единственная ветка
+FinalMask, зависящая от направления; client-only подсказки добавит этап 7.
+
+Inbounds (`inbounds.rs`) вызывает редакторы с `StreamDirection::Inbound`: Hysteria-арм Stream-таба —
+`show_quic_params_edit`; секция FinalMask (VLESS/Trojan, не Hysteria) — `show_finalmask_edit` с
+`notice` = строка G4 при Reality + непустом `finalmask.tcp`; Sockopt (VLESS/Trojan/Hysteria) —
+`sockopt_scope_note` + `show_sockopt_edit`; view-режим — `show_sockopt_readonly`. Порядок и тексты
+виджетов не менялись; id egui-состояния (`finalmask_form`/`finalmask_raw`/`list_text`, grid-id)
+сохранены, кроме grid `stream_hy_quic_edit_grid` → `stream_quic_params_edit_grid` (без состояния).
+
+## 63.4	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Direction + реэкспорты | `xray/config/stream/mod.rs` (новый) |
+| quicParams | `xray/config/stream/quic_params.rs` (новый) |
+| sockopt + применимость | `xray/config/stream/sockopt.rs` (перенесён; `INBOUND_ONLY_SOCKOPT_FIELDS`, `OUTBOUND_ONLY_SOCKOPT_FIELDS`, `sockopt_field_applies`) |
+| FinalMask / values | `xray/config/stream/{finalmask,finalmask_layers,values}.rs` (перенесены без изменений) |
+| Inbound-реэкспорт | `xray/config/inbound_stream/mod.rs` (`pub use crate::xray::config::stream::{…}`; `apply_inbound_stream` пишет `quicParams` через `quic_params_to_value`) |
+| Экспорт | `xray/config/mod.rs` (`mod stream`, `StreamDirection`, sockopt-таблица), `xray/mod.rs` (+ `QuicParamsDraft`) |
+| GUI-редакторы | `gui/pages/stream_finalmask.rs`, `gui/pages/stream_sockopt.rs` (новые, `mod` в `gui/pages/mod.rs`) |
+| Общие виджеты | `gui/pages/mod.rs`; `api_settings.rs`/`dns.rs`/`routing.rs` — копии `lines_to_vec` удалены |
+| Inbounds | `gui/pages/inbounds.rs` — 6675 → 5456 строк; вызовы общих редакторов с `StreamDirection::Inbound` |
+
+## 63.5	Тесты
+
+- `xray::config::stream::quic_params::tests` — 2 новых: round-trip типизированных полей + extras;
+  числовой `brutalDown` читается как текст, пустые поля опускаются при записи.
+- `xray::config::stream::sockopt::tests` — 2 новых: списки направлений не пересекаются и содержат
+  только моделируемые ключи (`KNOWN_SOCKOPT_KEYS`) — страховка от опечатки в имени ключа, которая
+  молча сделала бы поле «общим»; применимость по направлению (inbound-only, outbound-only, shared и
+  неизвестный будущий ключ).
+- `gui::pages::tests` — `lines_to_vec_trims_and_skips_blank_lines` (новый) и
+  `list_row_keeps_a_trailing_newline_being_typed` (перенесён из `finalmask_form_tests` вместе с
+  виджетом).
+- `gui::pages::stream_finalmask::finalmask_form_tests` — 4 GUI-теста §62.7 перенесены вместе с
+  редакторами (вызов с `StreamDirection::Inbound`), проходят без изменений логики.
+- Все существующие тесты `inbound_stream` / `modify_tests` / `finalmask_layers` / `values` проходят
+  без изменений — подтверждение, что публичный API inbound и поведение записи не изменились.
+- Итог: 1138 passed / 9 pre-existing fixture failures (было 1133 / 9); `cargo clippy --lib` — 68
+  предупреждений, как до пункта, в новых файлах — 0.
+- Не проверено вручную: живой запуск GUI (визуальная идентичность Stream-таба) и Save на SSH-хосте —
+  тот же caveat, что в §40–§62; поведенческая эквивалентность подтверждена только тестами и тем, что
+  код перенесён блоками без правок логики.
+
+# 64	FinalMask — этап 0.5: не-объектный `finalmask` без владения (Roadmap §2.6)
+
+## 64.1	Цель и границы
+
+До 0.5 `apply_inbound_stream` при записи FinalMask / `quicParams` поверх значения
+`streamSettings.finalmask`, которое не является объектом (строка, массив, число, bool), заворачивал
+его в `{"_preserved": <старое значение>, "tcp": […]}`. Это:
+- **изобретало ключ** `_preserved`, которого нет в схеме Xray-core — прямое нарушение `rules.md`
+  («Never intentionally deviate from the official Xray configuration format», «Do not invent custom
+  configuration semantics»); ядро игнорирует неизвестные ключи, так что обёртка выглядела бы как
+  «сохранено», но фактически значение было потеряно для ядра;
+- срабатывало **молча**: пользователь добавлял слой и не видел, что его исходное значение уехало
+  внутрь служебного ключа;
+- было частично мёртвым кодом: ветка `None => match finalmask {…}` не достигалась, потому что
+  `finalmask` из `streamSettings` к тому моменту не удалялся.
+
+Решение Roadmap: «сохранять как есть без владения» — тот же принцип, что у
+`parse_finalmask_layers` → `None` (§62.3) и у raw clone-through для `sockopt`: то, что Feldjäger не
+может представить, он не переписывает.
+
+Вне scope: предупреждение `inbound_warnings` о не-объектном `finalmask` (что именно ядро делает с
+таким значением, по исходникам `XTLS/Xray-core@main` не сверялось — а в `warnings.rs` попадают только
+проверенные факты, §62.5); чужие *элементы* внутри объекта (`finalmask.tcp` не массив и т.п.) —
+уже покрыты `parse_finalmask_layers` → `None` + отсутствие write-флага.
+
+## 64.2	Модель (`xray/config/inbound_stream/mod.rs`)
+
+| Элемент | Назначение |
+| ------- | ---------- |
+| `InboundStreamDraft::finalmask_foreign: bool` | Выставляется `parse_inbound_stream`: `finalmask` на диске есть, но это не объект и не `null` (`is_foreign_finalmask`). Для Add-сессий и `Default` — `false`. |
+| `InboundStreamDraft::writes_finalmask()` | `write_quic_params \|\| write_finalmask_tcp \|\| write_finalmask_udp` — «применение черновика пишет в `finalmask`». Заменяет повторявшееся условие. |
+| Проверка в `apply_inbound_stream` | Сразу после получения `streamSettings`, **до любой мутации**: если `writes_finalmask()` и значение на диске чужое → `ValidationFailed` «streamSettings.finalmask is a string, not a JSON object; Feldjäger leaves it as is — fix or remove it on the Raw JSON tab before editing FinalMask or quicParams». Отклонённый черновик оставляет inbound ровно таким, каким он был. |
+| `json_kind(&Value)` | Тип JSON для текста ошибки («a string», «an array», …). Само значение в сообщение не попадает — в нём может быть секрет (пароль маски), а сообщение уходит в статус-бар. |
+| Запись | `finalmask` из `streamSettings` больше не клонируется и не вставляется заново: без правок значение просто остаётся на месте (объект, `null` или чужое). При правке берётся существующий объект либо новый (`null`/отсутствие). Обёртка `_preserved` и мёртвая ветка удалены. |
+
+Семантика `null`: `"finalmask": null` считается «отсутствует» (Go декодирует `null` в указатель как
+`nil`), поэтому не чужое — без правок остаётся `null`, при правке заменяется объектом.
+
+Поток:
+```
+parse_inbound_stream
+  finalmask: object  → draft (tcp/udp/quicParams по правилам §62.3), finalmask_foreign = false
+  finalmask: null    → пустой draft, finalmask_foreign = false
+  finalmask: другое  → пустой draft, write-флаги false, finalmask_foreign = true
+apply_inbound_stream
+  writes_finalmask() && чужое  → Err(ValidationFailed), inbound не тронут
+  !writes_finalmask()          → finalmask не трогается вовсе
+  writes_finalmask()           → существующий объект | новый объект ← quicParams/tcp/udp
+```
+
+Путь ошибки общий для всех потребителей `apply_inbound_stream`: Shell Save / Add
+(`compose_inbound_shell`, §62.5), Preview diff и `inbound_editor_warnings` (черновик не собирается →
+предупреждений нет, ошибку покажет Save).
+
+## 64.3	GUI (`gui/pages/stream_finalmask.rs`, `gui/pages/inbounds.rs`)
+
+- `show_foreign_finalmask_notice(ui)` — заголовок «FinalMask» с help и жёлтое пояснение: значение не
+  объект, редактировать здесь нельзя, при сохранении оно остаётся как есть, исправить или удалить —
+  на вкладке Raw JSON (§34.11).
+- `inbounds.rs` показывает его **вместо** редакторов, когда `session.stream.finalmask_foreign`:
+  секция FinalMask (VLESS/Trojan) → `FinalMaskEdit::default()` (ничего не изменено), Hysteria-арм
+  Stream-таба → вместо `show_quic_params_edit`. Так пользователь не может получить черновик, который
+  Save отклонит; проверка в модели остаётся страховкой для остальных путей (тесты, будущий Outbound,
+  импорт).
+- Сессия редактирования строится из inbound при нажатии Edit (`parse_inbound_stream`), поэтому
+  после исправления значения через Raw JSON и повторного открытия Edit `finalmask_foreign` будет
+  `false`, и редакторы вернутся.
+
+## 64.4	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Модель | `xray/config/inbound_stream/mod.rs` — `finalmask_foreign`, `writes_finalmask`, `is_foreign_finalmask`, `json_kind`, ранняя проверка и упрощённая запись в `apply_inbound_stream` |
+| GUI | `gui/pages/stream_finalmask.rs` — `show_foreign_finalmask_notice`; `gui/pages/inbounds.rs` — ветвление в Stream-табе |
+
+## 64.5	Тесты
+
+- `xray::config::inbound_stream::tests` — 5 новых:
+  `parse_flags_only_non_object_non_null_finalmask_as_foreign` (строка / массив / число / bool — чужие
+  и без write-флагов; `null` / объект / отсутствие — нет);
+  `apply_keeps_foreign_finalmask_byte_for_byte_without_wrapping` (несвязанная правка Stream — смена
+  метода на WS — оставляет значение без изменений);
+  `apply_rejects_finalmask_edit_over_foreign_value_and_leaves_inbound_unchanged` (для `quicParams`,
+  `tcp` и `udp`: `ValidationFailed`, inbound побайтно равен исходному, в сообщении тип JSON, но не
+  значение и не `_preserved`);
+  `apply_replaces_null_finalmask_with_an_object_when_edited`; `apply_without_edits_keeps_null_finalmask`.
+- `xray::config::modify_tests::shell_save_keeps_foreign_finalmask_and_rejects_editing_it` — сквозной
+  `update_inbound_shell`: переименование tag сохраняется, `finalmask` остаётся строкой; правка слоя
+  поверх него → `ValidationFailed`, значение на диске не изменено.
+- Итог: 1144 passed / 9 pre-existing fixture failures (было 1138 / 9); `cargo clippy` — 68
+  предупреждений, без новых.
+- Не проверено вручную: GUI-пояснение на живом конфиге и Save на SSH-хосте (caveat §40–§63); ветвление
+  в Stream-табе тестами egui не покрыто — покрыта модельная проверка, которая срабатывает при любом
+  пути в обход GUI.
+
+# 65	FinalMask — этап 0.6: mKCP синхронизирован с ядром (Roadmap §2.6)
+
+## 65.1	Цель и границы
+
+Редактор mKCP (Wave C1, §34.1) был построен по документации: семь полей `kcpSettings`
+(`mtu`/`tti`/`uplinkCapacity`/`downlinkCapacity`/`congestion`/`readBufferSize`/`writeBufferSize`),
+диапазоны из документации (mtu 576–1460, tti 10–100) и запись всех семи полей на каждый Save.
+Аудит 2026-09-28 показал, что документация отстала от ядра. Этот пункт синхронизирует модель,
+валидацию и форму с **исходниками** `XTLS/Xray-core@main` — источником истины при расхождениях.
+
+Проверенные факты (сверено 2026-09-29):
+
+| Источник | Факт |
+| -------- | ---- |
+| `infra/conf/transport_method.go`, `KCPConfig` | Поля: `mtu`, `tti`, `uplinkCapacity`, `downlinkCapacity`, `cwndMultiplier`, `maxSendingWindow` (все `*uint32`); `header` (`json.RawMessage`) и `seed` (`*string`) **объявлены, но нигде не используются** — ни в `Build()`, ни в файле. `congestion`/`readBufferSize`/`writeBufferSize` в структуре нет → JSON-декодер ядра их молча пропускает. |
+| `KCPConfig.Build()` | Сначала дефолты, затем проверки: `Mtu < 21` → «MTU must be at least 21»; `Tti < 10 \|\| Tti > 1000` → «TTI must be between 10 and 1000»; `CwndMultiplier < 1` → ошибка; `GetSendingBufferSize() == 0` (т.е. `MaxSendingWindow / Mtu == 0`) → «MaxSendingWindow must be at least <mtu>». |
+| `transport/internet/kcp/config.go`, `init` | Дефолты: `Mtu 1350`, `Tti 50`, `UplinkCapacity 5`, `DownlinkCapacity 20`, `CwndMultiplier 1`, `MaxSendingWindow 2*1024*1024`. `GetSendingInFlightSize` делит на `1000 / Tti` — отсюда верхняя граница `tti`. |
+
+Следствия для Feldjäger:
+- прежняя валидация была **строже ядра** (mtu 576–1460, tti ≤ 100) и отклоняла конфиги, которые ядро
+  принимает, — нарушение «Prefer compatibility over convenience» / «never deviate from the official
+  format» (`rules.md`); рекомендация документации сохранена только в help-тексте;
+- Save дописывал `congestion`/`readBufferSize`/`writeBufferSize` в каждый mKCP-inbound — ключи, которые
+  ядро не читает; после 0.6 они стали бы предупреждениями, созданными самим Feldjäger;
+- `header`/`seed` не применяются ядром, хотя парсятся без ошибки — пользователь мог считать, что
+  трафик обфусцирован.
+
+В scope: модель, валидация, предупреждения, форма; явное удаление игнорируемых ключей. Вне scope:
+миграция `header`/`seed` в FinalMask `mkcp-legacy` (этап 5.2) и форма `mkcp-legacy` (этап 2.1);
+правило «без потерь» для нечисловых `mtu`/`tti`/`uplinkCapacity`/`downlinkCapacity` (прежнее поведение —
+подстановка дефолта — сохранено; такое значение ядро всё равно отклонит при декодировании в `uint32`).
+
+## 65.2	Модель (`xray/config/inbound_stream/mod.rs`)
+
+| Элемент | Было | Стало |
+| ------- | ---- | ----- |
+| `KcpStreamSettings` | + `congestion: bool`, `read_buffer_size`, `write_buffer_size` | эти поля удалены (ключи — в `extras`); + `cwnd_multiplier: Option<u64>`, `max_sending_window: Option<u64>` (`None` = ключ отсутствует → дефолт ядра) |
+| Запись | все 7 полей всегда | `mtu`/`tti`/`uplinkCapacity`/`downlinkCapacity` всегда (как раньше), `cwndMultiplier`/`maxSendingWindow` — только если заданы, затем `extras` (в т.ч. игнорируемые ядром ключи — ровно как были на диске) |
+| Разбор новых полей | — | типизируются только при целом без знака; иная форма (`"big"`) остаётся в `extras` и пишется обратно, а не теряется |
+| Константы | `KCP_MTU_MIN 576`, `KCP_MTU_MAX 1460`, `KCP_TTI_MAX 100`, `KCP_DEFAULT_READ_BUFFER`/`_WRITE_BUFFER` | `KCP_MTU_MIN 21`, `KCP_TTI_MAX 1000`, `KCP_CWND_MULTIPLIER_MIN 1`, `KCP_DEFAULT_CWND_MULTIPLIER 1`, `KCP_DEFAULT_MAX_SENDING_WINDOW 2 MiB`; `KCP_MTU_MAX` и дефолты буферов удалены |
+| Списки ключей | — | `KCP_IGNORED_FIELDS` (`congestion`, `readBufferSize`, `writeBufferSize`), `KCP_LEGACY_OBFUSCATION_FIELDS` (`header`, `seed`) — единственный источник для модели, предупреждений и GUI |
+| Явное удаление | — | `KcpStreamSettings::has_ignored_fields()` / `remove_ignored_fields()` — убирает только `KCP_IGNORED_FIELDS`; `header`/`seed` сохраняются для миграции 5.2 |
+
+`validate_kcp_settings` зеркалит `Build()` в том же порядке: сначала все значения помещаются в
+`uint32` (в ядре это типы полей), затем `mtu ≥ 21`, `tti` 10–1000, `cwndMultiplier ≥ 1`, и
+`maxSendingWindow / mtu ≠ 0` — **с дефолтами ядра для отсутствующих ключей**, как делает ядро: при
+`mtu` больше 2 MiB и отсутствующем окне Save отклоняется с сообщением «maxSendingWindow (2097152,
+the default) must be at least mtu». Проверка вызывается там же, где раньше (`apply_inbound_stream`,
+ветка `StreamMethod::Mkcp`), поэтому действует для Shell Save, Add, Preview и предупреждений черновика.
+
+## 65.3	Предупреждения (`xray/config/compatibility/warnings.rs`)
+
+Механизм §62.5, два новых id — оба «ключ молча игнорируется ядром», проверено по исходникам (§65.1):
+
+| Id | Ключи | Сообщение (суть) |
+| -- | ----- | ---------------- |
+| `KcpFieldIgnored` | `kcpSettings.congestion` / `readBufferSize` / `writeBufferSize` | не параметр mKCP; `KCPConfig` содержит только mtu, tti, uplink/downlinkCapacity, cwndMultiplier, maxSendingWindow |
+| `KcpLegacyObfuscationIgnored` | `kcpSettings.header` / `seed` | обфускация header/seed не применяется; эквивалент — слой `mkcp-legacy` в `finalmask.udp` |
+
+`KcpLegacyObfuscationIgnored` — сверх буквального текста пункта 0.6 (там только три ключа), но это
+тот же проверенный факт, а его последствие серьёзнее: пользователь уверен, что трафик обфусцирован.
+Путь — `streamSettings.kcpSettings.<key>`, по одному предупреждению на ключ. `inbound_warnings`
+разделён на `finalmask_warnings` и блок `kcpSettings`; порядок — `finalmask`, затем `kcpSettings`
+(внутри — порядок ключей объекта). Предупреждения выдаются независимо от `network`: ядро строит
+`kcpSettings`, если объект присутствует. Как и все предупреждения, Save они не блокируют.
+
+## 65.4	GUI (`gui/pages/inbounds.rs`)
+
+- Форма mKCP: убраны `congestion` (ComboBox), `readBufferSize`, `writeBufferSize`; добавлены
+  `cwndMultiplier` и `maxSendingWindow (bytes)` — пустое поле = ключ отсутствует (hint «default 1» /
+  «default 2097152»), help-тексты по коду ядра (`maxSendingWindow / mtu` — размер буфера в пакетах).
+- Серая подсказка над формой перечисляет лимиты ядра (`mtu ≥ 21`, `tti 10–1000 ms`,
+  `cwndMultiplier ≥ 1`, `maxSendingWindow ≥ mtu`), help `mtu` — «документация рекомендует 576–1460,
+  ядро принимает от 21», help `tti` — 10–1000.
+- «Явное удаление» из формулировки пункта — кнопка **«Remove ignored fields (congestion,
+  readBufferSize, writeBufferSize)»** под формой, видна только когда такие ключи есть в черновике;
+  нажатие меняет черновик (`dirty`), запись — обычным Save с backup и `xray run -test`. Какие именно
+  ключи и где, показывают жёлтые предупреждения вверху Stream-таба (§62.5).
+- View-режим: вместо congestion/буферов — `cwndMultiplier` / `maxSendingWindow` («default (…)» при
+  отсутствии).
+
+## 65.5	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Модель, валидация, константы | `xray/config/inbound_stream/mod.rs` |
+| Экспорт констант | `xray/config/mod.rs`, `xray/mod.rs` |
+| Предупреждения | `xray/config/compatibility/warnings.rs` (`KcpFieldIgnored`, `KcpLegacyObfuscationIgnored`, `finalmask_warnings`) |
+| GUI | `gui/pages/inbounds.rs` (форма и view-режим mKCP, help-тексты) |
+
+## 65.6	Тесты
+
+- `xray::config::inbound_stream::tests`:
+  - новые: `validate_kcp_mirrors_core_build_bounds` — значения «вне диапазона документации», которые
+    принимает ядро (mtu 21/500/2000, tti 999/1000), **проходят**; `cwndMultiplier 0` — отказ;
+    окно меньше mtu — отказ, равное — проходит; отсутствующее окно при mtu > 2 MiB — отказ с
+    упоминанием дефолта; поле > `u32::MAX` — отказ;
+    `mkcp_new_core_fields_round_trip_and_bad_shapes_stay_in_extras`;
+    `mkcp_remove_ignored_fields_keeps_legacy_obfuscation_for_migration` (удаляются только три ключа,
+    `seed` и неизвестный ключ остаются, повторный вызов ничего не удаляет);
+  - переписаны: `mkcp_alias_parses_and_writes_full_defaults` (игнорируемые ключи идут через extras и
+    сохраняются как были), `apply_mkcp_writes_documented_defaults_and_drops_old_settings` (для нового
+    mKCP не пишутся ни игнорируемые ключи, ни опциональные поля ядра),
+    `validate_kcp_rejects_out_of_range_mtu_tti` и `apply_mkcp_rejects_invalid_ranges` (раньше
+    проверяли отказ на mtu 500 / 2000, которые ядро принимает).
+- `xray::config::compatibility::warnings::tests::flags_mkcp_keys_the_core_ignores_and_nothing_else` —
+  все пять ключей с id и путями, поля ядра и неизвестный ключ без предупреждений, чистый блок — пусто.
+- Итог: 1148 passed / 9 pre-existing fixture failures (было 1144 / 9); `cargo clippy` — 66
+  предупреждений (было 68: ушли два `collapsible_if` вместе с удалёнными полями формы), новых нет.
+- Не проверено вручную: GUI-форма на живом конфиге и Save на SSH-хосте с `xray run -test`
+  (caveat §40–§64). Замечено, но не менялось: help `uplinkCapacity`/`downlinkCapacity` говорит
+  «0 means unlimited», а в `GetSendingInFlightSize`/`GetReceivingInFlightSize` ядра 0 даёт минимальный
+  размер окна (8 пакетов) — кандидат на регулярный аудит дрейфа (Roadmap §2.6 «После FinalMask»).
+
+# 66	Freedom по документации (Roadmap §2.4:105–107)
+
+## 66.1	Цель и границы
+
+Принцип (решение пользователя, аудит 2026-10-01): Freedom Shell предлагает ровно поля официальной
+документации (<https://xtls.github.io/en/config/outbounds/freedom.html>) — чего в ней нет, из
+редактора убирается, чего нет в Feldjäger, добавляется. Три пункта:
+
+1. `settings.domainStrategy` → `streamSettings.sockopt.domainStrategy` (§2.4:105);
+2. `settings.proxyProtocol` (§2.4:106);
+3. `settings.finalRules[]` (§2.4:107).
+
+Проверенные факты (`XTLS/Xray-core@main`, 2026-10-01):
+
+| Источник | Факт |
+| -------- | ---- |
+| `infra/conf/freedom.go`, `FreedomConfig` | Есть `targetStrategy` и `domainStrategy` (оба `string`), `proxyProtocol uint32`, `finalRules []*FreedomFinalRuleConfig`. `Build()`: `targetStrategy`, если не пуст, иначе `domainStrategy` → `config.DomainStrategy` (неизвестное значение — фатальная ошибка); `proxyProtocol` берётся только при `1..=2`. |
+| `FreedomFinalRuleConfig.Build()` | `action` — `allow`/`block` без учёта регистра, иначе «unknown action»; `network` — `NetworkList`, `port` — `PortList`, `ip` — `StringList` → `geodata.ParseIPRules`, `blockDelay` — `Int32Range` → `Range{Min,Max}` (`uint64`). |
+| `proxy/freedom/freedom.go` | Хендлер берёт стратегию **только** из `streamSettings.SocketSettings.DomainStrategy` (#6058); `config.DomainStrategy` не читается нигде. `blockDelay` по умолчанию 30–90 с. |
+
+Следствие: `settings.domainStrategy` ядро валидирует, но не применяет — пользователь видит в редакторе
+поле, которое ничего не делает. Отсюда предупреждение «ignored by Xray-core» (тот же класс фактов, что
+§62.5/§65.3) и явная миграция. `targetStrategy` (не документирован, тот же механизм) обрабатывается
+вместе с `domainStrategy`.
+
+Вне scope: прочие поля `sockopt` для outbound (Roadmap §4.2), `noises[].applyTo` / `fragment.maxSplit`
+(сохраняются через `extras`), Duplicate и Raw JSON (не менялись).
+
+## 66.2	Модель (`xray/config/outbound_protocol/freedom.rs`)
+
+Freedom вынесен из `outbound_protocol/mod.rs` в подмодуль (по образцу `vless.rs`); вариант стал
+кортежным: `OutboundSettingsDraft::Freedom(FreedomSettingsDraft)`. Добавлен
+`OutboundSettingsDraft::protocol_name()` — заменил приватный `outbound_settings_protocol_name` в
+`modify.rs` и используется сервисом для предупреждений черновика Add.
+
+| Поле `FreedomSettingsDraft` | JSON | Правило записи |
+| --------------------------- | ---- | -------------- |
+| `sockopt_domain_strategy` | `streamSettings.sockopt.domainStrategy` | пусто = ключ отсутствует; читается через `parse_sockopt` |
+| `legacy_domain_strategy` (read-only) | `settings.targetStrategy` / `settings.domainStrategy` | никогда не пишется; ключи на диске сохраняются как unknown |
+| `remove_legacy_domain_strategy` | — | `true` только после миграции: Save удаляет оба legacy-ключа |
+| `redirect`, `user_level`, `fragment`, `noises` | `settings.*` | как раньше (§35) |
+| `proxy_protocol` | `settings.proxyProtocol` | `0` = ключ отсутствует |
+| `final_rules` / `final_rules_foreign` | `settings.finalRules[]` | пусто = ключ отсутствует; `foreign` → ключ не трогается |
+
+**Запись `sockopt.domainStrategy` — точечная**, а не полный round-trip через `SockoptDraft`
+(`sockopt_to_value(parse_sockopt(x))` нормализует: `V6Only: false`, `acceptProxyProtocol: false`,
+нечисловой `mark` пропадают). `apply_sockopt_domain_strategy` вставляет/удаляет только один ключ;
+контейнеры `streamSettings`/`sockopt` создаются при записи значения и удаляются, только если именно это
+удаление их опустошило (пустой `sockopt: {}`, бывший на диске, остаётся). Не-объектный
+`streamSettings`/`sockopt` при попытке записать значение — `ValidationFailed` со ссылкой на Raw JSON.
+
+**«Без потерь или raw» для нетипизируемых форм.** Значение, которое виджет не может показать
+(`proxyProtocol: "2"`, `userLevel: "1"`, `sockopt.domainStrategy: 5`), не удаляется нетронутым
+дефолтом черновика (`apply_untouched_zero_u64`; та же проверка для `sockopt`). Для `finalRules`
+действует правило §62.1: если массив или любое правило содержит известный ключ непредставимой формы
+(`action` не строка, `ip: [1]`, `blockDelay: 1.5`, элемент не объект, сам `finalRules` не массив) —
+`final_rules_foreign = true`, GUI показывает пояснение вместо редактора, Save оставляет ключ как был.
+
+**`FreedomFinalRuleDraft`**: `action`, `network` (текст `"tcp,udp"`), `port: PortListValue`,
+`ip: Vec<String>`, `block_delay: RangeValue` (типы §62.1 — число остаётся числом, строка строкой),
+`extras`. Форма списков запоминается приватным `ListForm`: `NetworkList`/`StringList` в ядре принимают
+и массив, и строку через запятую, нетронутое значение пишется в исходной форме; новые значения — по
+документации (`network` — строка, `ip` — массив).
+
+**Валидация при Save** (`validate_final_rule`, зеркалит `Build()`): `action` обязателен и ∈ `allow`/`block`
+(регистр не важен); `port` — `PortListValue::validate`; каждая строка `ip` — IP, CIDR с корректной длиной
+префикса либо матчер `geoip:`/`ext:`/`ext-ip:` (с необязательным `!`); `blockDelay` —
+`RangeValue::bounds` и не отрицателен (ядро кастует в `uint64`). Ошибка указывает индекс:
+«Freedom finalRules[1]: …». `proxyProtocol` вне 0–2 не валидируется — ядро его молча игнорирует, а
+блокировать Save нетронутого конфига нельзя; GUI подписывает такое значение «not supported».
+
+**Миграция** — `FreedomSettingsDraft::migrate_legacy_domain_strategy() -> LegacyDomainStrategyMigration`:
+`Moved { value }` (sockopt был пуст — значение переносится), `SockoptWins { legacy, sockopt }` (sockopt
+главнее — legacy просто удаляется), `NothingToMigrate` (нет legacy или уже мигрировано). Меняет только
+черновик; запись — обычным Save (backup → `xray run -test` → атомарная запись).
+
+## 66.3	Предупреждения (`compatibility/warnings.rs`)
+
+Добавлен outbound-аналог `inbound_warnings` — `outbound_warnings(&Value)`; путь — внутри outbound
+(`settings.domainStrategy`). Новый id `FreedomSettingsDomainStrategyIgnored` — по одному на каждый
+присутствующий legacy-ключ, только для `protocol: freedom`, независимо от формы значения.
+
+## 66.4	`ApplicationService`
+
+- `outbound_editor_warnings()` — по черновику: on-disk outbound (или `{protocol, settings}` для Add) +
+  `apply_outbound_general` + `apply_outbound_settings`, затем `outbound_warnings`; без кэша (outbound
+  мал, в отличие от inbound §62.5). Пусто без сессии и при несобираемом черновике.
+- `outbound_warnings_at(index)` — по сохранённому outbound.
+- `migrate_outbound_legacy_domain_strategy()` — миграция черновика + `preview_outbound_shell_diff()`,
+  возвращает строку статуса (разная для `Moved` / `SockoptWins`).
+- После Add / Shell Save статус получает суффикс `with_warning_suffix(outbound_warnings_at(…))`.
+
+## 66.5	GUI (`gui/pages/outbounds.rs`)
+
+Protocol-секция Freedom (`show_freedom_settings_edit`):
+- вверху — жёлтые предупреждения (`show_outbound_compatibility_warnings`) и кнопка **«Migrate to
+  sockopt»** (видна, пока есть legacy-значение и миграция не выполнена); после нажатия статус и diff
+  preview показывают, что изменится;
+- `sockopt.domainStrategy` — ComboBox `DOMAIN_STRATEGIES` + «(unset — AsIs)» + свободный текст
+  (вместо прежнего `domainStrategy`);
+- `proxyProtocol` — ComboBox «0 — disabled» / «v1» / «v2»;
+- `finalRules` — упорядоченный список по образцу DNS `rules[]` (Up/Down/Remove/«Add final rule»):
+  `action` и `network` — ComboBox, `port`, `blockDelay` (hint с дефолтом 30-90), `ip` — по строке на
+  CIDR; при `final_rules_foreign` — пояснение «edit it with Raw JSON».
+
+## 66.6	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Модель, валидация, миграция | `xray/config/outbound_protocol/freedom.rs` (новый) |
+| Диспетчер, `protocol_name` | `xray/config/outbound_protocol/mod.rs`, `xray/config/modify.rs` |
+| Предупреждения | `xray/config/compatibility/warnings.rs` |
+| Экспорт | `xray/config/compatibility/mod.rs`, `xray/config/mod.rs`, `xray/mod.rs`, `app/mod.rs` |
+| Сервис | `app/service.rs` |
+| GUI | `gui/pages/outbounds.rs` |
+
+## 66.7	Тесты
+
+- `outbound_protocol::freedom::tests` (12): round-trip `sockopt.domainStrategy` с чужими ключами
+  `sockopt`/`streamSettings`; удаление только опустошённых контейнеров, сохранение пустого `sockopt` и
+  нестрокового значения; отказ при не-объектном `streamSettings`; legacy читается, не пишется и не
+  теряется; приоритет `targetStrategy`; миграция и конфликт; `proxyProtocol` (запись, `0`, строковая
+  форма сохраняется); `finalRules` — round-trip форм и `extras`, новые правила, непредставимые формы
+  не трогаются, валидация как в ядре, синтаксис `ip`.
+- `outbound_protocol::tests::freedom_parse_apply_roundtrip_preserves_unknown` — дополнен `sockopt`,
+  `proxyProtocol`, `finalRules`; `apply_rejects_noise_with_empty_type` — на новую структуру.
+- `compatibility::warnings::tests::flags_legacy_freedom_strategy_only_on_freedom`.
+- `modify_tests`: переписаны `add_freedom_outbound_shell_writes_settings` и
+  `update_freedom_outbound_shell_edits_settings_and_preserves_unrelated_fields` (запись в
+  `streamSettings.sockopt`, чужие ключи `sockopt` сохраняются), фикстура
+  `duplicate_outbound_appends_unique_tag_copy`; новый
+  `freedom_legacy_domain_strategy_is_preserved_then_migrated` (без миграции — outbound байт-в-байт +
+  предупреждение; миграция; конфликт).
+- `service::tests::freedom_legacy_domain_strategy_warning_and_migration` — предупреждения по
+  сохранённому outbound и черновику, миграция меняет только черновик и diff preview.
+- Итог: 1163 passed / 9 pre-existing fixture failures (было 1148 / 9); `cargo clippy` — 66
+  предупреждений (без изменений, в новом коде 0).
+- Не проверено вручную: GUI на живом конфиге и Save на SSH-хосте с `xray run -test`.
+
+
+# 67	FinalMask — этап 0.7: версионная осведомлённость предупреждений (Roadmap §2.6)
+
+## 67.1	Задача
+
+Пункт 0.7 — не про TLS `minVersion`/`maxVersion` (это версии протокола TLS в `tlsSettings`), а про
+**версию самого Xray-core**, которую Discovery читает из `xray version` (`XrayInstallation.version`).
+Схема FinalMask меняется от релиза к релизу, поэтому один и тот же JSON на разных ядрах означает
+разное: до v26.9.9 port hopping — это `quicParams.udpHop`, а UDP-маски `udphop` нет вовсе; на
+v26.9.9–v26.9.29 у `udphop` ещё читается `sockopt`. Предупреждения §62.5 были написаны для
+текущего ядра и на старом ядре вводили в заблуждение. Решение: таблица «фича → первый релиз» и
+сравнение с установленной версией. Результат — только предупреждение, Save не блокируется
+(пользователь может как раз собираться обновить ядро).
+
+## 67.2	Таблица версий (`compatibility/core_version.rs`)
+
+| `CoreFeature` | Что в конфиге | Первый релиз | PR |
+| ------------- | ------------- | ------------ | -- |
+| `XmcTcpMask` | слой `finalmask.tcp[]` типа `xmc` | v26.7.11 | XTLS/Xray-core#6210 |
+| `XmcProfilesSchema` | `xmc` `profiles[]` вместо `usernames` (§76) | v26.7.28 | XTLS/Xray-core#6487 |
+| `UdpHopUdpMask` | слой `finalmask.udp[]` типа `udphop`; с этого релиза `quicParams.udpHop` игнорируется | v26.9.9 | XTLS/Xray-core#6327 |
+| `UdpHopSockoptRemoved` | `udphop` без `sockopt`; с этого релиза `settings.sockopt` слоя игнорируется | v26.9.30 | XTLS/Xray-core#6754 |
+
+Релиз — первый тег `XTLS/Xray-core`, содержащий merge-коммит PR (проверено 2026-10-01 через
+`gh api repos/XTLS/Xray-core/compare/<tag>...<commit>`: `behind`/`identical` = тег содержит
+коммит), а не дата мержа. Все три релиза — pre-release.
+
+`XrayCoreVersion { major, minor, patch }` — `Ord` (сравнение числовое: v26.9.9 < v26.9.30),
+`Display` = `v26.9.30`, `parse` — нестрогий разбор строки Discovery (`"26.9.30"`, `"v26.9.30"`,
+`"Xray 25.7.1 (…)"`; недостающие части = 0). `CoreFeature::available_in(Option<XrayCoreVersion>)`
+— `None` (версия неизвестна) считается текущим ядром.
+
+## 67.3	Семантика предупреждений
+
+`inbound_warnings(&Value, Option<XrayCoreVersion>)` — новый параметр `core`:
+
+| Конфиг | Ядро < v26.7.11 | < v26.9.9 | v26.9.9–v26.9.29 | ≥ v26.9.30 / неизвестно |
+| ------ | --------------- | --------- | ---------------- | ----------------------- |
+| `tcp[i].type = xmc` | `RequiresNewerCore` | — | — | — |
+| `udp[i].type = udphop` | `RequiresNewerCore` | `RequiresNewerCore` | — | — |
+| `udphop.settings.sockopt` | (поглощено строкой выше) | (поглощено) | — | `UdpHopSockoptIgnored` |
+| `quicParams.udpHop` | — | — | `QuicParamsUdpHopIgnored` | `QuicParamsUdpHopIgnored` |
+
+> С 0.5.31 (§79) строка `quicParams.udpHop` действует только для outbound; inbound получает
+> `QuicParamsUdpHopClientOnly` на любом ядре.
+
+- `CompatibilityWarningId::RequiresNewerCore { feature, installed }` — location указывает на
+  `…[i].type`; текст: «`` `udphop` UDP mask `` requires Xray-core v26.9.9 or newer
+  (XTLS/Xray-core#6327); installed v26.9.8».
+- Без известной версии `RequiresNewerCore` не выдаётся, а «ignored»-предупреждения ведут себя как
+  до 0.7 — поведение для пользователей без Discovery не изменилось.
+- `CompatibilityWarningId::message()` теперь возвращает `Cow<'static, str>` (у нового варианта
+  текст динамический).
+- `outbound_warnings` не изменён: версионно-зависимых outbound-фактов пока нет.
+
+## 67.4	Сервис
+
+- `ApplicationService::xray_core_version()` — `XrayCoreVersion::parse` от `installation.version`
+  при `DiscoveryState::Succeeded`, иначе `None`.
+- `inbound_warnings_at` и `inbound_editor_warnings` передают её в `inbound_warnings`;
+  `InboundWarningsCache` хранит `core` и сбрасывается при его смене (повторный Discovery после
+  обновления ядра).
+- GUI не менялся: новые предупреждения идут через существующие `show_compatibility_warnings`
+  (Stream-таб) и `with_warning_suffix` (статус-бар после Save).
+
+## 67.5	Попутно
+
+Исправлен текст `FreedomSettingsDomainStrategyIgnored`: продолжение строки `\` + перевод строки
+было потеряно, и в сообщении стояли ~18 пробелов подряд.
+
+## 67.6	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Таблица и версия | `xray/config/compatibility/core_version.rs` (новый) |
+| Предупреждения | `xray/config/compatibility/warnings.rs` |
+| Экспорт | `xray/config/compatibility/mod.rs`, `xray/config/mod.rs`, `xray/mod.rs` |
+| Сервис | `app/service.rs` |
+
+## 67.7	Тесты
+
+- `compatibility::core_version::tests` (3): разбор строк Discovery, числовой порядок, таблица
+  отсортирована, границы включительные.
+- `compatibility::warnings::tests` (+4): текущее/неизвестное ядро — прежний набор; v26.9.9 —
+  `sockopt` не помечается; v26.9.8 — `udphop` требует v26.9.9, `quicParams.udpHop` валиден;
+  v26.6.27 — `xmc` требует v26.7.11 (точный текст).
+- `service::tests::inbound_warnings_follow_the_discovered_core_version` — версия берётся из
+  Discovery.
+- Итог: 1171 passed / 9 pre-existing fixture failures (нет каталога `tests/fixtures/`);
+  в новом коде clippy-предупреждений нет.
+- Не проверено вручную: GUI на живом сервере со старым ядром.
+
+# 68	FinalMask — этап 1.1: `udphop` по схеме ядра (Roadmap §2.6)
+
+## 68.1	Главный факт: `udphop` — только клиентская маска
+
+Сверка с `XTLS/Xray-core@main` (`b26a91de`, 2026-09-30) и тегом v26.9.9: в
+`transport/internet/finalmask/udphop/config.go` серверная обёртка с первого релиза маски —
+`WrapPacketConnServer → errors.New("udphop: client only")`. `FinalMask.ListenPacket` прерывается на
+этой ошибке, поэтому inbound с UDP-транспортом (mKCP, Hysteria, XHTTP-h3) и слоем `udphop` **не
+стартует** — и вместе с ним весь Xray. На TCP-транспортах цепочка `udp` не используется вовсе, слой
+просто мёртвый. `xray run -test` этого **не ловит**: режим `-test` строит конфиг (`Build()`), но не
+запускает сервер (`main/run.go`), а ошибка возникает при прослушивании. Пункт 0.3/0.7 считал
+`udphop` в inbound нормой и предупреждал только про `sockopt` — это неверно для inbound.
+
+Решение (по правилу «Always validate Xray config before restart»): запись `udphop` в inbound
+отклоняется валидацией, уже записанное на диске — предупреждение. Модель и форма слоя
+направление-нейтральны и пригодятся outbound-у (этап 7).
+
+## 68.2	Модель (`stream/finalmask.rs`, `stream/finalmask_layers.rs`)
+
+- `CLIENT_ONLY_UDP_FINALMASK_TYPES = ["udphop"]`; `FinalMaskChain { Tcp, Udp }` (`key()`,
+  `types()`); `finalmask_layer_type_applies(type, chain, direction)` — сравнение без учёта
+  регистра, как `LoadWithID` ядра (`strings.ToLower`); неизвестные типы «применимы» (решает ядро).
+- `validate_finalmask_layers(layers, chain, direction)` — новая сигнатура: непустой `type` (теперь с
+  местом `finalmask.udp[i]` в тексте), применимость по направлению, типизированная валидация
+  `udphop` (основа для этапа 1.4). Слой, который типизированная форма не представляет, оставлен
+  ядру. Вызов в `apply_inbound_stream` — `StreamDirection::Inbound`; проверка идёт до мутации.
+- `UdpHopSettings` — по `UDPHop` ядра: `mode`/`interval`/`remotePorts`/`remoteIPs`. Типизированный
+  `sockopt: Option<SockoptDraft>` удалён: ключ попадает в `extras` и пишется байт-в-байт;
+  `has_legacy_sockopt()`/`remove_legacy_sockopt()` — явное удаление. Старые ядра (v26.9.9–29) его
+  ещё читают, поэтому автоудаления нет.
+- `UdpHopModes { interval_local, interval_remote, per_conn_remote }` + `parse_udphop_mode` — ровно
+  как `UDPHop.Build()`: `strings.Split(mode, ",")` **без trim** (`"a, b"` в ядре — ошибка), токены
+  без учёта регистра, пустой `mode` = ошибка (обязателен ≥ 1). `to_mode_text()` — каноничная
+  запись `intervalLocal,intervalRemote,perConnRemote`.
+- `validate_udphop_settings`: `mode`; `interval` — отсутствует/`0`/`"0"` = дефолт 30 с, иначе
+  нижняя граница (после упорядочивания, как `ensureOrder`) ≥ 5 (`UDPHOP_MIN_INTERVAL_SECS`);
+  `remotePorts` — `PortListValue::validate`; `remoteIPs` — `netip.ParsePrefix` или
+  `netip.ParseAddr` (зона `%eth0` только у IPv6-адреса без префикса, биты без ведущих нулей).
+
+Семантика режимов (`udphop/conn.go`): `perConnRemote` — случайная цель из `remoteIPs`/`remotePorts`
+при открытии соединения; `intervalRemote` — смена цели по таймеру; `intervalLocal` — новый локальный
+сокет по таймеру. Таймер — случайное значение из `interval` на каждый шаг. С пустыми
+`remoteIPs`/`remotePorts` «remote»-режимы адрес не меняют.
+
+## 68.3	Предупреждения (`compatibility/warnings.rs`)
+
+- Новое `CompatibilityWarningId::UdpHopClientOnly` на `streamSettings.finalmask.udp[i].type`.
+- `finalmask_warnings` получил `StreamDirection`: для inbound слой `udphop` даёт
+  `UdpHopClientOnly` (его `sockopt` не помечается — слой всё равно удалять), для outbound —
+  прежнее версионное `UdpHopSockoptIgnored`. Outbound-ветка пока вызывается только тестами
+  (подключение — этап 7). Таблица §67.3: строка `udphop.settings.sockopt` теперь относится к
+  outbound, для inbound на ядре ≥ v26.9.9 — `UdpHopClientOnly`; `RequiresNewerCore` для ядра
+  < v26.9.9 не изменился.
+- Следствие для редактора: `parse_inbound_stream` выставляет `write_finalmask_udp` для любой
+  цепочки на диске, поэтому при `udphop` на диске черновик не собирается (Save отклоняется) и
+  `inbound_editor_warnings` пуст — вместо него в редакторе слоя показывается пояснение.
+
+## 68.4	GUI (`gui/pages/stream_finalmask.rs`)
+
+- Пресеты типов фильтруются по `finalmask_layer_type_applies`: inbound больше не предлагает
+  `udphop`. Существующий неприменимый слой помечается оранжевым пояснением («client-only … Saving
+  this chain is refused until the layer is removed»).
+- Форма `udphop`: `mode` — три чекбокса (`lenient_udphop_modes` читает и неканоничный текст, клик
+  переписывает его каноничным); `interval`/`remotePorts` с подсказками; `remoteIPs` списком;
+  help-тексты на каждое поле; подсказка про «remote»-режимы без целей; текст ошибки
+  `validate_udphop_settings` («Save will be refused: …»); для `sockopt` — пояснение и кнопка
+  «Remove sockopt». Вложенный `show_sockopt_edit` из формы убран, параметр `direction` у
+  `show_finalmask_settings_edit` больше не нужен.
+
+## 68.5	Сверка ядра для следующих пунктов
+
+Попутно обнаружено: после аудита 2026-09-28 в v26.9.30 вошли XTLS/Xray-core#6718 (XDNS
+refactor: `domains[]` — объекты `{name, lenLimit, labelLimit, types, edns0}`, `resolvers[]` —
+`{type: tcp|udp, settings: {addr}}`, новый `extraPoll` 0–3; ключа `domain` в схеме нет вовсе —
+фатальной removed-feature ошибки тоже нет, он просто игнорируется) и #6862 (`noise.type` = `exp`).
+Пункт 1.3 Roadmap в прежней формулировке устарел.
+
+## 68.6	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Модель слоя | `xray/config/stream/finalmask_layers.rs` |
+| Цепочка, применимость, валидация | `xray/config/stream/finalmask.rs` |
+| Применение к inbound | `xray/config/inbound_stream/mod.rs` |
+| Предупреждения | `xray/config/compatibility/warnings.rs` |
+| Экспорт | `xray/config/stream/mod.rs`, `xray/config/mod.rs`, `xray/mod.rs` |
+| GUI | `gui/pages/stream_finalmask.rs` |
+| Тесты сервиса | `app/service.rs` |
+
+## 68.7	Тесты
+
+- `stream::finalmask_layers` (+3, 1 переписан): `sockopt` сохраняется байт-в-байт и удаляется
+  явно; разбор `mode` как в ядре (пробел, пустой, хвостовая запятая, регистр); валидация —
+  `interval` 0/`"0"`/`"10-5"`/4/`"3-10"`/`"-5"`, порты, IP/CIDR/зоны/ведущие нули.
+- `stream::finalmask` (+2, 2 переписаны): client-only по направлению; типизированная валидация
+  `udphop` на клиентской стороне; место `finalmask.udp[i]` в тексте ошибки.
+- `inbound_stream` (+1): Save с `udphop` отклонён без мутации, без слоя — проходит.
+- `compatibility::warnings` (переписаны 4): inbound — `UdpHopClientOnly`, outbound — версионный
+  `sockopt`.
+- `service::tests` (переписаны 4): `UdpHopClientOnly`; кэш предупреждений черновика проверяется на
+  mKCP-фикстуре с `congestion` (неблокирующее предупреждение).
+- `gui::pages::stream_finalmask` (+1, 1 дополнен): чекбоксы по неканоничному тексту; показ формы
+  `udphop` с невалидным `mode` и `sockopt` не переписывает `settings`.
+- Итог: 1176 passed / 9 pre-existing fixture failures; clippy 66 (без изменений).
+- Не проверено вручную: GUI на живом сервере.
+
+# 69	FinalMask — этап 1.2: `realm` по схеме ядра (Roadmap §2.6)
+
+## 69.1	Что такое `realm` и на какой стороне работает
+
+Сверка с `XTLS/Xray-core@main` (`b26a91de`): `infra/conf/transport_finalmask.go` (`Realm`,
+`Realm.Build()`) и `transport/internet/finalmask/realm/*`. Маска пробивает NAT для UDP через
+realm-сервер в стиле Hysteria: обе стороны регистрируются на сервере `url` под одним realm id
+(`token` — bearer-учётка), узнают свой публичный адрес через `stunServers` и, если включено,
+открывают порт на домашнем шлюзе (`portMapping`: UPnP / NAT-PMP, `github.com/libp2p/go-nat`).
+В отличие от `udphop` (§68), `realm` работает на **обеих** сторонах (`WrapPacketConnServer` →
+`NewConnServer`), поэтому ограничений по направлению нет.
+
+## 69.2	Модель (`stream/finalmask_realm.rs`)
+
+Секция `realm` вынесена из `finalmask_layers.rs` в отдельный модуль (разбор URL занимает
+больше, чем остальные слои); `finalmask_layers` реэкспортирует её, общие хелперы
+(`string_field`, `extras_of`, `apply_*`, …) стали `pub(super)`, добавлен `bool_option_field`.
+
+- `RealmSettings`: `url` (текст, lossless), `stun_servers`, `tls_config: Option<Value>`,
+  `ip_mode`, `port_mapping: Option<RealmPortMapping>`, `extras`.
+- `RealmPortMapping { enabled: Option<bool>, timeout: Option<i64>, lifetime: Option<i64>,
+  extras }` — сообщение `realm.PortMapping` (Go декодирует в `int64`, поэтому float/строка →
+  слой на raw JSON); явный `"enabled": false` сохраняется. Дефолты ядра:
+  `REALM_DEFAULT_PORT_MAP_TIMEOUT_SECS = 10`, `REALM_DEFAULT_PORT_MAP_LIFETIME_SECS = 600`.
+- `REALM_IP_MODES = ["dual", "v4", "v6"]`; `realm_ip_mode_is_known` (без учёта регистра —
+  `Build()` делает `strings.ToLower`). Иное значение ядро молча трактует как `dual`, поэтому это
+  подсказка в форме, а не ошибка.
+- `tlsConfig` — клиентский `TLSConfig` для HTTPS к realm-серверу (`http.go: NewClient`; без него
+  — `http.DefaultClient`). Остаётся JSON-объектом: клиентского TLS-редактора ещё нет (Outbound
+  `streamSettings`, §4.2), а его `Build()` выполняется при загрузке конфига, т.е. ошибки ловит
+  `xray run -test`.
+
+### URL как поля
+
+`RealmUrl { scheme: RealmScheme, token, host, port, id, suffix }`, `parse_realm_url` — как Go
+`url.Parse` + чтение в `Realm.Build()`:
+
+| Часть | Правило |
+| ----- | ------- |
+| схема | `realm` → HTTPS (порт 443), `realm+http` → HTTP (80); без учёта регистра |
+| `?query` / `#fragment` | отрезаются первыми, ядром не читаются; хранятся в `suffix` |
+| userinfo | до последнего `@` в authority; символы как `validUserinfo`, иначе ошибка; `token` = `PathUnescape(u.User.String())`, т.е. `:` — часть токена |
+| host | IPv6 в `[]`; `host:` без цифр = порт по умолчанию; порт — только цифры |
+| id | путь без одного ведущего `/`, `PathUnescape`; `/` внутри допустим |
+
+`parse_realm_url` сообщает только структурные ошибки (схема, экранирование, синтаксис порта), а
+пустые host/token/id — `RealmUrl::validate`, чтобы форма показывала поля недописанного URL.
+`to_url_text` кодирует token (всё, кроме unreserved) и id (unreserved и `/`), поэтому ядро
+читает ровно те же поля (тест обратимости на токене `p@ss:w/rd?#%+ ü`).
+
+### Валидация (`validate_realm_settings`)
+
+Как `Build()`: `url` обязателен и разбирается; host, token, id непусты; `stunServers` ≥ 1, каждый
+проходит `net.SplitHostPort`. Сверх `Build()` — то, что рантайм отбрасывает молча или с ошибкой
+только в логе:
+
+- порт STUN-сервера не число → `resolveSTUNServers` пропускает сервер (`strconv.Atoi` → `continue`);
+- порт realm-сервера вне 1–65535 (`url.Parse` принимает любые цифры);
+- отрицательные `portMapping.timeout`/`lifetime` → `PortMapConfig.withDefaults` возвращает ошибку,
+  маппинг не создаётся.
+
+`validate_finalmask_layers` теперь вызывает диспетчер `validate_typed_layer(chain, type,
+settings)` (`udphop`, `realm`; этап 1.4 добавит остальные типы); формат ошибки прежний —
+`finalmask.udp[i] (realm): …`.
+
+## 69.3	GUI (`gui/pages/stream_finalmask.rs`)
+
+- `url` — текстовое поле; под ним `realm_url_fields_edit`: схема (radio), token, host, port
+  (подсказка — порт схемы по умолчанию), id. Правка поля пересобирает `url`; host/port
+  отбрасывают символы, после которых URL не разобрать (пробелы, `/?#@[]`, нецифры в порту). URL,
+  который не разбирается, показывается ошибкой — правится текстом.
+- `stunServers` — список; `ipMode` — `optional_string_combo` (`(default)` = dual) + пометка
+  неизвестного значения; `portMapping` — чекбокс (снятие удаляет ключ, если кроме `enabled`
+  ничего не задано) + `timeout`/`lifetime` (`optional_i64_field`); `tlsConfig` — чекбокс +
+  `optional_json_object_edit` (буфер текста как у raw-JSON редактора, «Not applied: …» для
+  невалидного JSON).
+- Help на каждое поле, inline «Save will be refused: …» из `validate_realm_settings`.
+
+## 69.4	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Модель, URL, валидация | `xray/config/stream/finalmask_realm.rs` (новый) |
+| Хелперы, реэкспорт | `xray/config/stream/finalmask_layers.rs` |
+| Диспетчер валидации | `xray/config/stream/finalmask.rs` |
+| Экспорт | `xray/config/stream/mod.rs`, `xray/config/mod.rs`, `xray/mod.rs` |
+| GUI | `gui/pages/stream_finalmask.rs` |
+
+## 69.5	Тесты
+
+- `stream::finalmask_realm` (7): round-trip с типизированным `portMapping` и raw `tlsConfig`;
+  непредставимый `portMapping` → raw JSON; разбор URL как `Build()` (регистр схемы, `:`/`@` в
+  токене, IPv6, пустой порт, 9 ошибочных форм); `RealmUrl::validate`; обратимость
+  `to_url_text`; валидация настроек (STUN без порта, IPv6 без скобок, нечисловой порт,
+  отрицательные таймауты, неизвестный `ipMode` — не ошибка); пресеты `ipMode`.
+- `stream::finalmask` (+1): `realm` на обеих сторонах, место ошибки, raw-настройки — ядру.
+- `gui::pages::stream_finalmask` (+1, +2 случая): правка поля URL переписывает `url` с
+  сохранением смысла токена; показ формы с неканоничным и неразбираемым URL не меняет `settings`.
+- Итог: 1185 passed / 9 pre-existing fixture failures; clippy 66 (без изменений).
+- Не проверено вручную: GUI и реальный realm-сервер.
+
+# 70	FinalMask — этап 1.4: валидация каждого типа слоя по `Build()` ядра (Roadmap §2.6)
+
+## 70.1	Задача и точка входа
+
+До 1.4 Feldjäger проверял у слоя только непустой `type` (плюс `udphop`/`realm` с 1.1/1.2), а
+ошибки `Build()` ядра всплывали лишь в post-write `xray run -test` — после записи и бэкапа, без
+указания слоя. Теперь каждая проверка `Build()` зеркалится до записи:
+
+- `validate_finalmask_layer(chain, type, settings) -> Result<(), String>` (`stream/finalmask.rs`)
+  — один диспетчер на все типы; `validate_finalmask_layers` (Save) добавляет к ошибке место
+  `finalmask.<chain>[i] (<type>)`.
+- GUI (`stream_finalmask.rs`) показывает результат того же диспетчера под каждым слоем — в том
+  числе под raw-JSON редактором `header-custom`/`xmc`/`mkcp-legacy`. Inline-проверки внутри форм
+  `udphop`/`realm` убраны.
+
+Сверено с `XTLS/Xray-core@main` (`b26a91de`, v26.9.30), `infra/conf/transport_finalmask.go`.
+
+## 70.2	Правила диспетчера
+
+| Ситуация | Результат |
+| -------- | --------- |
+| пустой `type` | `Ok` (сообщает `validate_finalmask_layers`) |
+| тип только другого массива (`fragment` в `udp`) | ошибка: загрузчик массива ядра его не знает |
+| тип, неизвестный обоим массивам | `Ok` — ядро может быть новее Feldjäger, `xray run -test` скажет |
+| типизированный слой, `settings` разбираются | проверка черновика |
+| типизированный слой, `settings` не разбираются (raw) | `Ok` — оставлено ядру |
+| `header-custom`, `xmc`, `mkcp-legacy` | проверка JSON (`finalmask_raw.rs`; `mkcp-legacy` с этапа 2.1 — `finalmask_mkcp.rs`, §73; у `header-custom` с этапов 2.2/2.3 есть формы, но проверка остаётся по JSON, §74–75; для UDP — ещё размеры заголовка при старте, §75) |
+| `sudoku` | `Sudoku.Build()` ничего не проверяет; с этапа 2.5 — runtime-проверки `ascii` и custom tables (§77) |
+| `xdns` | `Ok` — схема сменилась (#6718), этап 1.3 |
+
+## 70.3	Типизированные слои (`finalmask_layers.rs`)
+
+- **fragment** (`FragmentMask.Build()`): все диапазоны разбираются; `packets` — `tlshello` (без
+  учёта регистра), пусто или `ParseRangeString`, причём ядро берёт **первое число как написано**
+  (без `ensureOrder`): `"0-3"` — ошибка, `"3-0"` — нет. Последний элемент `lengths` (или `length`,
+  если `lengths` пуст; отсутствие = 0) не может начинаться с 0 — то есть **`length` обязателен**.
+  Для этого `values::parse_range_string` стал `pub(super)`.
+- **salamander**: если верхняя граница `packetSize` > 0 (режим Gecko) — диапазон в 1–2048. С этапа
+  2.5 — ещё `password` ≥ 4 байт (runtime, `NewSalamanderObfuscator`; §77).
+- **noise**: на каждый item — все диапазоны; `packet` и `rand` с верхней границей > 0
+  взаимоисключающие; `type: "exp"` — выражение (ниже); иначе `randRange` в 0–255, `type` из
+  `array`/`str`/`hex`/`base64` (`PACKET_KINDS`), для `str`/`hex`/`base64` нужен `packet` (пустой
+  `RawMessage` ядро не декодирует), затем `PacketValue::validate`.
+- **xicmp**: каждый `ips[]` — `netip.ParseAddr` (общий хелпер `is_ip_addr`, его же использует
+  `is_ip_or_prefix` из 1.1).
+
+### `noise` `type: "exp"` (XTLS/Xray-core#6862, v26.9.30)
+
+`validate_noise_exp` — ручной эквивалент сканирования ядра регулярным выражением
+`<\s*([a-z]+)(?:\s+([^>]*?))?\s*>` (крейта `regex` в зависимостях нет): между сегментами —
+только пробельные символы RE2 (`\s` = пробел, `\t`, `\n`, `\f`, `\r`), ключ — строчные латинские
+буквы, аргумент — после хотя бы одного пробела. Сегменты как `buildNoiseSegment`:
+
+| Сегмент | Аргумент |
+| ------- | -------- |
+| `<b …>` | hex (пробелы внутри и префикс `0x`/`0X` допустимы), непустой, чётной длины |
+| `<r N>`, `<rc N>`, `<rd N>` | размер `N` или `MIN-MAX`, 0–65535, не перевёрнутый |
+| `<t>`, `<c>`, `<n>` | без аргумента |
+
+Пустое выражение — ошибка. Версия: `CoreFeature::NoiseExpPacket` (v26.9.30, #6862) →
+`RequiresNewerCore` на `streamSettings.finalmask.udp[i].settings.noise[j].type`
+(`compatibility/warnings.rs`).
+
+## 70.4	Raw-слои (`stream/finalmask_raw.rs`, новый)
+
+Проверки по JSON с правилами Go-декодера: отсутствие или `null` — нулевое значение, неверный
+JSON-тип — ошибка декодирования, поле `json.RawMessage` (`packet`, `bytes`) считается заданным,
+если ключ есть, даже со значением `null`.
+
+- **header-custom TCP** (`clients`/`servers`/`errors` — списки последовательностей items) и
+  **UDP** (`mode` — пусто, `prefix` или `standalone`, с учётом регистра; `client`/`server`). Item:
+  `validateCustomItemSpec` — имена `capture`/`reuse` `^[A-Za-z_][A-Za-z0-9_]*$`; ровно один вид из
+  `packet`, `rand > 0`, `reuse`, `transform`; `capture` без вида — ошибка; у TCP-item — `delay`;
+  `randRange` в 0–255; `packet` по `type` (`validate_raw_packet` поверх `PacketValue`);
+  `transform` рекурсивно — `op` и непустые `args`, у аргумента ровно одно из `bytes`, `u64`
+  (неотрицательное целое), `reuse`, `metadata`, `transform`.
+- **xmc**: `profiles` ≥ 1, затем `password` непуст (порядок ядра), у профиля username
+  `^[A-Za-z0-9_]{3,16}$`, UUID (крейт `uuid` — те же формы, что `google/uuid`: с дефисами,
+  32 hex, `urn:uuid:`, в фигурных скобках), оба `textures*` непусты.
+- **mkcp-legacy**: `header` пусто или (без учёта регистра) `dns`/`dtls`/`srtp`/`utp`/`wechat`/
+  `wireguard` (`MKCP_LEGACY_HEADERS`); `value` — строка.
+
+## 70.5	Попутно
+
+Фикстуры `apply_without_finalmask_edits_preserves_existing_object_untouched` и
+`finalmask_tcp_ok_with_tls_security` содержали `fragment` с пустыми `settings` — ядро такой слой
+отвергает («last lengths entry min can't be 0»). Дополнены `length`.
+
+## 70.6	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Диспетчер, `FinalMaskChain::other` | `xray/config/stream/finalmask.rs` |
+| Типизированные проверки, `exp` | `xray/config/stream/finalmask_layers.rs` |
+| Raw-проверки | `xray/config/stream/finalmask_raw.rs` (новый) |
+| Диапазон без упорядочивания | `xray/config/stream/values.rs` |
+| Версия `exp` | `xray/config/compatibility/core_version.rs`, `warnings.rs` |
+| GUI | `gui/pages/stream_finalmask.rs` |
+| Экспорт | `xray/config/stream/mod.rs`, `xray/config/mod.rs`, `xray/mod.rs` |
+
+## 70.7	Тесты
+
+- `stream::finalmask_layers` (+4): `fragment` (первое число `packets` как написано, обязательный
+  `length`, приоритет `lengths`), `salamander`, `noise` (24 случая, включая 13 на `exp`), `xicmp`.
+- `stream::finalmask_raw` (5): допустимые формы `header-custom` TCP; 18 нарушений item/transform
+  с местом `clients[0][0]`; UDP `mode` с учётом регистра; `xmc`; `mkcp-legacy`.
+- `stream::finalmask` (+1): диспетчер для всех типов, «чужой» массив, неизвестный тип, raw-
+  настройки, место ошибки.
+- `compatibility::warnings` (+1): `exp` требует v26.9.30.
+- Итог: 1196 passed / 9 pre-existing fixture failures; clippy 66 (без изменений).
+- Не проверено: паритет с реальным `xray run -test` (fixtures — пункт 1.5), GUI вручную.
+
+# 71	FinalMask — этап 1.3: `xdns` по схеме v26.9.30 (Roadmap §2.6)
+
+## 71.1	Почему не по исходной формулировке
+
+Пункт 1.3 был написан по аудиту 2026-09-28, но в v26.9.30 вошёл XTLS/Xray-core#6718 (§68.5),
+полностью сменивший схему `xdns`. По решению пользователя пункт реализован под текущую схему ядра;
+старая — только распознаётся, предупреждается и мигрирует по кнопке.
+
+| | v26.9.9 – v26.9.29 | v26.9.30+ |
+| - | ------------------ | --------- |
+| `domains` | строки `"t.example.com[:txt\|a\|aaaa]"` (сервер) | объекты `{name, lenLimit, labelLimit, types, edns0}` (обе стороны) |
+| `resolvers` | строки `"t.example.com[:метод]+udp://АДРЕС"` (клиент) | `{type: udp\|tcp, settings: {addr}}` (клиент) |
+| `extraPoll` | — | 0–3 |
+| `domain` | фатальная removed-feature ошибка | молча игнорируется |
+
+## 71.2	Модель (`stream/finalmask_xdns.rs`, новый)
+
+`XdnsSettings { domains, resolvers, extra_poll, extras }`, `XdnsDomain { name, len_limit,
+label_limit, types: Vec<i64>, edns0, extras }`, `XdnsResolver { kind, addr, has_settings,
+settings_extras, extras }` — extras на каждом уровне, legacy `domain` остаётся в `extras`
+байт-в-байт. Строковые `domains`/`resolvers` (и иные непредставимые формы) → `parse_xdns_settings`
+возвращает `None`, слой остаётся на raw JSON. Секция `xdns` удалена из `finalmask_layers.rs`
+(реэкспорт сохранён).
+
+## 71.3	Валидация
+
+`validate_xdns_domain` — `XDNS.Build()` + `NewDomain()` (`transport/internet/finalmask/xdns/domain.go`):
+
+- без `..`; Feldjäger дополнительно требует непустой `name` (ядро туннелировало бы под корнем DNS);
+  IDNA-преобразование оставлено ядру;
+- `lenLimit` 0–255, `labelLimit` 0–63 (0 = 255 / 63); значения — в пределах `int32` (Go);
+- `types` ≥ 1, каждый после приведения `int32 → uint16` — A (1), CNAME (5), TXT (16), AAAA (28)
+  (`65552` = TXT, как в ядре); `edns0` — 0 или 512–4096 (тоже после `uint16`);
+- `dnsmessage.NewName(name + ".")` — не длиннее 255 байт; `lenLimit ≥ длина + 1`;
+- ёмкость: `room = lenLimit − длина − 1`, метки `room / (labelLimit + 1)` по `labelLimit` символов
+  плюс остаток − 1, затем base32 без паддинга `DecodedLen`; меньше 17 байт — ошибка
+  (`xdns_payload_capacity`; для `t.example.com` при 255/63 — 147 байт).
+
+`validate_xdns_settings(draft, direction)`: все домены и резолверы (`type` `udp`/`tcp` без учёта
+регистра, `settings` обязателен, `addr` = `host:port`, IPv6 в скобках, порт 1–65535 —
+`net.ParseDestination` при дозвоне), `extraPoll` 0–3, и проверки конструкторов, которых
+`xray run -test` не видит: `domains` ≥ 1 (`NewServer`/`NewClient`), `resolvers` ≥ 1 только для
+`StreamDirection::Outbound` (`NewClient`; сервер резолверы игнорирует).
+
+Поэтому `validate_finalmask_layer(chain, direction, type, settings)` получил направление (Save и
+GUI его уже знали). Старая схема Save не блокирует: она верна для ядра v26.9.9–29, а для нового
+ядра есть предупреждение.
+
+## 71.4	Миграция старой схемы
+
+`xdns_has_legacy_fields` — есть `domain` или строки в `domains`/`resolvers`.
+`migrate_legacy_xdns_settings` (кнопка «Migrate to the v26.9.30 schema», явное действие):
+
+- `"name[:метод]"` (`parseDomainSpec`: метод после последнего `:`) → `{name, types: [тип]}`;
+  `txt`/пусто → 16, `a` → 1, `aaaa` → 28 — без метода берётся TXT (умолчание старого клиента);
+- `"name[:метод]+udp://addr"` → `{type: "udp", settings: {addr}}`, а имя попадает в `domains`
+  (новому клиенту оно нужно там) — слияние по имени без учёта регистра, типы объединяются;
+- строковый `domain` → запись в `domains`, ключ удаляется;
+- записи уже в новой форме и неизвестные ключи сохраняются; повторная миграция — без изменений;
+- нестроковый `domain`, неизвестный метод, резолвер без `+udp://`, пустое имя — ошибка, настройки
+  не меняются (GUI показывает «Can't migrate automatically: …»).
+
+## 71.5	Версии и предупреждения
+
+`CoreFeature::XdnsObjectSchema` (v26.9.30, #6718). В `finalmask_warnings` для слоя `xdns`:
+
+| Конфиг | Ядро < v26.9.30 | ≥ v26.9.30 / неизвестно |
+| ------ | --------------- | ----------------------- |
+| старая схема | — | `XdnsLegacySchema` на `…udp[i].settings` |
+| объекты в `domains`/`resolvers` | `RequiresNewerCore` на `…udp[i].settings` | — |
+
+## 71.6	GUI (`stream_finalmask.rs`)
+
+- `show_finalmask_settings_edit` снова получает `StreamDirection` (для `xdns`).
+- Новая схема: домены группами (name, чекбоксы A/CNAME/TXT/AAAA — `xdns_types_edit`, коды вне
+  набора сохраняются и показываются как «unsupported», lenLimit/labelLimit/edns0 с подсказками
+  умолчаний), «Add domain» (TXT по умолчанию); резолверы (ComboBox udp/tcp + addr, на inbound —
+  «Client side only»), «Add resolver»; `extraPoll`; help на каждый блок. Ошибки — общей строкой
+  под слоем (§70).
+- Старая схема (`show_legacy_xdns_edit`): пояснение, кнопка миграции (или причина, почему нельзя) и
+  raw-редактор.
+
+## 71.7	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Модель, валидация, миграция | `xray/config/stream/finalmask_xdns.rs` (новый) |
+| Реэкспорт, удаление старой модели | `xray/config/stream/finalmask_layers.rs` |
+| Диспетчер с направлением | `xray/config/stream/finalmask.rs` |
+| Версия, предупреждение | `xray/config/compatibility/core_version.rs`, `warnings.rs` |
+| GUI | `gui/pages/stream_finalmask.rs` |
+| Экспорт | `xray/config/stream/mod.rs`, `xray/config/mod.rs`, `xray/mod.rs` |
+
+## 71.8	Тесты
+
+- `stream::finalmask_xdns` (6): round-trip новой схемы с extras на всех уровнях; старая схема не
+  разбирается типизированно, `domain` сохраняется и распознаётся; `NewDomain` (13 случаев, включая
+  приведение `uint16`, ёмкость, `int32`); формула ёмкости; валидация по направлению и резолверов;
+  миграция (слияние, объединение типов, идемпотентность, 4 ошибки).
+- `stream::finalmask` (+1, 1 дополнен): резолверы обязательны только клиенту; старая схема не
+  блокирует Save.
+- `compatibility::warnings` (+1): схема по версии ядра в обе стороны.
+- `gui::pages::stream_finalmask` (+1 случай): показ новой формы не меняет `settings`.
+- `stream::finalmask_layers`: тест старой строковой модели удалён, 2 теста переведены на новую.
+- Итог: 1203 passed / 9 pre-existing fixture failures; clippy 66 (без изменений).
+- Не проверено: реальный DNS-туннель, GUI вручную, IDNA-имена.
+
+# 72	FinalMask — этап 1.5: fixtures и паритет с `xray run -test` (Roadmap §2.6)
+
+## 72.1	Где лежат fixtures
+
+Не в `tests/fixtures/`: строка `tests` в `.gitignore` исключает каталог целиком, а git не
+заходит в исключённый каталог, поэтому `!tests/fixtures/finalmask/` не сработал бы. Из-за этого
+9 старых тестов (`tests/fixtures/xray/…`) падают на чистом клоне. Fixtures FinalMask лежат рядом с
+кодом — `src/xray/config/stream/fixtures/finalmask/{valid,invalid}/*.json` — и встраиваются через
+`include_str!`: отсутствующий файл = ошибка компиляции. `.gitignore` не менялся.
+
+## 72.2	Формат и таблица случаев
+
+- Файл — объект `streamSettings.finalmask` как на диске (чистый Xray JSON без служебных ключей),
+  его можно вставить в конфиг руками.
+- Ожидания — в `CASES` (`stream/finalmask_fixtures.rs`, `#[cfg(test)]`): путь, `StreamDirection`,
+  `Valid` / `build(needle)` / `runtime(needle)`, необязательный `CoreFeature` (минимальная версия
+  ядра). Один файл может участвовать в нескольких случаях (`valid/xdns_server` — валиден на
+  inbound, на outbound — ошибка `resolvers`).
+- Прогон повторяет Save: каждая цепочка → `parse_finalmask_layers` → `validate_finalmask_layers`.
+- `CoreCheck::Build` — ошибку видит `Build()` ядра (`xray run -test` падает); `CoreCheck::Runtime` —
+  только при listen/dial (`udphop: client only`, `NewClient` без `resolvers`, нечисловой порт STUN),
+  `-test` проходит. Ради второго вида Feldjäger и проверяет до записи.
+
+## 72.3	Паритет-тест
+
+`parity_with_xray_run_test`: без `XRAY_BIN` — no-op с сообщением в stderr. С ним — версия из
+`xray version` (`XrayCoreVersion::parse`), случаи с `CoreFeature` новее ядра пропускаются; каждый
+случай оборачивается в минимальный конфиг (inbound VLESS на `127.0.0.1:10443` / outbound Freedom;
+`network` `kcp` для чисто UDP-цепочки, иначе `raw`), пишется во временный каталог и проверяется
+`xray run -test -c <file>` (аргументы напрямую, без shell). `Build`-случаи ядро должно отвергнуть,
+`Valid` и `Runtime` — принять; если ядро начнёт отвергать `Runtime`-случай на этапе build, его надо
+перевести в `Build`. Все расхождения собираются в одно сообщение.
+
+## 72.4	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Таблица случаев, прогон, паритет | `xray/config/stream/finalmask_fixtures.rs` (новый, `#[cfg(test)]`) |
+| Fixtures (34 файла) | `xray/config/stream/fixtures/finalmask/{valid,invalid}/` (новый) |
+| Подключение модуля | `xray/config/stream/mod.rs` |
+
+## 72.5	Тесты
+
+- `stream::finalmask_fixtures` (4): 37 случаев по 34 файлам — все 4 TCP- и 9 UDP-типов валидны,
+  пустой `type`, чужая цепочка и нарушения `Build()` по каждому типу с проверками (у `sudoku` их в
+  ядре нет); каждый документированный тип имеет валидный fixture; каждый файл каталога упомянут в
+  `CASES`; паритет.
+- Мутационная проверка: заменённое ожидание `invalid/header_custom_udp_mode_case` на `Valid` роняет
+  тест с текстом ошибки валидатора.
+- Итог: 1207 passed / 9 pre-existing fixture failures; clippy lib 66 (без изменений), новых
+  предупреждений в тестовом модуле нет.
+- Не проверено: паритет с реальным ядром — локального `xray` нет; первый прогон
+  `XRAY_BIN=/path/to/xray cargo test finalmask_fixtures` может потребовать поправить `CoreCheck`
+  отдельных случаев (например, `xmc`-текстуры, если ядро декодирует их строже).
+
+# 73	FinalMask — этап 2.1: типизированная форма `mkcp-legacy` (Roadmap §2.6)
+
+## 73.1	Сверка с ядром
+
+`XTLS/Xray-core@main`, `infra/conf/transport_finalmask.go` `MkcpLegacy {Header, Value string}` и
+`transport/internet/finalmask/mkcp/{original,aes128gcm,header}`. `Build()` выбирает одну из трёх масок:
+
+| `header` | `value` | Маска ядра |
+| -------- | ------- | ---------- |
+| пусто | пусто | `original.Config` — исходная обфускация mKCP |
+| пусто | задан | `aes128gcm.Config{Password: value}` |
+| `dns` | домен (пусто = `www.baidu.com`) | `header.Config{ID: 0, Domain}` — поддельный DNS-запрос |
+| `dtls`/`srtp`/`utp`/`wechat`/`wireguard` | **игнорируется** | `header.Config{ID: 1…5}` |
+
+`header` сравнивается без учёта регистра (`strings.ToLower`), без `trim`; старые имена
+`kcpSettings.header` (`none`, `wechat-video`) здесь недопустимы — важно для миграции 5.2. Маска
+работает на обеих сторонах (`NewConnServer` = `NewConnClient`). Принимающая сторона просто отрезает
+`header.Size()` байт, а для `dns` размер зависит от длины домена — домены клиента и сервера обязаны
+совпадать.
+
+Домен `dns` кодируется не в `Build()`, а при создании listener/dialer (`NewHeaderDNS` →
+`packDomainName(domain + ".", buf[256])`): метка ≥ 64 байт — ошибка `bad rdata`, переполнение
+буфера — `buffer size too small`, а имя ровно в 256 байт даёт `buf[:257]` — **панику** Go.
+`xray run -test` ничего из этого не ловит, поэтому проверка — как у прочих runtime-only отказов
+(`udphop`, `realm`).
+
+## 73.2	Модель
+
+Новый модуль `stream/finalmask_mkcp.rs` (туда же перенесены `MKCP_LEGACY_HEADERS` и
+`validate_mkcp_legacy` из `finalmask_raw.rs`):
+
+- `MkcpLegacySettings {header, value, extras}` — обе строки **дословно** (без `trim`, в отличие от
+  `string_field`: пароль и домен ядро использует побайтно); `parse_mkcp_legacy_settings` → `None`
+  для не-строковых `header`/`value` (правило «без потерь или raw»); `mkcp_legacy_settings_to_value`
+  опускает пустые строки (нулевое значение Go).
+- `MkcpLegacySettings::mode() -> Option<MkcpLegacyMode>` (`Original` / `Aes128Gcm` /
+  `Dns {domain}` / `Header(name)`; `None` — заголовок, который ядро отвергнет) — одна реализация
+  ветвления `Build()` для валидации и подсказок GUI.
+- `validate_mkcp_legacy_settings` (черновик) и `validate_mkcp_legacy` (JSON: сначала типы как
+  декодер Go, затем черновик). Диспетчер `validate_finalmask_layer` по-прежнему зовёт JSON-вариант:
+  типизированная форма не может представить не-строковое значение, а ошибку декодирования надо
+  показать до Save.
+- `encoded_dns_name_len` — порт `packDomainName` (экранирование `\x`, пустые метки не ошибка) +
+  отказ на 256 байтах вместо паники.
+
+## 73.3	GUI
+
+`show_mkcp_legacy_settings_edit` (`gui/pages/stream_finalmask.rs`) на общей обвязке
+`FinalMaskForm`: ComboBox `header` («(none)» + шесть заголовков; значение с диска не из списка —
+`DNS`, невалидное `none` — показывается как есть, пока не выбран другой пункт; свободного ввода нет:
+ядро ничего другого не примет), `value` с `hint_text` по режиму (пароль / `www.baidu.com` /
+«(not used)»), строка-пояснение `mkcp_legacy_mode_note` (что построит ядро; для `dns` — требование
+одинакового домена; заданный, но игнорируемый `value` — оранжевым, значение сохраняется). Ошибки —
+общая строка «Save will be refused: …» под слоем. Help на оба поля.
+
+## 73.4	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Модель, валидация, порт `packDomainName` | `xray/config/stream/finalmask_mkcp.rs` (новый) |
+| Удалено (перенесено) | `xray/config/stream/finalmask_raw.rs` |
+| Диспетчер, реэкспорт | `xray/config/stream/{finalmask,mod}.rs`, `xray/config/mod.rs`, `xray/mod.rs` |
+| Форма | `gui/pages/stream_finalmask.rs` |
+| Fixtures | `valid/mkcp_legacy_{dns,aes}.json`, `invalid/mkcp_legacy_dns_label.json` |
+
+## 73.5	Тесты
+
+- `stream::finalmask_mkcp` (4): `mode()` как `Build()` (регистр, без trim, `none`/`wechat-video`
+  отвергаются); round-trip дословно + extras, пустые/`null` → отсутствуют, не-строки → raw;
+  типы Go и регистр в `validate_mkcp_legacy` (перенесённый тест); границы `packDomainName`
+  (63/64 байта метки, `\.`, пустые метки, 255 байт проходит, 256 — отказ вместо паники).
+- GUI (`finalmask_form_tests`): +4 случая «показ не переписывает settings» (`DNS`, пробелы в
+  `value`, пустой/`null`, невалидный и не-строковый `header`); выбор заголовка не трогает
+  `value`/extras; пояснение следует режиму.
+- Fixtures: +3 случая (`dns` в верхнем регистре, AES-пароль на outbound, `runtime` — метка 64 байта).
+- Итог: 1212 passed / 9 pre-existing fixture failures; clippy lib 66 (без изменений).
+- Не проверено: паритет с реальным ядром (`XRAY_BIN`) — локального `xray` нет; GUI вручную не
+  запускался.
+
+# 74	FinalMask — этап 2.2: типизированная форма `header-custom` TCP (Roadmap §2.6)
+
+## 74.1	Сверка с ядром
+
+`XTLS/Xray-core@main`, `infra/conf/transport_finalmask.go` `HeaderCustomTCP {Clients, Servers,
+Errors [][]TCPItem}`, `TCPItem {Delay Int32Range, Rand int32, RandRange *Int32Range, Capture,
+Type, Reuse string, Transform *CustomTransform, Packet json.RawMessage}` и рантайм
+`transport/internet/finalmask/header/custom/tcp.go`:
+
+| Сторона | `clients[i]` | `servers[i]` | `errors[i]` |
+| ------- | ------------ | ------------ | ----------- |
+| клиент (outbound) | пишет | читает и проверяет | **не использует** |
+| сервер (inbound) | читает и проверяет | пишет после `clients[i]` | пишет при несовпадении `clients[i]`, затем отказ |
+
+- Порядок: клиент `clients[0]` → `servers[0]` → `clients[1]` → …; лишние `servers` идут после
+  последней клиентской последовательности.
+- Item — ровно один вид (`validateCustomItemSpec`): `packet` (ключ задан, даже `null` —
+  `len(RawMessage) > 0`), `rand > 0`, `reuse`, `transform`; либо ни одного (пустой item; `capture`
+  без вида — ошибка). При чтении `packet`/`reuse`/`transform` сравниваются побайтно, `rand` —
+  пропуск N байт любого содержимого; `randRange` (по умолчанию 0–255) влияет только на запись.
+- `delay` действует только при записи: накопленные items сбрасываются в сокет, затем пауза
+  (`writeSequenceWithContext`); при чтении игнорируется.
+- `rand` — Go `int32`: строка `"4"` — ошибка декодирования (в отличие от `Int32Range`).
+- Операции `transform` — `evaluator.go`: `concat`, `slice`, `xor16`/`xor32`, `be16`/`be32`,
+  `le16`/`le32`/`le64`, `pad`, `truncate`, `add`, `sub`, `and`, `or`, `shl`, `shr`; аргумент —
+  ровно одно из `bytes`(+`type`)/`u64`/`reuse`/`metadata`/`transform`.
+
+## 74.2	Модель
+
+Новый модуль `stream/finalmask_header_custom.rs`:
+
+- `HeaderCustomItem {delay, rand, rand_range, kind, packet, capture, reuse, transform, extras}` —
+  `delay`/`randRange` через `RangeValue`, `packet` через `PacketValue`, строки дословно
+  (`verbatim_string` из `finalmask_mkcp.rs` стал `pub(super)`), `rand` — текст, пишется числом,
+  если разбирается, иначе как набран (Save покажет ошибку ядра), `transform` — сырой JSON-объект.
+- `HeaderCustomSequences {sequences, present}` — `present` сохраняет пустую группу с диска
+  (`"errors": []` не исчезает при правке); `HeaderCustomTcpSettings {clients, servers, errors,
+  extras}` + `group`/`group_mut` по `HeaderCustomTcpGroup` (`ALL`, `key()`).
+- `HeaderCustomItem::kind() -> Option<HeaderCustomItemKind>` (`Empty`/`Packet`/`Rand`/`Reuse`/
+  `Transform`; `None` — несколько видов) — счёт как `validateCustomItemSpec`, для подсказок GUI.
+- Правило «без потерь или raw»: `packet: null` и `transform: null` → raw (для ядра `packet: null`
+  — заданный вид, удаление ключа изменило бы валидацию), как и любой ключ неверного JSON-типа.
+- Валидация не дублируется: диспетчер по-прежнему вызывает `validate_header_custom_tcp` по JSON
+  (`finalmask_raw.rs`).
+
+Попутное исправление `PacketValue::to_value` (`values.rs`): строковый `packet` пишется
+**дословно**, без `trim` — раньше любая правка слоя срезала завершающий `\r\n\r\n` у `str`-пакета
+(HTTP-подобный заголовок), т.е. меняла маску; касалось и `noise`. Пустым («ключ отсутствует»)
+по-прежнему считается только пустой после `trim` текст. Новые `escape_packet_text` /
+`unescape_packet_text` — представление `str`-пакета в одну строку (`\\`, `\r`, `\n`, `\t`,
+`\xHH` для управляющих ASCII); неизвестное экранирование — ошибка, текст не применяется.
+
+## 74.3	GUI
+
+`show_header_custom_tcp_settings_edit` (`gui/pages/stream_finalmask.rs`) на `FinalMaskForm`.
+Диспетчер `show_finalmask_settings_edit` получил `chain: FinalMaskChain`: у `header-custom` в
+`tcp[]` и `udp[]` разные схемы, UDP остаётся на raw JSON до этапа 2.3.
+
+- Три группы с help и строкой роли по `StreamDirection` (`header_custom_group_writes`: inbound
+  читает `clients`, пишет `servers`/`errors`; на outbound заданный `errors` — оранжевое «ignored»,
+  значение сохраняется).
+- Последовательности и items — группы с Up / Down / Remove (`ListEdit` + `list_edit_buttons` +
+  `apply_list_edit`; Up/Down недоступны на краях), «Add … sequence» (с одним пустым item),
+  «Add item».
+- Поля item: `delay`, `packet` (ComboBox `type`: «(array)»/`array`/`str`/`hex`/`base64`, значение
+  с диска не из списка показывается как есть; смена типа перечитывает текст в новой кодировке),
+  `rand` + `randRange`, `reuse`, `capture`, `transform` (`optional_json_object_edit`). `str`-пакет
+  редактируется с экранированием через буфер `load_text_buffer` — недописанное `\x` не
+  применяется и не схлопывается.
+- Под item — `header_custom_item_note`: что эта сторона делает с item («Sends 8 random bytes,
+  values 0-255», «Accepts any 8 bytes · delay is not used when receiving», «· saved as `n`»).
+  Ошибки — общая строка «Save will be refused: clients[i][j]: …» под слоем; индексы в заголовках
+  совпадают.
+
+## 74.4	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Модель | `xray/config/stream/finalmask_header_custom.rs` (новый) |
+| `packet` дословно, экранирование | `xray/config/stream/values.rs` |
+| Реэкспорт, doc-комментарии | `xray/config/stream/{mod,finalmask,finalmask_layers,finalmask_raw,finalmask_mkcp}.rs`, `xray/config/mod.rs`, `xray/mod.rs` |
+| Форма, диспетчер по цепочке | `gui/pages/stream_finalmask.rs` |
+| Fixture | `valid/header_custom_tcp_http.json` (CRLF в `str`, `capture`/`reuse`, `errors` hex) |
+
+## 74.5	Тесты
+
+- `stream::finalmask_header_custom` (5): round-trip документированных форм без изменений (CRLF,
+  пустые последовательность и группа, extras на обоих уровнях); непредставимое → raw (`rand`
+  строкой/вне `int32`/дробный, `packet: null`, `transform: null`/строка, не-массивы); запись
+  правок в формах ядра + сохранение `"errors": []`; `kind()` как `validateCustomItemSpec`; обе
+  valid-fixtures принимаются формой без изменений.
+- `stream::values` (+2): `str`-пакет пишется дословно; экранирование обратимо, ошибки `\`, `\q`,
+  `\x8`, `\xff`.
+- GUI (`finalmask_form_tests`, +4): показ формы и raw-fallback не переписывают `settings`
+  (типизированная форма действительно выбрана для TCP и не выбрана для UDP); правка одного item и
+  перестановка сохраняют CRLF соседнего; подсказки по стороне; `apply_list_edit` на границах.
+- Fixtures: +2 случая (`header_custom_tcp_http` на inbound и outbound).
+- Итог: 1223 passed / 9 pre-existing fixture failures; clippy lib 66 (без изменений).
+- Не проверено: паритет с реальным ядром (`XRAY_BIN`) — локального `xray` нет; GUI вручную не
+  запускался.
+
+# 75	FinalMask — этап 2.3: типизированная форма `header-custom` UDP (Roadmap §2.6)
+
+## 75.1	Сверка с ядром
+
+`XTLS/Xray-core@main`, `infra/conf/transport_finalmask.go` `HeaderCustomUDP {Mode string, Client,
+Server []UDPItem}`, `UDPItem` = `TCPItem` без `delay`; рантайм
+`transport/internet/finalmask/header/custom/{udp,evaluator}.go`.
+
+| `mode` | Протобуф | Что происходит |
+| ------ | -------- | -------------- |
+| пусто / `prefix` | `UDPConfig` | `client`/`server` — заголовок перед **каждым** пакетом соответствующей стороны; получатель сверяет и срезает его, несовпадение — пакет отбрасывается (лог `header mismatch`) |
+| `standalone` | `UDPStandaloneConfig` | `client` — отдельный пакет-рукопожатие, который клиент шлёт один раз на адрес и ждёт ответа `server`; затем данные идут без изменений. Сервер отвечает только на пакет **ровно** размера `client`, который совпал; остальные пакеты — данные |
+
+`mode` сравнивается **с учётом регистра** (`Prefix` — `unknown udp mode`).
+
+**Размер заголовка измеряется при создании listener/dialer** (`measureUDPItems` /
+`measureUDPItemsWithFallback` + `collectSavedUDPSizes`), а не в `Build()` — `xray run -test`
+отказ не видит, Xray не стартует (inbound) или не может дозвониться (outbound):
+
+- `reuse` неизвестной переменной — `unknown variable`; переменные известны по порядку items, в
+  `server` дополнительно доступны все `capture` из `client` (`collectSavedUDPSizes` пропускает
+  items, которые не измеряются);
+- `transform`: фиксированную ширину имеют только `concat` (сумма аргументов), `slice`/`pad`/
+  `truncate` (длина — аргумент `u64`, проверяется число аргументов), `be16`/`le16` = 2,
+  `be32`/`le32` = 4, `le64` = 8; прочие операции — `expr size is not bytes`; аргумент `u64` в
+  `concat` — `u64 arg has no byte width`; `metadata` — `metadata not implemented`.
+- Что измеряется, зависит от режима и стороны: `prefix` — обе стороны измеряют `client` и
+  `server` (с переменными `client`); `standalone` — сервер измеряет только `client`, клиент —
+  только `server`. То, что сторона **отправляет** в `standalone`, вычисляется на каждый пакет —
+  там `metadata` работает (`evaluateExprArg`).
+
+## 75.2	Модель
+
+`stream/finalmask_header_custom.rs` расширен на обе цепочки:
+
+- Разбор item обобщён: `parse_item(value, known)` — `delay` читается только для TCP, в UDP-item он
+  неизвестный ключ и сохраняется в `extras`; запись — общий `item_to_value` (у UDP-item `delay`
+  всегда пуст).
+- `HeaderCustomUdpSettings {mode, client, server, extras}` (`mode` дословно), `HeaderCustomItems
+  {items, present}` (пустая группа с диска сохраняется), `HeaderCustomUdpGroup` (`ALL`, `key()`),
+  `is_standalone()` (точное сравнение, как ядро), `HEADER_CUSTOM_UDP_DEFAULT_MODE`;
+  `parse_header_custom_udp_settings` / `header_custom_udp_settings_to_value`. Не-строковый `mode`,
+  `packet: null` и прочие непредставимые формы → raw JSON.
+- `values.rs`: `decoded_packet_len(value, type)` — длина после `PraseByteSlice` (`array`: длина
+  списка или base64 строки; `str`: UTF-8; `hex`/`base64`: декодированная; `null` = 0).
+- `finalmask_raw.rs`: порт `measureItem`/`measureExpr`/`measureExprArg` по JSON (порядок видов как
+  в ядре: `rand`, `packet`, `reuse`, `transform`) и `validate_header_custom_udp_sizes(settings,
+  direction)`; диспетчер `validate_finalmask_layer` вызывает её после `validate_header_custom_udp`.
+  Сообщение называет item (`client[0]: unknown variable "nonce" — no earlier item captures it`) и
+  поясняет, что ошибка появится при создании listener/dialer.
+
+## 75.3	GUI
+
+`show_header_custom_udp_settings_edit` (`gui/pages/stream_finalmask.rs`) на `FinalMaskForm`;
+диспетчер выбирает TCP/UDP-форму по `FinalMaskChain`.
+
+- ComboBox `mode` («(prefix)» + `prefix`/`standalone`; значение с диска не из списка — `Prefix` —
+  показывается как есть) и строка-пояснение по режиму; help на `mode` включает правила размера
+  заголовка.
+- Группы `client`/`server` с help и строкой роли по режиму и `StreamDirection`
+  (`header_custom_udp_group_note`: «Put in front of every packet this inbound sends», «The client
+  handshake: a packet of exactly this size that matches is answered with server…»).
+- Items — общий с TCP редактор: `header_custom_sequence_edit` → `header_custom_items_edit(path,
+  items, writes, with_delay)`, `header_custom_item_edit(…, with_delay)`; для UDP поле `delay` не
+  показывается. Up/Down/Remove, подсказка под item, экранирование `str`-пакета — как в §74.
+- Тест raw-JSON редактора переведён с `header-custom` UDP на `xmc` (у UDP теперь форма).
+
+## 75.4	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Модель UDP, общий разбор item | `xray/config/stream/finalmask_header_custom.rs` |
+| Длина `packet` после декодирования | `xray/config/stream/values.rs` |
+| Порт измерения размеров | `xray/config/stream/finalmask_raw.rs` |
+| Диспетчер, реэкспорт | `xray/config/stream/{finalmask,mod}.rs`, `xray/config/mod.rs`, `xray/mod.rs` |
+| Форма | `gui/pages/stream_finalmask.rs` |
+| Fixtures | `valid/header_custom_udp_prefix.json` (DTLS-подобный заголовок, `capture` в `client` → `reuse` в `server`), `invalid/header_custom_udp_unknown_reuse.json` (`runtime`) |
+
+## 75.5	Тесты
+
+- `stream::finalmask_header_custom` (+2, и обе UDP valid-fixtures в round-trip): round-trip
+  `standalone` с CRLF и пустой группой, `delay` UDP-item — в extras, `Prefix` дословно,
+  `null` → отсутствует, непредставимое → raw; запись правок (`mode`, новый item, пустая группа).
+- `stream::values` (+1): `decoded_packet_len` по всем типам.
+- `stream::finalmask_raw` (+1): размеры как `measureUDPItems` — `capture` в `client` → `reuse` в
+  `server`, фиксированные операции, `reuse` до `capture`, `xor16`, `u64`/`metadata` в `concat`,
+  число аргументов `slice`, длина `pad` не `u64`; `standalone` по сторонам (`metadata` в ответе
+  сервера — допустимо на inbound, отказ на outbound; неизвестная переменная в `client` — наоборот).
+- `stream::finalmask` (+1 случай в диспетчере), fixtures (+3 случая).
+- GUI (+3): показ UDP-формы и raw-fallback не переписывают `settings` (форма действительно
+  выбрана; для UDP не выбирается TCP-форма); смена `mode` сохраняет items дословно; пояснения по
+  режиму и стороне.
+- Итог: 1230 passed / 9 pre-existing fixture failures; clippy lib 66 (без изменений).
+- Не проверено: паритет с реальным ядром (`XRAY_BIN`) — локального `xray` нет; GUI вручную не
+  запускался.
+
+# 76	FinalMask — этап 2.4: типизированная форма `xmc` (Roadmap §2.6)
+
+## 76.1	Сверка с ядром
+
+`XTLS/Xray-core@main`: `infra/conf/transport_finalmask.go` `XMC {Hostname, Profiles []XMCProfile,
+Password}`, `XMCProfile {Username, UUID, TexturesValue, TexturesSignature}` (все — Go `string`);
+рантайм `transport/internet/finalmask/xmc/{client,server,profile,protocol,derivation}.go`.
+
+| Поле | Кто использует | Что происходит |
+| ---- | -------------- | -------------- |
+| `password` | обе стороны | `DeriveRSAKey` — детерминированный 1024-битный RSA-ключ (имитация online-mode шифрования); клиент дописывает пароль к 4-байтному verify token и шифрует PKCS#1 v1.5, сервер сравнивает (`ConstantTimeCompare`) |
+| `profiles[]` | обе стороны | клиент **на каждое соединение** выбирает профиль случайно и шлёт username + UUID; сервер принимает только профиль из своего списка (`findProfile`, иначе «not white-listed») и отвечает **своими** textures, клиент сверяет весь профиль (`login profile mismatch`) — списки должны совпадать |
+| `hostname` | только клиент | адрес сервера в Minecraft-handshake (пусто = IP, по которому идёт дозвон); сервер читает и игнорирует |
+
+`Build()`: `profiles` ≥ 1, `password` непуст, у профиля username `^[A-Za-z0-9_]{3,16}$`, UUID
+(`google/uuid.Parse`: с дефисами, 32 hex, `{…}`, `urn:uuid:`), оба textures непусты. Ограничений
+по направлению нет (`WrapConnClient`/`WrapConnServer`).
+
+**Runtime-only** (`xray run -test` не видит, Xray стартует, но **каждое соединение** падает на
+логине):
+
+- `password` > 113 байт — `128 − 11` (PKCS#1 v1.5 на 1024-битном ключе) `− 4` (verify token):
+  `rsa.EncryptPKCS1v15` у клиента возвращает ошибку; отказ на обеих сторонах (пара конфигов
+  должна совпадать, сервер с таким паролем недостижим);
+- `texturesValue`/`texturesSignature` > 4096 байт — клиент читает строку ответа сервера с лимитом
+  `String.readFrom` (`length > 4096`); обе стороны;
+- `hostname` > 4096 байт — тот же лимит у сервера; только outbound (на inbound поле не
+  используется).
+
+**Смена схемы.** До v26.7.28 (XTLS/Xray-core#6487; первый тег с новой схемой, v26.7.11 ещё со
+старой — проверено по исходникам тегов) был `usernames: []string` (пусто = `["Dream"]`),
+`Build()` требовал только `password`. Новое ядро `usernames` игнорирует и без `profiles`
+отказывает; старое игнорирует `profiles`. Решение — как у `xdns` (§71): старую схему Save **не
+блокирует** (верна для старого ядра), версионное предупреждение + явное действие в редакторе.
+Полной автоматической миграции нет и быть не может: подписанные textures выдаёт только Mojang.
+
+## 76.2	Модель
+
+Новый модуль `stream/finalmask_xmc.rs` (`validate_xmc` перенесён из `finalmask_raw.rs`):
+
+- `XmcSettings {password, hostname, profiles: Vec<XmcProfile>, extras}`,
+  `XmcProfile {username, uuid, textures_value, textures_signature, extras}` — строки **дословно**
+  (пароль используется побайтно, username с пробелом ядро отвергает — не «исправляем»);
+  пустая строка / пустой список = ключ отсутствует. Legacy `usernames` — в `extras` байт-в-байт
+  (`legacy_usernames()`, `remove_legacy_usernames()`). Не-строковые поля, `profiles` не массив
+  объектов (`[null]`) → `None` → raw JSON.
+- `xmc_has_legacy_usernames(settings)` — `usernames` задан и `profiles` нет/пуст (при обоих
+  ключах новое ядро читает `profiles` — валидируется новая схема).
+- `migrate_legacy_xmc_usernames(draft)` — по профилю-заготовке на каждое имя (`Dream` для пустого
+  списка, как старое ядро), `usernames` удаляется; UUID и textures заполняет пользователь.
+  Отказ без изменений, если `profiles` уже задан или `usernames` — не список строк.
+- `validate_xmc_settings(draft, direction)` — сначала проверки `Build()`, затем runtime-лимиты
+  (`XMC_MAX_PASSWORD_BYTES` = 113, `XMC_MAX_STRING_BYTES` = 4096; `hostname` — только
+  `Outbound`); `validate_xmc(settings, direction)` — Go-декодирование по JSON (типы строк,
+  `profiles[i]` — объект), старая схема → только `password`, иначе typed-проверка. Диспетчер
+  `validate_finalmask_layer` передаёт направление.
+- `xmc_username_is_valid` — `xmcUsernamePattern`, общий для валидации и подсказки в форме.
+
+## 76.3	Предупреждения и версии
+
+- `CoreFeature::XmcProfilesSchema` → v26.7.28, #6487 (таблица §67.2).
+- `finalmask_warnings` для слоя `xmc`: ядро старше v26.7.11 — только `RequiresNewerCore
+  {XmcTcpMask}` на `…tcp[i].type` (схема не важна); иначе `XmcLegacyUsernames` на
+  `…tcp[i].settings.usernames` при старой схеме и ядре ≥ v26.7.28/неизвестном, и
+  `RequiresNewerCore {XmcProfilesSchema}` на `…tcp[i].settings.profiles` при непустых `profiles`
+  и ядре v26.7.11–v26.7.27.
+
+## 76.4	GUI
+
+`show_xmc_settings_edit` (`gui/pages/stream_finalmask.rs`) на `FinalMaskForm`, получает
+`StreamDirection`. Диспетчер: `xmc` в `tcp[]` — форма, в `udp[]` — raw JSON (ошибка «tcp mask»
+под слоем).
+
+- `password` + счётчик «N/113 bytes» (оранжевый сверх лимита); `hostname` с подсказкой по
+  стороне, на inbound заданный `hostname` — оранжевое «ignored on the inbound side».
+- `profiles`: строка роли по стороне (`xmc_profiles_note`), группы `profiles[i]` с Up/Down/Remove
+  (общие `list_edit_buttons`/`apply_list_edit`), поля username (inline-подсказка формата), uuid,
+  `texturesValue`/`texturesSignature` — многострочные; «Add profile».
+- Legacy `usernames`: без `profiles` — пояснение и кнопка «Start profiles from usernames» (или
+  причина, почему нельзя); с `profiles` — пояснение и «Remove usernames».
+- Help на все поля; в help `profiles` — как получить профиль (UUID по имени через
+  `api.mojang.com`, подписанный профиль `sessionserver.mojang.com/…?unsigned=false`). Сам
+  Feldjäger к Mojang не обращается.
+- Тест raw-JSON редактора переведён с `xmc` на неизвестный тип `future-mask`.
+- Попутно: в help/пояснениях `mkcp-legacy` (§73) строки были склеены с серией пробелов вместо
+  переноса строки-литерала — исправлено.
+
+## 76.5	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Модель, валидация, миграция | `xray/config/stream/finalmask_xmc.rs` |
+| Диспетчер, реэкспорт | `xray/config/stream/{finalmask,finalmask_raw,mod}.rs`, `xray/config/mod.rs`, `xray/mod.rs` |
+| Версии, предупреждения | `xray/config/compatibility/{core_version,warnings}.rs` |
+| Форма | `gui/pages/stream_finalmask.rs` |
+| Fixtures | `invalid/xmc_long_password.json` (`runtime`, обе стороны), `invalid/xmc_long_hostname.json` (`runtime` на outbound, valid на inbound); существующие xmc-случаи помечены `XmcProfilesSchema` (на v26.7.11 `profiles` игнорируется — паритет иначе разошёлся бы) |
+
+## 76.6	Тесты
+
+- `stream::finalmask_xmc` (+4, из них 1 перенесён из `finalmask_raw`): round-trip дословно с
+  extras, нулевые значения → отсутствуют, непредставимое → raw; проверки `Build()` (включая
+  username из 17 символов, `profiles[0]` не объект) и их приоритет над runtime; runtime-лимиты по
+  сторонам (байты, не символы); старая схема — не блокируется, миграция, `Dream`, отказы без
+  изменений.
+- `compatibility::warnings` (+1): `usernames`/`profiles` по версии ядра в обе стороны, ядро без
+  `xmc`.
+- GUI (+2): показ формы и raw-fallback не переписывают `settings` на обеих сторонах (в т.ч. с
+  legacy `usernames`), `xmc` в `udp[]` — raw; реальная правка пишется; пояснения по сторонам.
+- Fixtures (+4 случая).
+- Итог: 1236 passed / 9 pre-existing fixture failures; clippy lib 66 (без изменений).
+- Не проверено: паритет с реальным ядром (`XRAY_BIN`) — локального `xray` нет; GUI вручную не
+  запускался.
+
+# 77	FinalMask — этап 2.5: доработка форм и help на каждый тип маски (Roadmap §2.6)
+
+## 77.1	Сверка с ядром
+
+`XTLS/Xray-core@main`: `infra/conf/transport_finalmask.go` (`FragmentMask`, `NoiseMask`,
+`Salamander`, `Sudoku`, `Xicmp`), `infra/conf/common.go` (`Int32Range`), рантайм
+`transport/internet/finalmask/{fragment,noise,salamander,sudoku,xicmp}/*.go`.
+
+| Маска | Что важно для формы |
+| ----- | ------------------- |
+| `fragment` | `packets`: пусто — **каждая** запись; `tlshello` — только **первая** запись и только если это целая TLS handshake-запись (`p[0] == 22`): тело режется на несколько TLS-записей; `FROM-TO` — записи с номерами FROM..TO (с 1), режутся на отдельные TCP-записи; порядок не нормализуется, `"3-1"` не совпадает ни с одной записью. `lengths[i]`/`delays[i]` — по номеру куска, последний повторяется; `length`/`delay` читаются только при пустых списках. `tlshello` **склеивает** записи в одну TCP-запись, когда список задержек (`delays` или `[delay]`) — ровно один элемент с верхней границей 0, в т.ч. при отсутствии `delay` (`mergeTlsHelloSegments`). `maxSplit` — кусок с этим номером забирает остаток. Обе стороны (`WrapConnServer`) |
+| `noise` | Мусорные датаграммы перед первым пакетом на **каждый адрес назначения**, повторно — через `reset` секунд (0/пусто — однократно); `delay` — пауза после датаграммы. Item без `packet` и `rand` шлёт **пустую** датаграмму. `exp` — выражение, `rand`/`randRange` не используются. Обе стороны, ответной маски не нужно |
+| `salamander` | **Runtime-only:** `password` < 4 байт (`smPSKMinLen`) — `NewSalamanderObfuscator` отказывает при создании listener/dialer; `xray run -test` не видит. Gecko (`packetSize`) режет и добивает до размера только QUIC long-header (handshake) пакеты на 2–8 фрагментов; short-header идут как есть |
+| `sudoku` | `Build()` не проверяет ничего. **Runtime-only:** `ascii` ∉ {`""`, `entropy`, `prefer_entropy`, `ascii`, `prefer_ascii`} (trim, без учёта регистра) и custom table не из 8 символов «2 x, 2 p, 4 v» (пробелы и регистр игнорируются) — `getTables` падает: на `tcp[]` на **каждом соединении**, на `udp[]` при создании listener/dialer. В ASCII-раскладке таблицы не читаются; `customTables` скрывает `customTable`; padding: каждое соединение выбирает шанс между `paddingMin` и `paddingMax` (> 100 → 100, max < min → min) |
+| `xicmp` | `dgram` — только клиент (unprivileged ICMP); сервер всегда raw. `ips`: у клиента — адреса сервера (случайный), пусто — адрес outbound (домен без `ips` — ошибка дозвона); у сервера — фильтр источников (пусто — все) |
+
+## 77.2	Модель
+
+`stream/finalmask_layers.rs`:
+
+- `FRAGMENT_PACKETS_TLSHELLO`, `FragmentPackets {All, TlsHello, Range{from,to}}`,
+  `fragment_packets_mode(packets)` / `FragmentMaskSettings::packets_mode()`,
+  `FragmentMaskSettings::merges_tls_records()` (зеркало `mergeTlsHelloSegments`).
+- `NoiseItemPayload {Exp, Rand, Packet, Empty}`, `NoiseMaskItem::payload()` — как `buildPacket`;
+  `None` при `packet` + `rand` (ошибка `Build()`).
+- `SALAMANDER_MIN_PASSWORD_BYTES` = 4; `validate_salamander_settings` — после проверки
+  `packetSize` (ошибка `Build()` раньше runtime) проверяет длину пароля в байтах.
+- `SUDOKU_ASCII_MODES`, `SUDOKU_MAX_PADDING`; `SudokuSettings::{prefers_ascii, custom_patterns,
+  effective_padding}`; `validate_sudoku_custom_table` (порядок проверок как `normalizeCustomTable`),
+  `validate_sudoku_settings`. Диспетчер `validate_finalmask_layer`: `sudoku` в обоих массивах.
+
+## 77.3	GUI
+
+`gui/pages/stream_finalmask.rs`:
+
+- Help по **типу** слоя — кнопка рядом с выбором `type` (`finalmask_type_help(chain, type)`; у
+  `header-custom` свой текст для `tcp`/`udp`; тип чужого массива — без help).
+- `fragment` (получил `StreamDirection`): ComboBox `packets` — «(every write)» / `tlshello` /
+  «range» (выбор range начинает с `1-3`, текст правится рядом; значение с диска вроде `TLSHello`
+  показывается как есть); help на все поля и списки; строка-пояснение `fragment_notes` (что
+  режется на этой стороне, склейка записей `tlshello`, `FROM > TO` — оранжевым, `length`/`delay`
+  при заданных списках — «not used»).
+- `noise`: help на `reset`; items с Up/Down/Remove; общий с `header-custom` редактор пакета —
+  `packet_kind_combo(kinds, kind, packet)` + `packet_text_edit(kind, packet)` (бывшие
+  `header_custom_packet_*`), для `noise` типы `array`/`str`/`hex`/`base64`/`exp`; смена типа
+  перечитывает текст; `str` — с экранированием, `exp` — подсказка выражения; строка-пояснение
+  `noise_item_note` («Sends 8-16 random bytes, values 0-255 · then waits 10 ms», пустая
+  датаграмма, «rand / randRange are not used with exp»).
+- `salamander`: счётчик «N bytes · at least 4» (оранжевый при нехватке), подсказка
+  `packetSize`, строка режима (Salamander / Gecko с диапазоном).
+- `sudoku`: ComboBox `ascii` («(entropy)», `entropy`, `ascii`; `prefer_*` с диска — как есть),
+  inline-ошибка `customTable` (только в entropy-раскладке), `sudoku_notes` (таблицы в ASCII,
+  `customTable` под `customTables`, фактический padding).
+- `xicmp` (получил `StreamDirection`): help на `dgram`/`ips`, `dgram` на inbound — оранжевое
+  «ignored», пояснение смысла `ips` по стороне.
+
+## 77.4	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Модель, валидация | `xray/config/stream/finalmask_layers.rs` |
+| Диспетчер, реэкспорт | `xray/config/stream/{finalmask,mod}.rs`, `xray/config/mod.rs`, `xray/mod.rs` (+ `NOISE_EXP_KIND`) |
+| Формы, help | `gui/pages/stream_finalmask.rs` |
+| Fixtures | `valid/sudoku_custom_tables.json` (обе стороны), `invalid/sudoku_custom_table.json`, `invalid/sudoku_ascii_mode.json`, `invalid/salamander_short_password.json` (обе стороны) — все `runtime`; пароли в `valid/both_chains.json`, `invalid/salamander_packet_size.json` удлинены |
+
+## 77.5	Тесты
+
+- `stream::finalmask_layers` (+3, 1 расширен): `fragment_packets_mode` и склейка записей; `payload`
+  noise-item; `sudoku` — режимы `ascii`, таблицы (пробелы/регистр, legacy-ключ, `customTables`
+  скрывает `customTable`, ASCII не читает таблицы), `effective_padding`; `salamander` — длина
+  пароля в байтах (`"äö"` = 4).
+- `stream::finalmask` (+3 случая в диспетчере), fixtures (+6 случаев).
+- GUI (+4, 1 расширен): help у каждого документированного типа в своём массиве; `fragment_notes`,
+  `noise_item_note`, `sudoku_notes`; показ форм не переписывает `settings` (`TLSHello`, `3-1`,
+  `EXP`, `randRange` при `exp`, `Prefer_ASCII`, `paddingMin: 200`, `dgram` на inbound,
+  короткий пароль salamander).
+- Итог: 1243 passed / 9 pre-existing fixture failures; clippy lib 66 (без изменений).
+- Не проверено: паритет с реальным ядром (`XRAY_BIN`) — локального `xray` нет; GUI вручную не
+  запускался.
+
+# 78	FinalMask — этап 3.1: `quicParams` полностью (Roadmap §2.6)
+
+## 78.1	Сверка с ядром
+
+`XTLS/Xray-core@main` (b26a91d, 2026-09-30): `infra/conf/transport_finalmask.go`
+(`QuicParamsConfig`, 17 полей), `infra/conf/transport_internet.go` (`StreamConfig.Build()`, блок
+`quicParams`), `infra/conf/transport_method.go` (`Bandwidth.Bps()`), рантайм
+`transport/internet/{hysteria,splithttp}/{hub,dialer}.go`.
+
+| Поле | JSON-тип в ядре | `Build()` | Сторона |
+| ---- | --------------- | --------- | ------- |
+| `congestion` | string | lower-case; `""`/`reno`/`bbr`/`brutal`/`force-brutal`, иначе ошибка; `force-brutal` требует `brutalUp` > 0 | обе |
+| `bbrProfile` | string | lower-case; `""` (→ `standard`)/`conservative`/`standard`/`aggressive` | обе |
+| `brutalUp`, `brutalDown` | `Bandwidth` = **string** | `Bps()`; > 0 и < 65536 B/s — ошибка | обе (`brutalDown` сервер объявляет клиенту в заголовке `CCRX`) |
+| `brutalDisableLossCompensation`, `debug` | bool | — (`debug` ставит `HYSTERIA_*_DEBUG` на весь процесс) | обе |
+| 4 receive-окна | uint64 | > 0 и < 16384 — ошибка | обе |
+| `maxIdleTimeout` | int64 | ≠ 0 и вне 4–120 — ошибка | обе |
+| `keepAlivePeriod` | int64 | ≠ 0 и вне 2–60 — ошибка | **только dialer** |
+| `maxIncomingStreams` | int64 | ≠ 0 и < 8 — ошибка | обе (Hysteria-dialer не читает, XHTTP/3-dialer читает) |
+| `disablePathMTUDiscovery`, `disableGSO` | bool | — | обе |
+| `disableChromeParrot` | bool | — | **только dialer** |
+| `disableStatelessReset` | bool | — | **только hub** |
+
+`Bandwidth.Bps()`: trim + lower-case; число — префикс из цифр и `.` (`ParseFloat`), единица —
+остаток после trim: `""`/`b`/`bps`, `k`/`kb`/`kbps`, `m`/…, `g`/…, `t`/… — степени 1024, **биты**
+в секунду; результат `uint64(val*mul) / 8` байт в секунду. Отсюда: `"100 mbps"` = 13 107 200 B/s,
+минимум 65536 B/s = `"512 kbps"`; `1e6`, `-5`, `mbps`, `10 mib` — ошибки. Число вместо строки
+(`"brutalUp": 50000000`) ядро не принимает вовсе — ошибка `json.Unmarshal` в `Bandwidth string`.
+
+## 78.2	Модель
+
+`stream/quic_params.rs`:
+
+- `QuicParamsDraft` — все 17 полей: строки (`congestion`, `bbrProfile`, `brutalUp`/`brutalDown`),
+  `Option<bool>` (6 флагов), `Option<u64>` (4 окна), `Option<i64>` (`maxIdleTimeout`,
+  `keepAlivePeriod`, `maxIncomingStreams`) + `extras`. Явные `0`/`false` на диске остаются явными.
+- **Без потерь:** известный ключ типизируется, только если его JSON-тип принимает ядро
+  (`KNOWN_FIELDS` + `FieldKind::accepts`); `null`, число вместо строки, float/отрицательное окно,
+  строка вместо числа — остаются в `extras` и пишутся обратно как есть. До 0.5.30 числовой
+  `brutalUp` молча превращался в строку — это меняло форму и скрывало ошибку ядра.
+- `QuicParamsDraft::mistyped_keys()` — такие ключи (не `null`, не перекрытые типизированным
+  значением); `remove_mistyped()` — убрать их.
+- `quic_bandwidth_bytes_per_sec` — порт `Bps()`; `validate_quic_params` — проверки `Build()` в
+  том же порядке (сначала mistyped, затем `bbrProfile`, rates, `congestion`, окна, таймауты,
+  `maxIncomingStreams`) по значениям, которые будут записаны (строки — после trim).
+- Константы `QUIC_CONGESTION_MODES`, `QUIC_BBR_PROFILES`, `QUIC_MIN_BRUTAL_BYTES_PER_SEC`,
+  `QUIC_MIN_RECEIVE_WINDOW`, `QUIC_MAX_IDLE_TIMEOUT_RANGE`, `QUIC_KEEP_ALIVE_PERIOD_RANGE`,
+  `QUIC_MIN_INCOMING_STREAMS`; применимость по стороне — `INBOUND_ONLY_QUIC_PARAMS_FIELDS`,
+  `OUTBOUND_ONLY_QUIC_PARAMS_FIELDS`, `quic_params_field_applies` (как у `sockopt`, §63).
+- `apply_inbound_stream`: при `write_quic_params` — `validate_quic_params` до записи, ошибка с
+  префиксом `streamSettings.finalmask.`. `write_quic_params` ставится при чтении любого
+  объекта `quicParams`, поэтому Save inbound'а с невалидным для ядра `quicParams` на диске
+  блокируется — так же, как его отверг бы `xray run -test`.
+
+## 78.3	GUI
+
+`gui/pages/stream_finalmask.rs` — `show_quic_params_edit(ui, direction, draft)`:
+
+- `congestion`, `bbrProfile` — `optional_string_combo` (пресеты + свободный текст, значение с
+  диска вроде `BBR` показывается как есть).
+- `brutalUp`/`brutalDown` — текст + пересчёт «= N B/s (≈ X MiB/s)» (оранжевым ниже минимума)
+  или ошибка разбора.
+- Флаги — `optional_flag_combo` («(default: false)» / `false` / `true`).
+- Числа — `optional_number_field`: текстовый буфер, переживающий кадры egui (§62.4), ключ — от
+  корневого id редактора; непарсящийся текст не трогает модель и подсвечивается.
+- Поле, не действующее на этой стороне (`keepAlivePeriod`/`disableChromeParrot` на inbound),
+  получает строку только пока задано, с пометкой «client-only — ignored on an inbound».
+- Под сеткой: mistyped-ключи + кнопка «Remove invalid values», иначе «Save will be rejected: …».
+- Help на каждое поле и на секцию.
+
+## 78.4	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Модель, валидация | `xray/config/stream/quic_params.rs` |
+| Реэкспорт | `xray/config/stream/mod.rs`, `xray/config/mod.rs`, `xray/mod.rs`, `xray/config/inbound_stream/mod.rs` |
+| Валидация при Save | `xray/config/inbound_stream/mod.rs` (`apply_inbound_stream`) |
+| Форма, help | `gui/pages/stream_finalmask.rs`; вызов — `gui/pages/inbounds.rs` (Stream tab, Hysteria) |
+
+## 78.5	Тесты
+
+- `stream::quic_params` (7, было 2): round-trip всех 17 полей; mistyped/`null` остаются в
+  `extras` без изменений; типизированное значение перекрывает extra, `remove_mistyped`; trim и
+  пропуск пустых строк; `Bps()` (единицы, регистр, `.5m`, `5.`, ошибки); валидация — 8 валидных и
+  16 невалидных случаев; применимость по стороне.
+- `inbound_stream` (+1): полный `quicParams` переживает Save; `force-brutal` без `brutalUp` и
+  числовой `brutalUp` отклоняются.
+- GUI (+2): показ формы (невалидные, mistyped, чужая сторона; обе стороны) не меняет draft;
+  недопечатанное число (`-`) переживает кадр, модель не меняется.
+- Итог: 1251 passed / 9 pre-existing fixture failures; clippy lib 66 (без изменений).
+- Не проверено: паритет с реальным ядром (`XRAY_BIN`) — локального `xray` нет; fixtures для
+  `quicParams` не заведены (корпус §72 — только слои `tcp[]`/`udp[]`); GUI вручную не запускался.
+
+# 79	FinalMask — этап 3.2: legacy `quicParams.udpHop` (Roadmap §2.6)
+
+## 79.1	Сверка с ядром
+
+`XTLS/Xray-core` #6327 (18a1b50, v26.9.9) и `@main`: до него — `QuicParamsConfig.UdpHop
+{ports PortList, interval Int32Range}` (`infra/conf`), `Build()` проверял `interval` ≥ 5 (кроме 0);
+читал его **только** `hysteria/dialer.go`: при пустом `ports` hopping выключен; иначе dial на
+случайный порт из `ports`, затем каждые `interval` с (по умолчанию 30, `hysteria/udphop`) —
+**новый локальный сокет** к случайному порту списка. Listener (`hub.go`) `udpHop` не читал никогда.
+После #6327 — маска `udphop` (`finalmask/udphop`): `intervalLocal` — новый сокет на каждом hop,
+`intervalRemote` — новый адрес/порт из `remoteIPs`/`remotePorts` на каждом hop и при первом
+dial; `interval` 0/пусто → 30, From < 5 — ошибка. Маска с `HandleDial()` (`udphop`, `xicmp`)
+допустима только в `udp[0]` (`FinalMask.DialUDP`: «incorrect index»); Hysteria-dialer идёт через
+`FinalMask.DialUDP`.
+
+Отсюда эквивалент: `{"type": "udphop", "settings": {"mode": "intervalLocal,intervalRemote",
+"remotePorts": ports, "interval": interval}}` в `udp[0]`, `remoteIPs` пусто (адрес сервера из
+dial, как раньше). **Отступление от формулировки Roadmap:** на inbound «миграция в `udphop`»
+создала бы client-only слой, с которым UDP-listener не стартует (`UdpHopClientOnly`, §68), а
+сам `udpHop` там мёртв на любом ядре — поэтому на inbound миграция = удаление ключа.
+
+## 79.2	Модель
+
+`stream/quic_params.rs`:
+
+- `QUIC_PARAMS_LEGACY_UDP_HOP_KEY`, `LEGACY_UDP_HOP_MODE`, `DIAL_HANDLING_UDP_FINALMASK_TYPES`
+  (`udphop`, `xicmp`); `QuicParamsDraft::{has_legacy_udp_hop, remove_legacy_udp_hop}` (`udpHop`
+  не входит в `KNOWN_FIELDS` — лежит в `extras`, Save не блокирует).
+- `udphop_layer_from_legacy_udp_hop(&Value)` → `Ok(None)` для `null`/без `ports` (старый dialer
+  не прыгал), иначе слой + `dropped_keys` (ключи кроме `ports`/`interval`, ядро их не читало);
+  `ports`/`interval` переносятся в своей JSON-форме (`PortListValue`/`RangeValue`); не-объект,
+  `ports` массивом, `interval` float — ошибка.
+- `migrate_legacy_udp_hop(quic, udp_layers, direction) -> Result<LegacyUdpHopMigration, String>`
+  (явное действие пользователя; при ошибке ничего не меняется): Inbound — удаление
+  (`RemovedServerSide`, форма значения не важна); Outbound — без `ports` удаление
+  (`RemovedInactive`), иначе слой в `udp[0]` (`Migrated { dropped_keys }`); если в цепочке уже
+  есть `udphop`/`xicmp` — ошибка «only one dial-handling mask».
+
+## 79.3	Предупреждения
+
+`compatibility/warnings.rs`: новое `QuicParamsUdpHopClientOnly` — inbound, **любая** версия ядра
+(раньше inbound получал версионное `QuicParamsUdpHopIgnored` и на ядре < v26.9.9 молчал).
+`QuicParamsUdpHopIgnored` остаётся для outbound (ядро ≥ v26.9.9 / неизвестно), текст указывает
+на «Migrate udpHop».
+
+| Конфиг | Ядро < v26.9.9 | ≥ v26.9.9 / неизвестно |
+| ------ | -------------- | ---------------------- |
+| `quicParams.udpHop`, inbound | `QuicParamsUdpHopClientOnly` | `QuicParamsUdpHopClientOnly` |
+| `quicParams.udpHop`, outbound | — | `QuicParamsUdpHopIgnored` |
+
+## 79.4	GUI
+
+`gui/pages/stream_finalmask.rs` — `show_legacy_udp_hop` под сеткой `show_quic_params_edit`:
+значение `udpHop` как есть (monospace); inbound — пояснение (client-side, никогда не действовал)
+и кнопка «Remove udpHop» (`migrate_legacy_udp_hop(…, Inbound)`, ставит dirty; на диск — при
+Save); outbound — только пояснение: кнопке нужна цепочка `finalmask.udp`, она появится с
+Outbound FinalMask-редактором (этап 7.1), модель готова.
+
+## 79.5	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Конвертация, миграция | `xray/config/stream/quic_params.rs` |
+| Реэкспорт | `xray/config/stream/mod.rs`, `xray/config/mod.rs`, `xray/mod.rs` |
+| Предупреждения | `xray/config/compatibility/warnings.rs` |
+| GUI | `gui/pages/stream_finalmask.rs` |
+
+## 79.6	Тесты
+
+- `stream::quic_params` (+3): конвертация в форме JSON (строка/число, `interval` отсутствует,
+  `dropped_keys`); без `ports`/`null` — `None`, плохие формы — ошибки; миграция по стороне
+  (inbound — удаление, цепочка не тронута; outbound — `udp[0]` перед другими масками;
+  `udphop`/`XICMP` где угодно в цепочке — отказ без изменений; outbound без `ports` —
+  `RemovedInactive`; битая форма — отказ на outbound, удаление на inbound).
+- `compatibility::warnings` (переписаны 4): inbound — `QuicParamsUdpHopClientOnly` на любом ядре,
+  outbound — версионное `QuicParamsUdpHopIgnored`.
+- GUI (1 расширен): показ формы с `udpHop` (валидным и битым) не меняет draft.
+- Итог: 1254 passed / 9 pre-existing fixture failures; clippy lib 66 (без изменений).
+- Не проверено: паритет с реальным ядром — локального `xray` нет; кнопка «Remove udpHop» не
+  нажималась в тестах (клик egui не симулируется), GUI вручную не запускался.
+- Найдено попутно (не исправлено): валидация Feldjäger не проверяет правило «dial-handling маска
+  только в `udp[0]`» для пользовательских цепочек (`udphop`/`xicmp` не первыми — отказ ядра при
+  dial, `xray run -test` не видит) — кандидат в этап 4.3.
+
+# 80	FinalMask — этап 3.3: `quicParams` для XHTTP/3 (Roadmap §2.6)
+
+## 80.1	Сверка с ядром
+
+`XTLS/Xray-core@main` (b26a91d): `transport/internet/splithttp/hub.go` (`ListenXH`, `QListener.Accept`),
+`splithttp/dialer.go` (`decideHTTPVersion`, QUIC dial), `infra/conf/common.go` (`StringList`),
+`infra/conf/transport_security.go` (`ALPN *StringList`).
+
+- XHTTP идёт поверх QUIC, когда TLS-конфиг даёт ALPN **ровно** `["h3"]`: listener —
+  `isH3 = len(NextProtos) == 1 && NextProtos[0] == "h3"` (только `tls`, Reality сюда не попадает),
+  dialer — `decideHTTPVersion` → `"3"` по тому же правилу. `alpn` — `StringList`: массив строк
+  или строка, разрезанная по `,` без trim (`"h3"` = `["h3"]`, `"h3,h2"` — не h3, `" h3"` — не h3).
+  Иначе XHTTP работает по TCP (h1.1/h2) и `quicParams` не читает.
+- `congestion` на XHTTP/3 (listener и dialer): `reno`; `""`/`bbr` → BBR (`bbrProfile`);
+  `force-brutal` → Brutal на `brutalUp`; **всё прочее — `panic`**. `Build()` допускает `brutal`
+  (он законен для Hysteria), поэтому `brutal` на XHTTP/3 проходит `xray run -test` и роняет
+  каждое соединение. Значение `congestion` ядро приводит к нижнему регистру.
+- `brutalDown` XHTTP/3 не читает (у Hysteria он едет в заголовке `CCRX` handshake'а).
+  Остальные поля — как у Hysteria (окна, `maxIdleTimeout`, `maxIncomingStreams`,
+  `disablePathMTUDiscovery`, `disableGSO`, `disableStatelessReset`; клиентские — dialer).
+
+Пункт Roadmap говорил «congestion только `bbr`/`force-brutal`»; по коду ядра допустим и `reno` —
+он оставлен.
+
+## 80.2	Модель
+
+`stream/quic_params.rs`:
+
+- `QuicTransport { Hysteria, XhttpH3 }`: `label`, `congestion_modes` (`QUIC_CONGESTION_MODES` /
+  `XHTTP3_CONGESTION_MODES` = reno, bbr, force-brutal), `default_congestion` (brutal / bbr),
+  `reads_field` (XHTTP/3 не читает `brutalDown`).
+- `alpn_selects_http3(&[String])` — правило «ровно `h3`» (для черновика security в GUI);
+  `quic_transport_of(&streamSettings)` — то же по JSON: `network`/`method` (`xhttp`/`splithttp`/
+  `hysteria`), `security: tls`, `tlsSettings.alpn` как `StringList`.
+- `validate_quic_params_for_transport(draft, transport)` = `validate_quic_params` + `congestion`
+  из списка транспорта; `validate_stream_quic_params(&streamSettings)` — то же по собранному JSON,
+  ошибка с префиксом `streamSettings.finalmask.`.
+- `modify.rs`: `check_inbound_quic_params` — после `compose_inbound_shell` в
+  `update_inbound_shell` и после сборки в `add_inbound` (метод stream и ALPN живут в разных
+  черновиках, поэтому проверка — по собранному inbound). Мутации клиентов её не вызывают.
+
+## 80.3	Предупреждения
+
+`compatibility/warnings.rs`: `QuicParamsUnusedTransport` — `finalmask.quicParams` (не `null`) на
+транспорте без QUIC (`quic_transport_of` = `None`: tcp/ws/grpc/mKCP, XHTTP не-h3, XHTTP с
+Reality), location `streamSettings.finalmask.quicParams`. Тестовые fixtures предупреждений о
+`udpHop`/`udphop` получили `network: hysteria`, чтобы проверять только своё.
+
+## 80.4	GUI
+
+- `show_quic_params_edit(ui, direction, transport, draft)`: метка транспорта у заголовка,
+  строка-пояснение (Hysteria — пустой `congestion` = brutal; XHTTP/3 — пустой = bbr, brutal не
+  поддерживается, `brutalDown` не используется); пресеты `congestion` по транспорту (`brutal` с
+  диска показывается как есть и даёт «Save will be rejected»); `brutalDown` на XHTTP/3 — строка
+  только если задан, с пометкой «not used on XHTTP/3»; проверка — `validate_quic_params_for_transport`.
+- `inbounds.rs`, Stream tab, XHTTP: при security `tls` и `alpn_selects_http3(tls.alpn)` —
+  редактор `quicParams` (`QuicTransport::XhttpH3`; для чужого `finalmask` — уведомление §64),
+  иначе серая подсказка, когда `quicParams` применяется. Hysteria — `QuicTransport::Hysteria`.
+
+## 80.5	Код
+
+| Область | Путь |
+| ------- | ---- |
+| Транспорт, проверки | `xray/config/stream/quic_params.rs` |
+| Реэкспорт | `xray/config/stream/mod.rs`, `xray/config/mod.rs`, `xray/mod.rs` |
+| Проверка при Save / Add | `xray/config/modify.rs` (`check_inbound_quic_params`) |
+| Предупреждение | `xray/config/compatibility/warnings.rs` |
+| GUI | `gui/pages/stream_finalmask.rs`, `gui/pages/inbounds.rs` |
+
+## 80.6	Тесты
+
+- `stream::quic_params` (+3): определение транспорта (method/`method`, регистр security,
+  `alpn` массивом и строкой, `h3,h2`/`" h3"`/`H3`/пусто/Reality/none/tcp — не QUIC);
+  XHTTP/3 — `brutal`/`Brutal` отклоняются, `""`/reno/BBR/force-brutal — нет, Hysteria принимает
+  `brutal`, общие правила идут первыми; проверка `streamSettings` только для QUIC-транспорта.
+- `compatibility::warnings` (+1, 4 fixtures с `network: hysteria`): `QuicParamsUnusedTransport`
+  для `{}`/tcp/XHTTP-h2/XHTTP-Reality, нет для Hysteria/XHTTP-h3/`splithttp` со строкой `"h3"`/`null`.
+- `modify_tests` (+1): Shell Save XHTTP/3 с `brutal` отклонён, inbound не изменён; `force-brutal`
+  без `brutalUp` отклонён; `reno` сохраняется; тот же `brutal` на XHTTP с `["h2"]` сохраняется.
+- GUI (1 расширен): показ формы для обоих транспортов не меняет draft (в т.ч. `brutal` +
+  `brutalDown`).
+- Итог: 1259 passed / 9 pre-existing fixture failures; clippy lib 66 (без изменений).
+- Не проверено: паритет с реальным ядром (локального `xray` нет), GUI вручную не запускался.
+- **Найдено попутно (исправлено в 0.5.32-1, §81):** черновик TLS (`inbound_security`,
+  `string_array`) читает `alpn` только массивом, а ключ `alpn` — известный, в `extras` не попадает;
+  строковая форма `StringList` (`"alpn": "h3"`) при Shell Save с черновиком security
+  **теряется** — XHTTP молча переходит с HTTP/3 на TCP. Save/предупреждения этого этапа строковую
+  форму распознают, GUI-редактор `quicParams` для неё не показывается.
+
+# 81	TLS `alpn` / `curvePreferences` как `StringList`; цвет выбранных тегов (bugfix 0.5.32-1)
+
+## 81.1	Проблема
+
+- **Потеря данных.** В ядре `tlsSettings.alpn` и `tlsSettings.curvePreferences` — `*StringList`
+  (`infra/conf/transport_security.go`): JSON-массив строк **или** строка, разрезанная по `,`
+  (`infra/conf/common.go`). Черновик TLS (`inbound_security`, `string_array`) читал только массив;
+  оба ключа — известные (`TLS_KNOWN_KEYS`), в `extras` не попадали, а `apply_security_tls` строит
+  `tlsSettings` заново. Итог: `"alpn": "h3"` при Shell Save с security исчезал — XHTTP молча
+  переходил с HTTP/3 на TCP (h2/h1.1), строковые `curvePreferences` сбрасывались к умолчанию ядра.
+  Найдено при этапе 3.3 (§80).
+- **GUI.** Выбранные значения мультивыбора (`string_tag_multi_select`: TLS `alpn`,
+  `curvePreferences`, Reality `alpn`) рисовались фиксированным `Color32::from_rgb(220, 220, 230)`.
+  Тема — `ThemeMode::System`; в светлой теме ОС почти белый текст на светлом фоне выглядел
+  неактивным.
+
+## 81.2	Исправление
+
+- `string_list(Option<&Value>)` — чтение `StringList`: строка режется по `,`, элементы trim, пустые
+  отбрасываются (как у массива в `string_array`); используется для TLS `alpn` и
+  `curvePreferences`.
+- `insert_string_list(object, key, values, previous)` — запись: если список черновика равен тому,
+  что читается из значения на диске (`string_list(previous)`), значение с диска пишется
+  **дословно** (строка остаётся строкой, исходное написание и даже неподдерживаемый тип —
+  без изменений); иначе — массив, как раньше (`insert_string_array`; пустой список — ключ
+  удаляется). `apply_security_tls` берёт `previous` из текущего `tlsSettings` до перезаписи.
+- `string_tag_multi_select`: тег — `RichText::strong()` (цвет `strong_text_color` текущей темы).
+  Серый `custom: …` в выпадающем списке — намеренная подсказка, не тронут.
+
+## 81.3	Тесты и замечания
+
+- `inbound_security` (+1): строковые и массивные формы `alpn`/`curvePreferences` (`"h3"`,
+  `"X25519,CurveP256"`, `"h2, http/1.1"`, `[" h3 ", ""]`, `""`, число) читаются и при Save без
+  правки остаются байт-в-байт; правка списка пишет массив; очистка удаляет ключ.
+- Итог: 1260 passed / 9 pre-existing fixture failures; clippy lib 66 (без изменений).
+- Не проверено: GUI вручную в светлой/тёмной теме не запускался.
+- Найдено попутно (исправлено в 0.5.32-2, §82): у `REALITYConfig` ядра (`infra/conf/transport_security.go`)
+  **нет** поля `alpn`, а Feldjäger моделирует `realitySettings.alpn` и требует его непустым при
+  fallbacks (`session_fallbacks_missing_alpn`, `active_alpn`) — ядро этот ключ не читает; нужна
+  отдельная сверка логики fallbacks + Reality с документацией и ядром.
+
+# 82	Fallbacks + REALITY: без требования ALPN, `realitySettings.alpn` не моделируется (bugfix 0.5.32-2)
+
+## 82.1	Сверка
+
+Источники: `XTLS/Xray-core@main` (b26a91d) — `infra/conf/transport_security.go` (`REALITYConfig`),
+`transport/internet/reality/config.go` (`GetREALITYConfig`), `proxy/vless/inbound/inbound.go`
+(выбор fallback), `infra/conf/{vless,trojan}.go`; библиотека `XTLS/REALITY` на закреплённом в
+`go.mod` коммите 8cdf7bf (`handshake_server_tls13.go`, `negotiateALPN`); документация
+[Fallback](https://xtls.github.io/en/config/features/fallback.html) и
+[REALITY](https://xtls.github.io/en/config/transports/reality.html).
+
+| Утверждение | Основание |
+| ----------- | --------- |
+| У REALITY нет настройки `alpn` | В `REALITYConfig` нет поля `alpn`; в документации REALITY — тоже (поля: `show`, `target`, `xver`, `serverNames`, `privateKey`, `minClientVer`, `maxClientVer`, `maxTimeDiff`, `shortIds`, `mldsa65Seed`, `limitFallback*`); Go `json.Unmarshal` молча игнорирует ключ |
+| REALITY-соединение не согласует ALPN | `GetREALITYConfig`: `NextProtos: nil, // should be nil`; `negotiateALPN(nil, …)` → `""` |
+| На REALITY срабатывают только fallbacks с пустым `alpn` | `inbound.go`: `alpn = realityConn.ConnectionState().NegotiatedProtocol` (всегда `""`), затем `apfb[""]`; запись с `alpn: "h2"` не выбирается никогда |
+| Ядро не требует ALPN для fallbacks | `VLESS/Trojan Build()` проверяют только `path`/`dest`/`decryption` |
+| Требование `tlsSettings.alpn` — из документации, **только для TLS** | Fallback docs: «When this item has child elements, [Inbound TLS] must set `"alpn":["http/1.1"]`»; для h2 — `["h2","http/1.1"]` |
+
+До 0.5.32-2 Feldjäger моделировал `realitySettings.alpn` (tag-виджет в форме REALITY), писал его в
+конфиг и блокировал Save REALITY-inbound'а с fallbacks, пока этот список пуст (`active_alpn`,
+`require_alpn_for_fallbacks`, `session_fallbacks_missing_alpn`) — заставлял записать ключ, который
+ядро не читает.
+
+## 82.2	Исправление
+
+- `inbound_security`: поле `RealitySettingsDraft::alpn` удалено, `alpn` убран из известных ключей
+  REALITY — значение с диска уходит в `extras` и сохраняется дословно (любая форма).
+  `REALITY_IGNORED_ALPN_KEY`, `RealitySettingsDraft::{has_ignored_alpn, remove_ignored_alpn}`;
+  `InboundSecurityDraft::active_alpn` заменён на `fallbacks_missing_alpn()` (только TLS с пустым
+  `tls.alpn`); `string_list` стал `pub(crate)`.
+- `inbound_fallbacks::require_alpn_for_fallbacks`: REALITY — `Ok`; TLS — непустой
+  `tlsSettings.alpn`, прочитанный как `StringList` (строковый `"http/1.1"` раньше считался
+  отсутствующим — тот же класс ошибки, что в §81); текст ошибки называет значения из документации.
+- Предупреждения (`compatibility/warnings.rs`, только при `security: reality`):
+  `RealityAlpnIgnored` на `streamSettings.realitySettings.alpn`;
+  `RealityFallbackAlpnNeverMatches` на `settings.fallbacks[i].alpn` с непустым значением.
+- GUI (`inbounds.rs`): в форме REALITY нет ALPN-виджета; если ключ на диске — оранжевая строка
+  «not a REALITY setting — ignored by Xray-core» + кнопка «Remove alpn» (help
+  `HELP_REALITY_IGNORED_ALPN`); в просмотре — та же пометка. Save блокируется и баннер на вкладке
+  Security показывается только для TLS без ALPN (раньше баннер висел при любом TLS/REALITY с
+  fallbacks, даже с заданным ALPN). В редакторе fallbacks на REALITY у непустого `alpn` —
+  «never matches with REALITY (no ALPN negotiated)»; баннер секции и help `alpn` (TLS и fallback)
+  уточнены.
+
+Заменяет: §(Wave C2) «Reality: typed `realitySettings.alpn` … нужен для fallbacks gate» и
+«`require_alpn_for_fallbacks`: non-empty `tlsSettings.alpn` или `realitySettings.alpn`».
+
+## 82.3	Тесты
+
+- `inbound_security` (1 переписан, +1): REALITY не пишет `alpn`; `alpn` с диска (массив и строка)
+  сохраняется дословно, удаляется по запросу; `fallbacks_missing_alpn` — только TLS.
+- `inbound_fallbacks` (1 переписан, +1): REALITY с fallbacks без `alpn` проходит, inbound не
+  меняется; TLS со строковым `"http/1.1"` проходит, `" , "` — ошибка.
+- `compatibility::warnings` (+1): оба предупреждения на REALITY (fallback с `" "` не флагается),
+  ничего на TLS.
+- Итог: 1263 passed / 9 pre-existing fixture failures; clippy lib 66 (без изменений).
+- Не проверено: паритет с реальным ядром (локального `xray` нет), GUI вручную не запускался.
+
+# 83	FinalMask — этап 4.1: `finalmask.udp` для Hysteria, hy2 `obfs` из типизированной модели (Roadmap §2.6)
+
+## 83.1	Сверка с ядром
+
+`XTLS/Xray-core@main`: `transport/internet/hysteria/hub.go` (`Listen`), `finalmask/salamander/
+{config,conn}.go`, `finalmask/noise/{config,conn}.go`.
+
+- Hysteria-листенер берёт `streamSettings.FinalMask.ListenPacket(…)`, если FinalMask задан, иначе
+  `ListenSystemPacket` — т.е. к нему применяется **только** `finalmask.udp`; `finalmask.tcp`
+  ядро для Hysteria не использует никогда.
+- `salamander` без `packetSize` — `salamanderConn` (XOR с BLAKE2b-ключом + соль), совместим с
+  `obfs=salamander` клиентов Hysteria2. С `packetSize` (верхняя граница > 0) — `GeckoConfig` →
+  `geckoConn`: QUIC long-header пакеты режутся на фреймы со своим заголовком и паддингом;
+  обычный salamander-клиент такие пакеты не соберёт.
+- `noise`: `ReadFrom` — сквозной, действует только `WriteTo` → клиенту ответный слой не нужен.
+
+## 83.2	Модель
+
+`stream/finalmask.rs`: `hysteria_salamander_obfs_password(&inbound Value)` (read-only детект по
+raw JSON, «редактора для Hysteria нет», §3:121) заменена на
+`hy2_share_obfs(&[FinalMaskLayerDraft]) -> Result<Option<String>, String>` по типизированным
+слоям редактора:
+
+- слои `noise` пропускаются; оставшихся нет → `Ok(None)` (ссылка без `obfs`);
+- ровно один `salamander` с непустым `password` и без Gecko → `Ok(Some(password))`;
+- Gecko, другой тип слоя, больше одного «зеркального» слоя, нечитаемые/пустые настройки →
+  `Err(причина)`: hy2-ссылка описывает всю клиентскую сторону цепочки, и вместо ссылки,
+  клиент которой не подключится, Share выключается, а причина показывается предупреждением
+  (решение пользователя 2026-10-04, 0.5.33-1; §83.3–83.4).
+
+Запись `finalmask.udp` для Hysteria уже поддерживалась `apply_inbound_stream` (метод-независимо);
+doc-комментарии `InboundStreamDraft.finalmask_tcp/udp` обновлены.
+
+## 83.3	Share
+
+`ApplicationService::build_client_share_uri`: для Hysteria `obfs` = `hy2_share_obfs(
+stream_draft.finalmask_udp)`, где `stream_draft` — черновик открытой сессии редактора (если
+редактируется этот inbound) или разбор с диска, т.е. ссылка отражает типизированный редактор.
+`finalmask.udp` на диске (не `null`), который типизированная модель не прочла
+(`write_finalmask_udp == false`, напр. слой без `type`), даёт `Err` — не «ссылку без obfs».
+Для VLESS/Trojan `obfs` не вычисляется.
+
+Общий приватный хелпер `hysteria_share_obfs(on_disk: Option<&Value>, stream)` (проверка
+нечитаемой цепочки + `hy2_share_obfs`) используется тремя путями, поэтому причина везде одна:
+
+- `build_client_share_uri` — `Err(причина)`;
+- `hy2_share_blocked_reason(inbound_index) -> Option<String>` — для страницы Users: только
+  `protocol: hysteria`, черновик открытой сессии этого inbound важнее диска (как в Share);
+- `editor_hy2_share_blocked_reason() -> Option<String>` — для Stream-таба: черновик текущей
+  сессии (метод Hysteria), в т.ч. Add-сессии (`on_disk = None`).
+
+## 83.4	GUI
+
+- `show_finalmask_edit(…, udp_only: bool)`: при `udp_only` цепочка `tcp` скрыта, пока пуста;
+  непустая с диска показывается с жёлтой пометкой «Xray-core never applies finalmask.tcp layers
+  to it… remove them if they are leftovers» (GUI не прячет конфигурацию, `rules.md`).
+- `inbounds.rs`, Stream tab: условие показа FinalMask `method != Hysteria && vless|trojan` →
+  `vless|trojan|hysteria`; `udp_only = method == Hysteria`. Для чужого `finalmask` уведомление
+  уже показано Hysteria-веткой (вместо `quicParams`) — секция не дублируется. Клиентские маски
+  (`udphop`) по-прежнему не предлагаются для inbound (`finalmask_layer_type_applies`).
+- `HELP_FINALMASK_SECTION`: у Hysteria применяется только `udp[]`; когда salamander попадает в
+  hy2-ссылку как `obfs`.
+- Импорт hy2 (`obfs=salamander` → слой `salamander` в `finalmask_udp`) не менялся.
+
+Причина недоступного Share видна, а не только во всплывающей подсказке (0.5.33-1):
+
+- Stream tab (Hysteria), под цепочками FinalMask: «Share links (hy2://) are disabled: …» по
+  `editor_hy2_share_blocked_reason()`. Запрос идёт после правок кадра: заимствование сессии
+  заканчивается перед ним и берётся заново для Sockopt.
+- Users, раздел Hysteria, над таблицей: «Share links are disabled for this inbound: …» по
+  `hy2_share_blocked_reason(selected_inbound_index)` — цепочка решает за весь inbound.
+- Контекстное меню клиента (VLESS/Trojan/Hysteria): три одинаковых блока Share заменены
+  `show_share_menu_items` — при `Err` кнопки неактивны (подсказка осталась) и под ними строка
+  «Share unavailable: …» (ширина ограничена 320 px); `SHARE_WARNING_COLOR` — тот же янтарный.
+
+## 83.5	Код
+
+| Область | Путь |
+| ------- | ---- |
+| `hy2_share_obfs` | `xray/config/stream/finalmask.rs` |
+| Реэкспорт | `xray/config/stream/mod.rs`, `xray/config/inbound_stream/mod.rs`, `xray/config/mod.rs`, `xray/mod.rs` |
+| Share, причины | `app/service.rs` (`build_client_share_uri`, `hysteria_share_obfs`, `hy2_share_blocked_reason`, `editor_hy2_share_blocked_reason`) |
+| GUI | `gui/pages/stream_finalmask.rs`, `gui/pages/inbounds.rs`, `gui/pages/users.rs` |
+
+## 83.6	Тесты
+
+- `stream::finalmask` (4 удалены вместе со старой функцией, +3): plain salamander (регистр типа);
+  пусто / только `noise` / `noise` + salamander; Gecko отклонён, `packetSize: 0` — plain,
+  `sudoku`, два слоя, без пароля — отклонены.
+- `app::service` (+1): hy2 Share из конфига — `noise`+salamander → `obfs=salamander&obfs-password=`,
+  `[]` → без `obfs`, Gecko → `Err`, слой без `type` → `Err` «can't be read»; та же причина из
+  `hy2_share_blocked_reason` / `editor_hy2_share_blocked_reason`, черновик сессии важнее диска,
+  нет сессии / нет inbound → `None`.
+- Итог: 1263 passed / 9 pre-existing fixture failures (`tests/fixtures` отсутствует); clippy lib
+  66 (без изменений).
+- Проверено на ядре (0.5.33-2, §84): правила `hy2_share_obfs` подтверждены живым Hysteria-
+  соединением Xray 26.9.30. GUI вручную не запускался.
+- **Попутно (bugfix):** в 5 пользовательских строках (`compatibility/warnings.rs`
+  `QuicParamsUdpHopClientOnly`/`QuicParamsUnusedTransport`, `stream_sockopt.rs`
+  `sockopt_scope_note` ×2, `inbound_stream/mod.rs` ошибка чужого `finalmask`) продолжение строки
+  `\`+перевод строки было потеряно — в тексте стояли длинные серии пробелов; восстановлено.
+
+# 84	Тесты против локального Xray: интероп Hysteria `finalmask.udp` (0.5.33-2)
+
+## 84.1	Локальный бинарник
+
+`xray/local_xray.rs` (`#[cfg(test)]`; до 0.5.33-3 — `config/stream/local_xray.rs`, §85): `local_xray_bin()` — `XRAY_BIN`, иначе
+`xray-bin/xray(.exe)` в корне крейта, если файл есть; иначе `None`, и тесты против ядра —
+no-op (чистый клон и CI зелёные). `xray-bin/` добавлен в `.gitignore` — каждый кладёт свою сборку.
+Паритет-тест `finalmask_fixtures::parity_with_xray_run_test` (§2.6 этап 1.5) переведён на этот
+хелпер: раньше он требовал `XRAY_BIN`, теперь подхватывает и `xray-bin`. С Xray 26.9.30
+(b26a91d) — все кейсы совпадают, ни одного пропуска по версии.
+
+## 84.2	Интероп `hy2_share_obfs` (`stream/finalmask_interop.rs`)
+
+`hy2_share_obfs_matches_the_core`: правила §83.2 — утверждения о ядре, поэтому проверяются живым
+соединением, а не `xray run -test` (тот принимает любую из этих цепочек). На каждый прогон:
+Hysteria-сервер с цепочкой `finalmask.udp` → Freedom → TCP echo-сервер теста; Hysteria-клиент
+с цепочкой, которую подразумевает hy2-ссылка (один plain `salamander` из `obfs`, как строит
+импорт hy2, или ничего) + `tunnel`-inbound перед ним. Тест шлёт байты в `tunnel` и ждёт эха.
+
+| Цепочка сервера | `hy2_share_obfs` | Клиент | Ожидание |
+| --------------- | ---------------- | ------ | -------- |
+| — | `Ok(None)` | — | эхо |
+| salamander | `Ok(Some)` | salamander | эхо |
+| noise → salamander, salamander → noise | `Ok(Some)` | salamander | эхо (`noise` клиенту не нужен) |
+| salamander + `packetSize` (Gecko) | `Err` | ссылка до 4.1: plain salamander | нет эха |
+| sudoku → salamander | `Err` | ссылка до 4.1: plain salamander | нет эха |
+| контроль: Gecko | — | тот же Gecko | эхо (сам Gecko рабочий) |
+| контроль: salamander | — | — | нет эха (маска действует) |
+
+- Ожидание для `Ok`/`Err` берётся из самой `hy2_share_obfs`, т.е. тест проверяет функцию, а не
+  копию её правил. Для `Err` клиент строится так, как ссылку собирал read-only детектор до 4.1
+  (первый salamander, любой режим) — отказ должен быть оправдан.
+- Контроли не дают сломанному окружению выглядеть как «правильно отказано».
+- «Нет эха» не путается с отвергнутым конфигом: если процесс `xray` завершился, тест падает с
+  его выводом (`assert_running`).
+- TLS — только из бинарника (`rules.md`: криптоматериал генерирует официальный Xray):
+  `xray tls cert -domain=hy.test` (certificate/key inline), пин клиента `pinnedPeerCertSha256` —
+  `xray tls hash`; попутно `cert_pin_sha256` (hy2 `pinSHA256`) сверяется с `xray tls hash`.
+- Найдено при прототипировании: Freedom в 26.9.30 по умолчанию блокирует приватные цели
+  («blocked target … blackholing»), поэтому у серверного Freedom `finalRules` allow `127.0.0.1`.
+  `allowInsecure` ядро отвергает как removed feature (→ `pinnedPeerCertSha256`).
+- Прогоны параллельны (`thread::scope`, свои порты): ~4,7 с вместо ~30 с (отказ = таймаут эха 4 с).
+- Мутационная проверка: если `hy2_share_obfs` перестаёт отказывать Gecko, тест падает —
+  «Gecko salamander: link: expected an echo, got none» с обеими цепочками.
+
+## 84.3	Код и итог
+
+| Область | Путь |
+| ------- | ---- |
+| Поиск бинарника | `xray/local_xray.rs` (с 0.5.33-3) |
+| Интероп Hysteria | `xray/config/stream/finalmask_interop.rs` |
+| Паритет `-test` | `xray/config/stream/finalmask_fixtures.rs` |
+| Объявления модулей | `xray/config/stream/mod.rs` |
+| Игнор бинарника | `.gitignore` |
+
+- Итог: 1264 passed / 9 pre-existing fixture failures (`tests/fixtures` отсутствует); clippy lib
+  66 (без изменений). С `xray-bin` полный `cargo test` дольше на ~5 с.
+
+# 85	Фикстуры тестов в отслеживаемых каталогах: 9 падающих тестов исправлены (0.5.33-3)
+
+## 85.1	Причина
+
+9 тестов (`config::tests` ×5, `remote_cli::{x25519,mldsa65,vlessenc}` ×4) читали файлы из
+`tests/fixtures/xray/` во время выполнения. Каталог `tests` целиком исключён в `.gitignore`:
+конфиги-фикстуры удалены из git коммитом `f072b6a` (вместе с этой строкой `.gitignore`), а
+CLI-фикстуры (`tests/fixtures/xray/cli/*.stdout.txt`) в git не попадали никогда. На любом клоне
+тесты падали с «failed to read fixture» / `unwrap` на `None`.
+
+## 85.2	Решение
+
+То же, что для корпуса FinalMask (Roadmap §2.6 этап 1.5): фикстуры рядом с кодом и
+`include_str!` — отсутствующий файл = ошибка компиляции, а не падающий тест; `.gitignore` не
+менялся.
+
+- `src/xray/config/fixtures/{minimal,with_unknown_sections,invalid,full_sample}.json` —
+  восстановлены побайтно из `f072b6a^` (фиктивные данные: нулевые UUID, example.com). В
+  `config/tests.rs`: макрос `read_fixture!` (= `include_str!`) для текстов; `fixture()` (путь
+  для `parse_path`) указывает на новый каталог. Ожидания тестов совпали со старыми файлами без
+  правок.
+- `src/xray/remote_cli/fixtures/*.stdout.txt` — сгенерированы официальным бинарником
+  (Xray 26.9.30, `rules.md`: криптоматериал — только от Xray): `xray x25519 -i <ключ из теста>`
+  и `xray mldsa65 -i <seed из теста>` детерминированы и дают ровно проверяемые значения;
+  `xray vlessenc` случаен — тест проверяет только структуру (вынесена в `assert_vlessenc_shape`).
+  Это тестовые ключи, на серверах не используются (отмечено в doc-комментариях).
+
+## 85.3	Проверка формата CLI на живом ядре
+
+`local_xray` перенесён из `config/stream/` в `xray/local_xray.rs` (`pub(crate)`, `#[cfg(test)]`),
+чтобы им пользовались и CLI-парсеры; добавлен `local_xray_stdout(args)` (`None` без бинарника,
+panic при ошибке команды). Новые тесты `parses_local_xray_output` в `x25519`/`mldsa65`/
+`vlessenc`: вывод локального `xray` с теми же входами разбирается и равен разбору фикстуры
+(vlessenc — та же проверка структуры). Ловят смену формата вывода ядра (например,
+`Password (PublicKey)` вместо `PublicKey`) и устаревшую фикстуру.
+
+## 85.4	Код и итог
+
+| Область | Путь |
+| ------- | ---- |
+| Конфиги-фикстуры | `xray/config/fixtures/*.json`, `xray/config/tests.rs` |
+| CLI-фикстуры | `xray/remote_cli/fixtures/*.stdout.txt`, `xray/remote_cli/{x25519,mldsa65,vlessenc}.rs`, `xray/remote_cli/mod.rs` (doc) |
+| Локальный Xray | `xray/local_xray.rs`, `xray/mod.rs`; ссылки в `config/stream/finalmask_{fixtures,interop}.rs` |
+
+- Итог: **1276 passed / 0 failed** (+3 живых теста CLI); без `xray-bin` тоже 1276 passed — тесты
+  против ядра пропускаются. clippy lib 66 (без изменений).
+
+# 86	Status Bar: уведомления до нажатия `×` (0.5.34-0)
+
+## 86.1	Проблема и решение
+
+Раньше `show_status_message` ставил `CurrentOperation::Message` на 3 с (`STATUS_MESSAGE_DURATION`),
+после чего `tick_status` возвращал `Ready`, и текст пропадал раньше, чем пользователь успевал его
+прочитать. Сделать сам `Message` бессрочным было нельзя: `FeldjaegerApp::logic` перерисовывает окно
+каждые 100 мс, пока `operation != Ready`, а несколько save-потоков показывают прогресс
+(«Saving DNS settings...») как раз через `Message`. Поэтому жизненный цикл `CurrentOperation`
+не менялся, а текст сообщения дублируется в отдельное поле.
+
+- `ApplicationService::status_notification: Option<String>` задаётся в `show_status_message`
+  вместе с `Message`; в GUI попадает через `StatusSnapshot::notification`.
+- `dismiss_status_message()` очищает уведомление, а если текущая операция — `Message`, ещё и
+  возвращает `Ready`. Busy-операции не затрагиваются.
+- Уведомление сбрасывается при `set_current_operation` / `clear_current_operation` (паттерн
+  «show "Loading…" → сразу clear» в `begin_edit_*` не оставляет зависшего «Loading…») и в
+  `tick_status`, когда `operation.is_busy()`: новая фоновая операция вытесняет старый результат,
+  и он не всплывает снова после её завершения.
+
+## 86.2	Отрисовка
+
+`status_bar::show` теперь возвращает `bool` («нажат `×`»); `FeldjaegerApp::ui` передаёт его в
+`dismiss_status_message()` (GUI → только `ApplicationService`). Порядок в зоне Current Operation:
+`Ready` + уведомление → текст уведомления (зелёный) + `×`; `Message` → текст + `×`; busy →
+метка + progress/spinner (как раньше); `Ready` без уведомления → «Ready». Кнопка —
+`small_button("×")`, тот же глиф, что уже используется на странице Inbounds.
+
+## 86.3	Код и итог
+
+| Область | Путь |
+| ------- | ---- |
+| Модель | `app/status.rs` (`StatusSnapshot::notification`) |
+| Сервис | `app/service.rs` (`status_notification`, `show_status_message`, `dismiss_status_message`, `tick_status`) |
+| GUI | `gui/status_bar.rs`, `gui/app.rs` |
+
+- Новый тест `status_notification_sticks_until_dismissed`. Итог: **1277 passed / 0 failed**,
+  clippy без новых предупреждений.
+
+# 87	Багфикс: busy-статус и ошибка worker-а при сохранении настроек (0.5.34-1)
+
+## 87.1	Симптомы
+
+Во всех 13 `start_save_*_settings` (DNS, FakeDNS, Routing, Policy, Observatory,
+BurstObservatory, Stats, Metrics, Env, Version, GeoData, API, Log) было:
+
+```rust
+self.operation = CurrentOperation::SavingDnsSettings;
+self.show_status_message("Saving DNS settings...");
+```
+
+Второй вызов сразу заменял busy-операцию на `CurrentOperation::Message` с тем же текстом
+(метки `Saving*Settings` в `CurrentOperation::label` совпадают побайтно). Последствия:
+
+- не было спиннера (`OperationProgress::Indeterminate` у `Saving*` не применялся);
+- через 3 с `Message` → `Ready`, и `FeldjaegerApp::logic` переставал перерисовывать окно с
+  частотой 10 Гц — результат долгого сохранения появлялся только после движения мыши;
+- в `poll_*_settings_mutation` ветка `TryRecvError::Disconnected` проверяла
+  `matches!(self.operation, Saving*Settings)`, а это условие никогда не выполнялось:
+  падение worker-а молча сбрасывало `rx` без ошибки в форме и Status Bar.
+
+## 87.2	Исправление
+
+- Удалён лишний `show_status_message("Saving … settings...")`, операция остаётся busy.
+- В ветке `Disconnected` проверка операции снята: раз ветка достигнута, `*_settings_rx` был
+  `Some`, то есть сохранение шло. Проверка была бы хрупкой и после первой правки — любое
+  `show_status_message` из GUI во время сохранения снова заменило бы операцию.
+
+## 87.3	Код и итог
+
+| Область | Путь |
+| ------- | ---- |
+| Сервис | `app/service.rs` (13 × `start_save_*` / `poll_*_settings_mutation`) |
+
+- Новый тест `settings_save_worker_crash_is_reported_even_after_other_message`. Итог:
+  **1278 passed / 0 failed**, clippy lib 66 (без изменений).

@@ -417,6 +417,9 @@ pub struct RoutingRuleEntry {
     pub attrs: Vec<(String, String)>,
     /// `process` match expressions (Windows/Linux only per the spec).
     pub process: Vec<String>,
+    /// `localOS` — rule only applies when Xray itself runs on one of the listed `runtime.GOOS`
+    /// values (`windows`/`linux`/`darwin`/`android`/`ios`/...), compared case-insensitively.
+    pub local_os: Vec<String>,
     /// `outboundTag` — target outbound. Per the docs, wins over `balancerTag` when both are set.
     pub outbound_tag: Option<String>,
     /// `balancerTag` — target balancer.
@@ -449,6 +452,7 @@ impl RoutingRuleEntry {
             protocol: Vec::new(),
             attrs: Vec::new(),
             process: Vec::new(),
+            local_os: Vec::new(),
             outbound_tag: None,
             balancer_tag: None,
             webhook: None,
@@ -502,6 +506,9 @@ impl RoutingRuleEntry {
         }
         if !self.process.is_empty() {
             object.insert("process".to_owned(), string_vec_to_value(&self.process));
+        }
+        if !self.local_os.is_empty() {
+            object.insert("localOS".to_owned(), string_vec_to_value(&self.local_os));
         }
         if let Some(outbound_tag) = &self.outbound_tag {
             object.insert("outboundTag".to_owned(), Value::String(outbound_tag.clone()));
@@ -605,6 +612,7 @@ const KNOWN_RULE_KEYS: &[&str] = &[
     "protocol",
     "attrs",
     "process",
+    "localOS",
     "outboundTag",
     "balancerTag",
     "webhook",
@@ -674,6 +682,7 @@ fn rule_from_object(
         protocol: string_array_field(object.get("protocol")),
         attrs: attrs_pairs(object.get("attrs")),
         process: string_array_field(object.get("process")),
+        local_os: string_array_field(object.get("localOS")),
         outbound_tag: string_field(object.get("outboundTag")),
         balancer_tag: string_field(object.get("balancerTag")),
         webhook,

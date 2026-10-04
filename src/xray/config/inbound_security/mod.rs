@@ -71,9 +71,8 @@ pub struct RealitySettingsDraft {
     pub limit_fallback_upload: Option<RealityLimitFallbackDraft>,
     /// `limitFallbackDownload` rate limit for unverified fallback traffic.
     pub limit_fallback_download: Option<RealityLimitFallbackDraft>,
-    /// `realitySettings.alpn` (required non-empty when fallbacks are present).
-    pub alpn: Vec<String>,
-    /// Unknown keys under `realitySettings` preserved on write.
+    /// Unknown keys under `realitySettings` preserved on write — including `alpn`, which is not a
+    /// REALITY setting (see [`REALITY_IGNORED_ALPN_KEY`]).
     pub extras: Map<String, Value>,
 }
 
@@ -114,9 +113,26 @@ impl Default for RealitySettingsDraft {
             max_time_diff: None,
             limit_fallback_upload: None,
             limit_fallback_download: None,
-            alpn: Vec::new(),
             extras: Map::new(),
         }
+    }
+}
+
+/// `realitySettings.alpn` — not a field of the core's `REALITYConfig` (`infra/conf/
+/// transport_security.go`) nor of the REALITY docs, so Xray-core ignores it: the REALITY server
+/// is built with `NextProtos: nil` (`transport/internet/reality/config.go`) and negotiates no
+/// ALPN at all. Kept on disk as an unknown key until the user removes it.
+pub const REALITY_IGNORED_ALPN_KEY: &str = "alpn";
+
+impl RealitySettingsDraft {
+    /// `true` while the ignored `realitySettings.alpn` is still in the draft.
+    pub fn has_ignored_alpn(&self) -> bool {
+        self.extras.contains_key(REALITY_IGNORED_ALPN_KEY)
+    }
+
+    /// Drops the ignored `realitySettings.alpn`; returns true when it was there.
+    pub fn remove_ignored_alpn(&mut self) -> bool {
+        self.extras.remove(REALITY_IGNORED_ALPN_KEY).is_some()
     }
 }
 
@@ -248,13 +264,11 @@ impl InboundSecurityDraft {
         !self.security_unknown
     }
 
-    /// Active ALPN list for the current security mode (empty for `none`).
-    pub fn active_alpn(&self) -> &[String] {
-        match self.mode {
-            InboundSecurityMode::Tls => &self.tls.alpn,
-            InboundSecurityMode::Reality => &self.reality.alpn,
-            InboundSecurityMode::None => &[],
-        }
+    /// Whether `settings.fallbacks` still need an ALPN list on this security: only TLS, where the
+    /// fallback docs require `tlsSettings.alpn` (`["http/1.1"]`, `["h2","http/1.1"]` for h2
+    /// fallbacks). REALITY negotiates no ALPN, so there is nothing to set.
+    pub fn fallbacks_missing_alpn(&self) -> bool {
+        self.mode == InboundSecurityMode::Tls && self.tls.alpn.is_empty()
     }
 }
 
@@ -359,7 +373,7 @@ fn parse_tls_settings(tls: &Map<String, Value>) -> TlsSettingsDraft {
         verify_peer_cert_by_name: string_field(tls.get("verifyPeerCertByName")),
         reject_unknown_sni: bool_field(tls.get("rejectUnknownSni")),
         allow_insecure: bool_field(tls.get("allowInsecure")),
-        alpn: string_array(tls.get("alpn")),
+        alpn: string_list(tls.get("alpn")),
         min_version: string_field(tls.get("minVersion")),
         max_version: string_field(tls.get("maxVersion")),
         cipher_suites: string_field(tls.get("cipherSuites")),
@@ -367,7 +381,7 @@ fn parse_tls_settings(tls: &Map<String, Value>) -> TlsSettingsDraft {
         enable_session_resumption: bool_field(tls.get("enableSessionResumption")),
         fingerprint: string_field(tls.get("fingerprint")),
         pinned_peer_cert_sha256: string_field(tls.get("pinnedPeerCertSha256")),
-        curve_preferences: string_array(tls.get("curvePreferences")),
+        curve_preferences: string_list(tls.get("curvePreferences")),
         master_key_log: string_field(tls.get("masterKeyLog")),
         enable_ech,
         ech_server_keys,
@@ -450,7 +464,6 @@ fn parse_reality_settings(reality: &Map<String, Value>) -> RealitySettingsDraft 
         "maxTimeDiff",
         "limitFallbackUpload",
         "limitFallbackDownload",
-        "alpn",
     ];
     for (key, value) in reality {
         if !known.contains(&key.as_str()) {
@@ -490,7 +503,6 @@ fn parse_reality_settings(reality: &Map<String, Value>) -> RealitySettingsDraft 
         max_time_diff: reality.get("maxTimeDiff").and_then(Value::as_u64),
         limit_fallback_upload: parse_limit_fallback(reality.get("limitFallbackUpload")),
         limit_fallback_download: parse_limit_fallback(reality.get("limitFallbackDownload")),
-        alpn: string_array(reality.get("alpn")),
         extras,
     }
 }
@@ -526,6 +538,45 @@ fn string_array(value: Option<&Value>) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The core's `StringList` (`tlsSettings.alpn`, `tlsSettings.curvePreferences`): a JSON array
+/// of strings, or one string split at `,` (`"h3"` = `["h3"]`, `"h2,http/1.1"`). Entries are
+/// trimmed and empty ones dropped, as [`string_array`] does for the array form. Before
+/// 0.5.32-1 only the array form was read, so a string value was lost on Save.
+pub(crate) fn string_list(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::String(text)) => text
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+            .collect(),
+        other => string_array(other),
+    }
+}
+
+/// Writes a `StringList` field: when `values` equal what the previous on-disk value reads as
+/// ([`string_list`]), that value is written back verbatim — its string / array shape and exact
+/// spelling survive a Save that did not touch the list; otherwise as [`insert_string_array`].
+fn insert_string_list(
+    object: &mut Map<String, Value>,
+    key: &str,
+    values: &[String],
+    previous: Option<&Value>,
+) {
+    let normalized: Vec<String> = values
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+    match previous {
+        Some(previous) if string_list(Some(previous)) == normalized => {
+            object.insert(key.to_owned(), previous.clone());
+        }
+        _ => insert_string_array(object, key, values),
+    }
 }
 
 fn insert_non_empty_string(object: &mut Map<String, Value>, key: &str, value: &str) {
@@ -649,6 +700,8 @@ fn apply_security_tls(inbound: &mut Value, tls: &TlsSettingsDraft) -> ConfigModi
     }
     stream.insert("security".to_owned(), Value::String("tls".to_owned()));
     stream.remove("realitySettings");
+    // `StringList` fields keep their on-disk form when the draft did not change them.
+    let previous = stream.get("tlsSettings").and_then(Value::as_object).cloned().unwrap_or_default();
 
     let mut object = Map::new();
     insert_non_empty_string(&mut object, "serverName", &tls.server_name);
@@ -659,7 +712,7 @@ fn apply_security_tls(inbound: &mut Value, tls: &TlsSettingsDraft) -> ConfigModi
     );
     insert_bool_true(&mut object, "rejectUnknownSni", tls.reject_unknown_sni);
     insert_bool_true(&mut object, "allowInsecure", tls.allow_insecure);
-    insert_string_array(&mut object, "alpn", &tls.alpn);
+    insert_string_list(&mut object, "alpn", &tls.alpn, previous.get("alpn"));
     insert_non_empty_string(&mut object, "minVersion", &tls.min_version);
     insert_non_empty_string(&mut object, "maxVersion", &tls.max_version);
     insert_non_empty_string(&mut object, "cipherSuites", &tls.cipher_suites);
@@ -675,7 +728,12 @@ fn apply_security_tls(inbound: &mut Value, tls: &TlsSettingsDraft) -> ConfigModi
         "pinnedPeerCertSha256",
         &tls.pinned_peer_cert_sha256,
     );
-    insert_string_array(&mut object, "curvePreferences", &tls.curve_preferences);
+    insert_string_list(
+        &mut object,
+        "curvePreferences",
+        &tls.curve_preferences,
+        previous.get("curvePreferences"),
+    );
     insert_non_empty_string(&mut object, "masterKeyLog", &tls.master_key_log);
 
     if tls.enable_ech {
@@ -796,7 +854,6 @@ fn apply_security_reality(
             limit_fallback_to_value(limit),
         );
     }
-    insert_string_array(&mut object, "alpn", &reality.alpn);
     for (key, value) in &reality.extras {
         if !object.contains_key(key) {
             object.insert(key.clone(), value.clone());
@@ -902,6 +959,51 @@ mod tests {
         assert!(parsed.tls.enable_ech);
         assert_eq!(parsed.tls.certificates[0].usage, "issue");
         assert!(parsed.tls.certificates[0].build_chain);
+    }
+
+    /// `alpn` / `curvePreferences` are the core's `StringList`: a string form is read (it used to
+    /// be dropped on Save) and every on-disk form survives a Save that leaves the list alone.
+    #[test]
+    fn tls_string_lists_are_read_in_both_forms_and_kept_verbatim_when_unchanged() {
+        let tls_inbound = |tls: Value| {
+            json!({"streamSettings": {"network": "xhttp", "security": "tls", "tlsSettings": tls}})
+        };
+        let cases = [
+            (json!({"alpn": "h3", "curvePreferences": "X25519,CurveP256"}), vec!["h3"], vec!["X25519", "CurveP256"]),
+            (json!({"alpn": "h2, http/1.1"}), vec!["h2", "http/1.1"], vec![]),
+            (json!({"alpn": [" h3 ", ""], "curvePreferences": ["X25519MLKEM768"]}), vec!["h3"], vec!["X25519MLKEM768"]),
+            (json!({"alpn": ""}), vec![], vec![]),
+            (json!({"alpn": 5}), vec![], vec![]),
+        ];
+        for (tls, alpn, curves) in cases {
+            let original = tls_inbound(tls.clone());
+            let draft = parse_inbound_security(&original);
+            assert_eq!(draft.tls.alpn, alpn, "{tls}");
+            assert_eq!(draft.tls.curve_preferences, curves, "{tls}");
+
+            let mut saved = original.clone();
+            apply_inbound_security(&mut saved, &draft).unwrap();
+            for key in ["alpn", "curvePreferences"] {
+                assert_eq!(
+                    saved["streamSettings"]["tlsSettings"].get(key),
+                    original["streamSettings"]["tlsSettings"].get(key),
+                    "{key} of {tls} was rewritten"
+                );
+            }
+        }
+
+        // An edited list is written as an array.
+        let original = tls_inbound(json!({"alpn": "h3"}));
+        let mut draft = parse_inbound_security(&original);
+        draft.tls.alpn.push("h2".to_owned());
+        let mut saved = original.clone();
+        apply_inbound_security(&mut saved, &draft).unwrap();
+        assert_eq!(saved["streamSettings"]["tlsSettings"]["alpn"], json!(["h3", "h2"]));
+        // Clearing it removes the key.
+        draft.tls.alpn.clear();
+        let mut cleared = original.clone();
+        apply_inbound_security(&mut cleared, &draft).unwrap();
+        assert!(cleared["streamSettings"]["tlsSettings"].get("alpn").is_none());
     }
 
     #[test]
@@ -1010,7 +1112,7 @@ mod tests {
     }
 
     #[test]
-    fn reality_strips_tls_and_writes_alpn() {
+    fn reality_strips_tls_and_writes_no_alpn() {
         let mut inbound = json!({
             "streamSettings": {
                 "security": "tls",
@@ -1024,7 +1126,6 @@ mod tests {
                 private_key: "k".into(),
                 server_names: vec!["www.example.com".into()],
                 short_ids: vec!["abcd".into()],
-                alpn: vec!["h2".into(), "http/1.1".into()],
                 ..Default::default()
             },
             ..Default::default()
@@ -1033,10 +1134,36 @@ mod tests {
         let stream = inbound.get("streamSettings").unwrap().as_object().unwrap();
         assert_eq!(stream.get("security").and_then(Value::as_str), Some("reality"));
         assert!(!stream.contains_key("tlsSettings"));
-        assert_eq!(
-            stream.get("realitySettings").unwrap().get("alpn"),
-            Some(&json!(["h2", "http/1.1"]))
-        );
+        assert!(stream.get("realitySettings").unwrap().get("alpn").is_none());
+    }
+
+    /// `realitySettings.alpn` is not a REALITY setting: kept verbatim as an unknown key (any
+    /// shape), removable on request; fallbacks need ALPN only on TLS.
+    #[test]
+    fn reality_alpn_is_an_ignored_extra_and_fallbacks_need_alpn_only_on_tls() {
+        for alpn in [json!(["h2", "http/1.1"]), json!("h2")] {
+            let original = json!({"streamSettings": {"security": "reality", "realitySettings": {
+                "target": "example.com:443", "privateKey": "k", "serverNames": ["example.com"],
+                "shortIds": [""], "alpn": alpn.clone()
+            }}});
+            let mut draft = parse_inbound_security(&original);
+            assert!(draft.reality.has_ignored_alpn());
+            let mut saved = original.clone();
+            apply_inbound_security(&mut saved, &draft).unwrap();
+            assert_eq!(saved["streamSettings"]["realitySettings"]["alpn"], alpn);
+
+            assert!(draft.reality.remove_ignored_alpn());
+            assert!(!draft.reality.remove_ignored_alpn());
+            let mut removed = original.clone();
+            apply_inbound_security(&mut removed, &draft).unwrap();
+            assert!(removed["streamSettings"]["realitySettings"].get("alpn").is_none());
+            assert!(!draft.fallbacks_missing_alpn());
+        }
+        let mut tls = InboundSecurityDraft { mode: InboundSecurityMode::Tls, ..Default::default() };
+        assert!(tls.fallbacks_missing_alpn());
+        tls.tls.alpn = vec!["http/1.1".into()];
+        assert!(!tls.fallbacks_missing_alpn());
+        assert!(!InboundSecurityDraft::default().fallbacks_missing_alpn());
     }
 
     #[test]

@@ -317,6 +317,18 @@ fn show_protocol_users_body(
                 selected_row,
             );
             ui.add_space(8.0);
+            // The FinalMask chain decides for the whole inbound, so the reason is shown once here
+            // and not only inside each row's context menu (Roadmap §2.6 stage 4.1).
+            if let Some(reason) = model
+                .selected_inbound_index
+                .and_then(|index| service.hy2_share_blocked_reason(index))
+            {
+                ui.label(
+                    RichText::new(format!("Share links are disabled for this inbound: {reason}"))
+                        .color(SHARE_WARNING_COLOR),
+                );
+                ui.add_space(6.0);
+            }
             if hysteria_rows.is_empty() {
                 ui.label(
                     RichText::new(UsersPageState::SelectedInboundHasNoUsers.message())
@@ -549,24 +561,7 @@ fn show_trojan_context_menu(
             );
             ui.close();
         }
-        match service.build_client_share_uri(row.inbound_index, row.client_index) {
-            Ok(uri) => {
-                if ui.button("Copy share URI").clicked() {
-                    ui.ctx().copy_text(uri.clone());
-                    ui.close();
-                }
-                if ui.button("Show QR code").clicked() {
-                    open_qr_dialog(ui, uri);
-                    ui.close();
-                }
-            }
-            Err(reason) => {
-                ui.add_enabled(false, egui::Button::new("Copy share URI"))
-                    .on_disabled_hover_text(reason.clone());
-                ui.add_enabled(false, egui::Button::new("Show QR code"))
-                    .on_disabled_hover_text(reason);
-            }
-        }
+        show_share_menu_items(ui, service, row.inbound_index, row.client_index);
         ui.separator();
         if ui.add_enabled(!busy, egui::Button::new("Edit")).clicked() {
             open_edit_trojan_dialog(ui, service, row);
@@ -671,24 +666,7 @@ fn show_hysteria_context_menu(
             );
             ui.close();
         }
-        match service.build_client_share_uri(row.inbound_index, row.client_index) {
-            Ok(uri) => {
-                if ui.button("Copy share URI").clicked() {
-                    ui.ctx().copy_text(uri.clone());
-                    ui.close();
-                }
-                if ui.button("Show QR code").clicked() {
-                    open_qr_dialog(ui, uri);
-                    ui.close();
-                }
-            }
-            Err(reason) => {
-                ui.add_enabled(false, egui::Button::new("Copy share URI"))
-                    .on_disabled_hover_text(reason.clone());
-                ui.add_enabled(false, egui::Button::new("Show QR code"))
-                    .on_disabled_hover_text(reason);
-            }
-        }
+        show_share_menu_items(ui, service, row.inbound_index, row.client_index);
         ui.separator();
         if ui.add_enabled(!busy, egui::Button::new("Edit")).clicked() {
             open_edit_hysteria_dialog(ui, service, row);
@@ -825,24 +803,7 @@ fn show_user_context_menu(
                 .copy_text(row.flow.clone().unwrap_or_else(|| MISSING_FIELD.to_owned()));
             ui.close();
         }
-        match service.build_client_share_uri(row.inbound_index, row.client_index) {
-            Ok(uri) => {
-                if ui.button("Copy share URI").clicked() {
-                    ui.ctx().copy_text(uri.clone());
-                    ui.close();
-                }
-                if ui.button("Show QR code").clicked() {
-                    open_qr_dialog(ui, uri);
-                    ui.close();
-                }
-            }
-            Err(reason) => {
-                ui.add_enabled(false, egui::Button::new("Copy share URI"))
-                    .on_disabled_hover_text(reason.clone());
-                ui.add_enabled(false, egui::Button::new("Show QR code"))
-                    .on_disabled_hover_text(reason);
-            }
-        }
+        show_share_menu_items(ui, service, row.inbound_index, row.client_index);
 
         ui.separator();
 
@@ -1902,6 +1863,44 @@ fn show_dialogs(ui: &mut Ui, service: &mut ApplicationService) {
 
 fn qr_dialog_id() -> egui::Id {
     egui::Id::new("inbound_users_qr_dialog")
+}
+
+/// Warning colour for why Share is unavailable (same amber as the inbound editor warnings).
+const SHARE_WARNING_COLOR: Color32 = Color32::from_rgb(220, 160, 60);
+
+/// "Copy share URI" / "Show QR code" context-menu items for one client. When no link can be
+/// built, both are disabled and the reason is shown under them — not only as a hover text, so it
+/// is clear why Share is missing (Roadmap §2.6 stage 4.1).
+fn show_share_menu_items(
+    ui: &mut Ui,
+    service: &mut ApplicationService,
+    inbound_index: usize,
+    client_index: usize,
+) {
+    match service.build_client_share_uri(inbound_index, client_index) {
+        Ok(uri) => {
+            if ui.button("Copy share URI").clicked() {
+                ui.ctx().copy_text(uri.clone());
+                ui.close();
+            }
+            if ui.button("Show QR code").clicked() {
+                open_qr_dialog(ui, uri);
+                ui.close();
+            }
+        }
+        Err(reason) => {
+            ui.add_enabled(false, egui::Button::new("Copy share URI"))
+                .on_disabled_hover_text(reason.clone());
+            ui.add_enabled(false, egui::Button::new("Show QR code"))
+                .on_disabled_hover_text(reason.clone());
+            ui.set_max_width(320.0);
+            ui.label(
+                RichText::new(format!("Share unavailable: {reason}"))
+                    .size(12.0)
+                    .color(SHARE_WARNING_COLOR),
+            );
+        }
+    }
 }
 
 /// Opens the QR dialog for a freshly built share URI (Roadmap §3:122).

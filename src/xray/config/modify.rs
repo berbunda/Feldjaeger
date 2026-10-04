@@ -7,6 +7,7 @@ use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use super::compatibility::check_inbound_compatibility;
+use super::stream::validate_stream_quic_params;
 use super::editable::EditableXrayConfig;
 use super::inbound_clients::{
     HysteriaClient, InboundClient, InboundClientProtocol, SecretFieldDraft,
@@ -905,7 +906,6 @@ pub fn update_inbound_shell(
     }
 
     let original_by_file = snapshot_all_roots(config)?;
-    let sniffing_draft = request.sniffing.clone();
 
     let (location, write_outcome) = config.with_inbound_mut(
         inbound_index,
@@ -913,24 +913,17 @@ pub fn update_inbound_shell(
         |inbound| {
             let clients_before = clients_users_snapshot(inbound);
 
-            apply_inbound_general(inbound, &request.general)?;
-            apply_inbound_protocol(inbound, &request.protocol)?;
-
-            // Tunnel: leave streamSettings/security on disk except sockopt.tproxy (Roadmap
-            // §2.3:88); GUI does not otherwise edit them.
-            if protocol == InboundClientProtocol::Tunnel {
-                apply_tunnel_sockopt(inbound, &request.stream)?;
-            } else {
-                apply_inbound_stream(inbound, &request.stream)?;
-                if let Some(security) = request.security.as_ref() {
-                    apply_inbound_security(inbound, security)?;
-                }
-                // Wave C2: strip fallbacks when not TCP+TLS/Reality; else patch ALPN.
-                let _ = reconcile_inbound_fallbacks(inbound)?;
-            }
-
-            let sniff_outcome = apply_inbound_sniffing(inbound, &sniffing_draft)?;
+            let sniff_outcome = compose_inbound_shell(
+                inbound,
+                protocol,
+                &request.general,
+                &request.protocol,
+                &request.stream,
+                request.security.as_ref(),
+                &request.sniffing,
+            )?;
             check_inbound_compatibility(inbound)?;
+            check_inbound_quic_params(inbound)?;
 
             let clients_after = clients_users_snapshot(inbound);
             if !clients_users_equivalent_for_shell(
@@ -949,6 +942,51 @@ pub fn update_inbound_shell(
 
     let outcome = finish_modification(config, &location.source_file, &original_by_file)?;
     Ok((outcome, write_outcome))
+}
+
+/// Transport-specific `finalmask.quicParams` rules on the composed inbound (Roadmap §2.6 stage
+/// 3.3): stream method and TLS ALPN live in different drafts, so this runs after composition.
+/// Shell Save and Add only — client mutations never touch `streamSettings`.
+fn check_inbound_quic_params(inbound: &Value) -> ConfigModifyResult<()> {
+    match inbound.get("streamSettings") {
+        Some(stream) => validate_stream_quic_params(stream)
+            .map_err(|message| ConfigModifyError::new(ConfigModifyErrorKind::ValidationFailed, message)),
+        None => Ok(()),
+    }
+}
+
+/// Applies the Shell drafts onto one inbound object — the composition step of
+/// [`update_inbound_shell`] **without** its gates (tag uniqueness, compatibility, clients check).
+///
+/// Shared with the non-blocking warnings of an unsaved draft (Roadmap §2.6 stage 0.3), so the
+/// warnings are computed on exactly the JSON that Save would write.
+#[allow(clippy::too_many_arguments)]
+pub fn compose_inbound_shell(
+    inbound: &mut Value,
+    protocol: InboundClientProtocol,
+    general: &InboundGeneral,
+    protocol_draft: &InboundProtocolDraft,
+    stream: &InboundStreamDraft,
+    security: Option<&InboundSecurityDraft>,
+    sniffing: &SniffingSettings,
+) -> ConfigModifyResult<SniffingWriteOutcome> {
+    apply_inbound_general(inbound, general)?;
+    apply_inbound_protocol(inbound, protocol_draft)?;
+
+    // Tunnel: leave streamSettings/security on disk except sockopt.tproxy (Roadmap
+    // §2.3:88); GUI does not otherwise edit them.
+    if protocol == InboundClientProtocol::Tunnel {
+        apply_tunnel_sockopt(inbound, stream)?;
+    } else {
+        apply_inbound_stream(inbound, stream)?;
+        if let Some(security) = security {
+            apply_inbound_security(inbound, security)?;
+        }
+        // Wave C2: strip fallbacks when not TCP+TLS/Reality; else patch ALPN.
+        let _ = reconcile_inbound_fallbacks(inbound)?;
+    }
+
+    apply_inbound_sniffing(inbound, sniffing)
 }
 
 fn clients_users_snapshot(inbound: &Value) -> (Option<Value>, Option<Value>) {
@@ -990,6 +1028,7 @@ pub fn add_inbound(
 
     let inbound = build_add_inbound_value(&request)?;
     check_inbound_compatibility(&inbound)?;
+    check_inbound_quic_params(&inbound)?;
 
     let original_by_file = snapshot_all_roots(config)?;
     let location = config.add_inbound_value(
@@ -1182,7 +1221,10 @@ fn unique_inbound_copy_tag(config: &EditableXrayConfig, base: Option<&str>) -> S
     format!("{base}-copy-{}", Uuid::new_v4())
 }
 
-fn build_add_inbound_value(request: &AddInboundRequest) -> ConfigModifyResult<Value> {
+/// Builds the inbound object an Add would append (runs the Add-specific security checks, but not
+/// [`check_inbound_compatibility`]). Also used for warnings on an unsaved Add draft
+/// (Roadmap §2.6 stage 0.3).
+pub fn build_add_inbound_value(request: &AddInboundRequest) -> ConfigModifyResult<Value> {
     let settings = match request.protocol {
         InboundClientProtocol::Hysteria => json!({ "version": 2, "users": [] }),
         InboundClientProtocol::Tunnel => json!({}),
@@ -1239,6 +1281,9 @@ fn build_add_inbound_value(request: &AddInboundRequest) -> ConfigModifyResult<Va
         }
         InboundClientProtocol::Tunnel => {
             // No security draft; stream defaults to tcp/none via stream draft.
+        }
+        InboundClientProtocol::Tun => {
+            // TUN has no streamSettings/security at all (network-interface inbound).
         }
     }
 
@@ -1918,7 +1963,7 @@ pub fn add_outbound_shell(
     config: &mut EditableXrayConfig,
     request: AddOutboundShellRequest,
 ) -> ConfigModifyResult<ModifyConfigOutcome> {
-    let protocol = outbound_settings_protocol_name(&request.settings);
+    let protocol = request.settings.protocol_name();
     let mut outbound = json!({ "protocol": protocol, "settings": {} });
     apply_outbound_general(&mut outbound, &request.general)?;
     apply_outbound_settings(&mut outbound, &request.settings)?;
@@ -1929,16 +1974,6 @@ pub fn add_outbound_shell(
             preferred_source_file: request.preferred_source_file,
         },
     )
-}
-
-/// Maps a Protocol-tab draft to its Xray `protocol` string.
-fn outbound_settings_protocol_name(settings: &OutboundSettingsDraft) -> &'static str {
-    match settings {
-        OutboundSettingsDraft::Freedom { .. } => "freedom",
-        OutboundSettingsDraft::Blackhole { .. } => "blackhole",
-        OutboundSettingsDraft::Dns { .. } => "dns",
-        OutboundSettingsDraft::Vless(_) => "vless",
-    }
 }
 
 /// Shell Save for an existing shell-editable outbound (Freedom, Blackhole, DNS; Roadmap §2.4:94,

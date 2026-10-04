@@ -1,6 +1,7 @@
 //! Remote `xray` CLI wrappers (keygen / encryption helpers / config test).
 //!
-//! Parsers are fixture-driven (`tests/fixtures/xray/cli/`). Never log secrets.
+//! Parsers are fixture-driven (`remote_cli/fixtures/`, stdout of the official binary; checked
+//! against a local Xray when there is one, see `crate::xray::local_xray`). Never log secrets.
 
 mod api;
 mod config_test;

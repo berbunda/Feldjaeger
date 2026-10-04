@@ -39,6 +39,9 @@ pub enum InboundClientProtocol {
     Hysteria,
     /// `protocol: "tunnel"` (dokodemo-door successor; shell only, no Users).
     Tunnel,
+    /// `protocol: "tun"` (local TUN device inbound; shell only, no Users — same treatment as
+    /// Tunnel, since neither has per-client `clients`/`users`).
+    Tun,
 }
 
 impl InboundClientProtocol {
@@ -51,6 +54,7 @@ impl InboundClientProtocol {
             "trojan" => Some(Self::Trojan),
             "hysteria" => Some(Self::Hysteria),
             "tunnel" => Some(Self::Tunnel),
+            "tun" => Some(Self::Tun),
             _ => None,
         }
     }
@@ -62,6 +66,7 @@ impl InboundClientProtocol {
             Self::Trojan => "trojan",
             Self::Hysteria => "hysteria",
             Self::Tunnel => "tunnel",
+            Self::Tun => "tun",
         }
     }
 
@@ -74,8 +79,20 @@ impl InboundClientProtocol {
     pub fn shell_edit_enabled(self) -> bool {
         matches!(
             self,
-            Self::Vless | Self::Trojan | Self::Hysteria | Self::Tunnel
+            Self::Vless | Self::Trojan | Self::Hysteria | Self::Tunnel | Self::Tun
         )
+    }
+
+    /// Whether this protocol listens on a `port` at all — TUN uses a network interface instead
+    /// (Xray-core `infra/conf/common.go`: `InboundDetourConfig.Build()` skips port validation
+    /// when `protocol == "tun"`).
+    pub fn requires_port(self) -> bool {
+        !matches!(self, Self::Tun)
+    }
+
+    /// Whether `streamSettings` (transport/security) applies — TUN has neither.
+    pub fn has_stream_settings(self) -> bool {
+        !matches!(self, Self::Tun)
     }
 
     /// Error when mutate is attempted before the lake ships.

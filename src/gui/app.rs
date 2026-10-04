@@ -74,7 +74,9 @@ impl eframe::App for FeldjaegerApp {
             .resizable(false)
             .show_separator_line(true)
             .show(ui, |ui| {
-                status_bar::show(ui, &self.service.status_snapshot());
+                if status_bar::show(ui, &self.service.status_snapshot()) {
+                    self.service.dismiss_status_message();
+                }
             });
 
         about::show(ui);

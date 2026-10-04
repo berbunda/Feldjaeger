@@ -7,7 +7,9 @@ use egui::{Color32, RichText, Sense, Ui};
 
 use crate::app::{
     ApplicationService, BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS,
-    DOMAIN_STRATEGIES, DnsRuleDraft, FREEDOM_NOISE_TYPES, FragmentDraft, MISSING_FIELD, NoiseDraft,
+    DOMAIN_STRATEGIES, DnsRuleDraft, FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS,
+    FREEDOM_FINAL_RULE_NETWORKS, FREEDOM_NOISE_TYPES, FREEDOM_PROXY_PROTOCOL_VERSIONS,
+    FragmentDraft, FreedomFinalRuleDraft, MISSING_FIELD, NoiseDraft,
     OutboundKind, OutboundSettingsDraft, OutboundsPageState, OutboundsSortColumn,
     outbound_row_display,
 };
@@ -742,7 +744,7 @@ fn show_raw_json_outbound_dialog(ui: &mut Ui, service: &mut ApplicationService) 
 
 fn outbound_protocol_label(settings: &OutboundSettingsDraft) -> &'static str {
     match settings {
-        OutboundSettingsDraft::Freedom { .. } => "Freedom",
+        OutboundSettingsDraft::Freedom(_) => "Freedom",
         OutboundSettingsDraft::Blackhole { .. } => "Blackhole",
         OutboundSettingsDraft::Dns { .. } => "DNS",
         OutboundSettingsDraft::Vless(_) => "VLESS",
@@ -768,7 +770,7 @@ fn show_outbound_editor_pane(ui: &mut Ui, service: &mut ApplicationService) {
     ui.add_space(6.0);
     ui.strong(format!("Protocol ({protocol_label})"));
     match service.outbound_editor_session().map(|s| &s.settings) {
-        Some(OutboundSettingsDraft::Freedom { .. }) => show_freedom_settings_edit(ui, service),
+        Some(OutboundSettingsDraft::Freedom(_)) => show_freedom_settings_edit(ui, service),
         Some(OutboundSettingsDraft::Blackhole { .. }) => show_blackhole_settings_edit(ui, service),
         Some(OutboundSettingsDraft::Dns { .. }) => show_dns_settings_edit(ui, service),
         Some(OutboundSettingsDraft::Vless(_)) => show_vless_settings_edit(ui, service),
@@ -821,6 +823,7 @@ fn show_outbound_general_edit(ui: &mut Ui, service: &mut ApplicationService, is_
     let Some(session) = service.outbound_editor_session_mut() else {
         return;
     };
+    let is_freedom = matches!(session.settings, OutboundSettingsDraft::Freedom(_));
     let general = &mut session.general;
     let mut tag = general.tag.clone().unwrap_or_default();
     let mut send_through = general.send_through.clone().unwrap_or_default();
@@ -863,6 +866,16 @@ fn show_outbound_general_edit(ui: &mut Ui, service: &mut ApplicationService, is_
             None
         };
     }
+    if is_freedom && chain_enabled {
+        ui.label(
+            RichText::new(
+                "Freedom no longer honors proxySettings as of Xray-core v26.9.x (XTLS/Xray-core#6058) \
+                 — use sockopt.dialerProxy instead.",
+            )
+            .size(12.0)
+            .color(Color32::from_rgb(200, 140, 40)),
+        );
+    }
     if let Some(proxy_settings) = &mut general.proxy_settings {
         egui::Grid::new("outbound_proxy_settings_edit_grid")
             .num_columns(2)
@@ -882,37 +895,59 @@ fn show_outbound_general_edit(ui: &mut Ui, service: &mut ApplicationService, is_
 }
 
 fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
+    // Warnings first: computing them borrows the service immutably.
+    let warnings = service.outbound_editor_warnings();
+    let can_migrate = matches!(
+        service.outbound_editor_session().map(|s| &s.settings),
+        Some(OutboundSettingsDraft::Freedom(draft))
+            if draft.legacy_domain_strategy.is_some() && !draft.remove_legacy_domain_strategy
+    );
+    show_outbound_compatibility_warnings(ui, &warnings);
+    if can_migrate {
+        if ui
+            .button("Migrate to sockopt")
+            .on_hover_text(
+                "Moves settings.domainStrategy into streamSettings.sockopt.domainStrategy (an \
+                 existing sockopt value wins) and shows the diff; nothing is written until Save",
+            )
+            .clicked()
+        {
+            match service.migrate_outbound_legacy_domain_strategy() {
+                Ok(message) | Err(message) => service.show_status_message(message),
+            }
+        }
+        ui.add_space(6.0);
+    }
+
     let Some(session) = service.outbound_editor_session_mut() else {
         return;
     };
-    let OutboundSettingsDraft::Freedom {
-        domain_strategy,
-        redirect,
-        user_level,
-        fragment,
-        noises,
-    } = &mut session.settings
-    else {
+    let OutboundSettingsDraft::Freedom(draft) = &mut session.settings else {
         return;
     };
 
-    let mut strategy = domain_strategy.clone();
-    let mut redirect_text = redirect.clone();
-    let mut level = *user_level as i64;
+    let mut strategy = draft.sockopt_domain_strategy.clone();
+    let mut redirect_text = draft.redirect.clone();
+    let mut level = draft.user_level as i64;
+    let mut proxy_protocol = draft.proxy_protocol;
 
     egui::Grid::new("freedom_settings_edit_grid")
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            ui.label("domainStrategy");
+            ui.label("sockopt.domainStrategy").on_hover_text(
+                "streamSettings.sockopt.domainStrategy — how Freedom resolves domain targets \
+                 (also before finalRules are matched)",
+            );
             ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("freedom_domain_strategy")
+                egui::ComboBox::from_id_salt("freedom_sockopt_domain_strategy")
                     .selected_text(if strategy.is_empty() {
                         "(unset — AsIs)"
                     } else {
                         strategy.as_str()
                     })
                     .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut strategy, String::new(), "(unset — AsIs)");
                         for &preset in DOMAIN_STRATEGIES {
                             ui.selectable_value(&mut strategy, preset.to_owned(), preset);
                         }
@@ -929,26 +964,40 @@ fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
             ui.label("userLevel");
             ui.add(egui::DragValue::new(&mut level).range(0..=u32::MAX as i64));
             ui.end_row();
+
+            ui.label("proxyProtocol").on_hover_text(
+                "Send a PROXY protocol header to the target; the target must expect it, or the \
+                 connection breaks",
+            );
+            egui::ComboBox::from_id_salt("freedom_proxy_protocol")
+                .selected_text(proxy_protocol_label(proxy_protocol))
+                .show_ui(ui, |ui| {
+                    for &version in FREEDOM_PROXY_PROTOCOL_VERSIONS {
+                        ui.selectable_value(&mut proxy_protocol, version, proxy_protocol_label(version));
+                    }
+                });
+            ui.end_row();
         });
 
-    *domain_strategy = strategy;
-    *redirect = redirect_text;
-    *user_level = level.max(0) as u64;
+    draft.sockopt_domain_strategy = strategy;
+    draft.redirect = redirect_text;
+    draft.user_level = level.max(0) as u64;
+    draft.proxy_protocol = proxy_protocol;
 
     ui.add_space(6.0);
-    let mut fragment_enabled = fragment.is_some();
+    let mut fragment_enabled = draft.fragment.is_some();
     if ui
         .checkbox(&mut fragment_enabled, "fragment")
         .on_hover_text("Packet fragmentation for DPI evasion")
         .changed()
     {
-        *fragment = if fragment_enabled {
+        draft.fragment = if fragment_enabled {
             Some(FragmentDraft::default())
         } else {
             None
         };
     }
-    if let Some(fragment) = fragment {
+    if let Some(fragment) = &mut draft.fragment {
         egui::Grid::new("freedom_fragment_edit_grid")
             .num_columns(2)
             .spacing([16.0, 6.0])
@@ -970,7 +1019,144 @@ fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
 
     ui.add_space(8.0);
     ui.strong("noises");
-    show_freedom_noises_edit(ui, noises);
+    show_freedom_noises_edit(ui, &mut draft.noises);
+
+    ui.add_space(8.0);
+    ui.strong("finalRules").on_hover_text(
+        "Checked in order before and after dialing; the first matching rule decides. Domain \
+         targets are resolved with sockopt.domainStrategy first. Not applied when \
+         sockopt.dialerProxy is set.",
+    );
+    if draft.final_rules_foreign {
+        ui.label(
+            RichText::new(
+                "finalRules has a shape this editor cannot represent without changing it — it is \
+                 kept as is; edit it with Raw JSON.",
+            )
+            .size(12.0)
+            .color(Color32::from_rgb(210, 170, 40)),
+        );
+    } else {
+        show_freedom_final_rules_edit(ui, &mut draft.final_rules);
+    }
+}
+
+fn proxy_protocol_label(version: u64) -> String {
+    match version {
+        0 => "0 — disabled".to_owned(),
+        1 | 2 => format!("v{version}"),
+        other => format!("{other} (not supported by Xray-core)"),
+    }
+}
+
+/// Yellow `"<location>: <message>"` lines for non-blocking outbound warnings (mirrors the
+/// inbound Stream tab).
+fn show_outbound_compatibility_warnings(ui: &mut Ui, warnings: &[crate::xray::CompatibilityWarning]) {
+    for warning in warnings {
+        ui.label(
+            RichText::new(warning.text())
+                .size(12.0)
+                .color(Color32::from_rgb(210, 170, 40)),
+        );
+    }
+    if !warnings.is_empty() {
+        ui.add_space(4.0);
+    }
+}
+
+/// Ordered `settings.finalRules[]` editor (Add/Remove/Move up/down; mirrors the DNS `rules[]`
+/// editor).
+fn show_freedom_final_rules_edit(ui: &mut Ui, rules: &mut Vec<FreedomFinalRuleDraft>) {
+    let mut remove_idx: Option<usize> = None;
+    let mut move_up_idx: Option<usize> = None;
+    let mut move_down_idx: Option<usize> = None;
+    let count = rules.len();
+
+    for (idx, rule) in rules.iter_mut().enumerate() {
+        ui.add_space(4.0);
+        ui.group(|ui| {
+            ui.horizontal(|ui| {
+                ui.label(format!("finalRules[{idx}]"));
+                if ui.small_button("Up").on_hover_text("Move up").clicked() && idx > 0 {
+                    move_up_idx = Some(idx);
+                }
+                if ui.small_button("Down").on_hover_text("Move down").clicked() && idx + 1 < count {
+                    move_down_idx = Some(idx);
+                }
+                if ui.button("Remove").clicked() {
+                    remove_idx = Some(idx);
+                }
+            });
+
+            egui::Grid::new(("freedom_final_rule_edit_grid", idx))
+                .num_columns(2)
+                .spacing([12.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("action");
+                    egui::ComboBox::from_id_salt(("freedom_final_rule_action", idx))
+                        .selected_text(if rule.action.is_empty() {
+                            "(unset)"
+                        } else {
+                            rule.action.as_str()
+                        })
+                        .show_ui(ui, |ui| {
+                            for &preset in FREEDOM_FINAL_RULE_ACTIONS {
+                                ui.selectable_value(&mut rule.action, preset.to_owned(), preset);
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label("network");
+                    egui::ComboBox::from_id_salt(("freedom_final_rule_network", idx))
+                        .selected_text(if rule.network.is_empty() {
+                            "(any)"
+                        } else {
+                            rule.network.as_str()
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut rule.network, String::new(), "(any)");
+                            for &preset in FREEDOM_FINAL_RULE_NETWORKS {
+                                ui.selectable_value(&mut rule.network, preset.to_owned(), preset);
+                            }
+                        });
+                    ui.end_row();
+
+                    ui.label("port");
+                    ui.text_edit_singleline(&mut rule.port.text)
+                        .on_hover_text("e.g. 25 or 1000-2000,443; empty = any port");
+                    ui.end_row();
+
+                    ui.label("blockDelay");
+                    ui.text_edit_singleline(&mut rule.block_delay.text).on_hover_text(format!(
+                        "Seconds a blocked connection is held open, e.g. 30 or 30-90; empty = \
+                         {FREEDOM_DEFAULT_BLOCK_DELAY}"
+                    ));
+                    ui.end_row();
+                });
+
+            ui.label("ip (one CIDR per line, e.g. 10.0.0.0/8 or geoip:private; empty = any)");
+            let mut ip_text = rule.ip.join("\n");
+            if ui
+                .add(egui::TextEdit::multiline(&mut ip_text).desired_rows(2))
+                .changed()
+            {
+                rule.ip = super::lines_to_vec(&ip_text);
+            }
+        });
+    }
+
+    if let Some(idx) = remove_idx {
+        rules.remove(idx);
+    } else if let Some(idx) = move_up_idx {
+        rules.swap(idx, idx - 1);
+    } else if let Some(idx) = move_down_idx {
+        rules.swap(idx, idx + 1);
+    }
+
+    ui.add_space(4.0);
+    if ui.button("Add final rule").clicked() {
+        rules.push(FreedomFinalRuleDraft::new("block"));
+    }
 }
 
 fn show_freedom_noises_edit(ui: &mut Ui, noises: &mut Vec<NoiseDraft>) {
@@ -1023,17 +1209,23 @@ fn show_blackhole_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
     let Some(session) = service.outbound_editor_session_mut() else {
         return;
     };
-    let OutboundSettingsDraft::Blackhole { response_type, .. } = &mut session.settings else {
+    let OutboundSettingsDraft::Blackhole {
+        response_type,
+        custom_response_data,
+        ..
+    } = &mut session.settings
+    else {
         return;
     };
 
     let mut kind = response_type.clone();
+    let mut custom_data = custom_response_data.clone();
     egui::Grid::new("blackhole_settings_edit_grid")
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
             ui.label("response.type")
-                .on_hover_text("none = close immediately; http = send a fake HTTP 403 then close");
+                .on_hover_text("none = close immediately; http = send a fake HTTP 403 then close; custom = send customResponseData then close");
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("blackhole_response_type")
                     .selected_text(if kind.is_empty() {
@@ -1049,8 +1241,16 @@ fn show_blackhole_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
                 ui.text_edit_singleline(&mut kind);
             });
             ui.end_row();
+
+            if kind.trim().eq_ignore_ascii_case("custom") {
+                ui.label("response.customResponseData")
+                    .on_hover_text("Base64-encoded raw bytes sent before close");
+                ui.text_edit_singleline(&mut custom_data);
+                ui.end_row();
+            }
         });
     *response_type = kind;
+    *custom_response_data = custom_data;
 }
 
 fn show_dns_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {

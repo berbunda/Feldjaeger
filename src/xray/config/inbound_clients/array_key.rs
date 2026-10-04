@@ -60,6 +60,7 @@ fn default_create_key(protocol: InboundClientProtocol) -> ClientsArrayKey {
         InboundClientProtocol::Hysteria => ClientsArrayKey::Users,
         InboundClientProtocol::Vless
         | InboundClientProtocol::Trojan
-        | InboundClientProtocol::Tunnel => ClientsArrayKey::Clients,
+        | InboundClientProtocol::Tunnel
+        | InboundClientProtocol::Tun => ClientsArrayKey::Clients,
     }
 }

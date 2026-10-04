@@ -15,6 +15,7 @@ use crate::app::{
     ApplicationService, MISSING_FIELD, RoutingPageState, RoutingSortColumn, display_routing_list,
     routing_general_display, routing_rule_row_display,
 };
+use crate::gui::pages::lines_to_vec;
 use crate::xray::{
     BalancerEntry, BalancerStrategyType, CostEntry, DomainStrategy, NetworkKind, RoutingRuleEntry,
     RoutingRuleSummary, RoutingSummary, StrategyEntry, WebhookEntry,
@@ -364,6 +365,7 @@ fn show_selected_rule_details(ui: &mut Ui, rows: &[RoutingRuleSummary]) {
             detail_row(ui, "Protocol", &display_routing_list(&rule.protocol));
             detail_row(ui, "Attribute", &display_optional(&rule.attrs_summary));
             detail_row(ui, "Process", &display_routing_list(&rule.process));
+            detail_row(ui, "Local OS", &display_routing_list(&rule.local_os));
         });
 
     ui.add_space(8.0);
@@ -557,6 +559,12 @@ fn show_rule_edit_form(
                 "process (one per line)",
                 &mut rule.process,
                 ("routing_rule_process", index),
+            );
+            multiline_list_row(
+                ui,
+                "localOS (one per line, e.g. windows/linux/darwin/android/ios)",
+                &mut rule.local_os,
+                ("routing_rule_local_os", index),
             );
 
             ui.add_space(8.0);
@@ -896,10 +904,3 @@ fn strategy_type_combo(ui: &mut Ui, id: impl std::hash::Hash + std::fmt::Debug, 
         });
 }
 
-fn lines_to_vec(text: &str) -> Vec<String> {
-    text.lines()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .collect()
-}

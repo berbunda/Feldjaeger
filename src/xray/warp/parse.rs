@@ -166,6 +166,17 @@ pub fn parse_generated_xray_value(mut value: Value) -> WarpResult<WarpCredential
         .get("domainStrategy")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let remote_dns = settings
+        .get("remoteDNS")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(|s| s.trim().to_owned()))
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
     Ok(WarpCredentials {
         private_key: SecretString::new(private_key),
@@ -175,6 +186,7 @@ pub fn parse_generated_xray_value(mut value: Value) -> WarpResult<WarpCredential
         reserved,
         mtu,
         domain_strategy,
+        remote_dns,
         outbound_value: value,
     })
 }

@@ -2,15 +2,43 @@
 //!
 //! `sockopt` is a `streamSettings` sibling of `security`/`realitySettings`/`tlsSettings`/
 //! `finalmask` — not transport-specific, applies regardless of the chosen transport method.
-//! Documented fields split roughly into inbound-only, outbound-only, and shared; Feldjäger
-//! models every documented field as typed data (so the draft is outbound-ready), but only the
-//! inbound Stream tab exposes editable widgets today — outbound-only fields still round-trip
-//! losslessly, just without a dedicated widget yet. See
-//! <https://xtls.github.io/en/config/transports/sockopt.html>.
+//! Documented fields split into inbound-only, outbound-only, and shared
+//! ([`INBOUND_ONLY_SOCKOPT_FIELDS`], [`OUTBOUND_ONLY_SOCKOPT_FIELDS`], [`sockopt_field_applies`]);
+//! Feldjäger models every documented field as typed data regardless of direction (so the draft
+//! is outbound-ready and never drops a field that doesn't apply), but only the inbound Stream tab
+//! exposes editable widgets today — outbound-only fields still round-trip losslessly, just
+//! without a dedicated widget yet. See <https://xtls.github.io/en/config/transports/sockopt.html>.
 
 use serde_json::{Map, Value};
 
+use super::StreamDirection;
 use crate::xray::config::modify_error::ConfigModifyResult;
+
+/// `sockopt` keys that only configure a listening socket (meaningless on an outbound).
+pub const INBOUND_ONLY_SOCKOPT_FIELDS: &[&str] =
+    &["acceptProxyProtocol", "trustedXForwardedFor", "V6Only"];
+
+/// `sockopt` keys that only configure a dialing socket (meaningless on an inbound).
+pub const OUTBOUND_ONLY_SOCKOPT_FIELDS: &[&str] = &[
+    "mark",
+    "domainStrategy",
+    "dialerProxy",
+    "tcpcongestion",
+    "interface",
+    "tcpMptcp",
+    "addressPortStrategy",
+    "happyEyeballs",
+];
+
+/// Whether the `sockopt` key `field` has an effect on a socket of the given direction.
+/// Keys in neither list (e.g. `tcpFastOpen`, `tproxy`, keep-alive/timeout fields,
+/// `customSockopt`, unknown future keys) are treated as shared.
+pub fn sockopt_field_applies(field: &str, direction: StreamDirection) -> bool {
+    match direction {
+        StreamDirection::Inbound => !OUTBOUND_ONLY_SOCKOPT_FIELDS.contains(&field),
+        StreamDirection::Outbound => !INBOUND_ONLY_SOCKOPT_FIELDS.contains(&field),
+    }
+}
 
 /// Documented `tproxy` values (free text is still accepted/preserved for forward-compat).
 pub const TPROXY_MODES: &[&str] = &["redirect", "tproxy", "off"];
@@ -90,7 +118,8 @@ pub struct SockoptDraft {
     pub dialer_proxy: String,
     /// `acceptProxyProtocol` (inbound-only). Distinct from the existing per-transport
     /// `tcpSettings.acceptProxyProtocol` / `wsSettings.acceptProxyProtocol` fields already
-    /// modeled on [`super::TcpStreamSettings`] / [`super::WsStreamSettings`] — the two are
+    /// modeled on [`crate::xray::config::inbound_stream::TcpStreamSettings`] /
+    /// [`crate::xray::config::inbound_stream::WsStreamSettings`] — the two are
     /// separate wire locations and must not be conflated.
     pub accept_proxy_protocol: bool,
     /// `trustedXForwardedFor` (HTTP-based transports only).
@@ -114,7 +143,7 @@ pub struct SockoptDraft {
     /// `addressPortStrategy` (outbound-only); empty = key absent.
     pub address_port_strategy: String,
     /// `customSockopt` array, preserved as raw JSON — advanced/rare per-OS escape hatch, same
-    /// trust boundary as [`super::super::inbound_security::TlsSettingsDraft::ech_sockopt`].
+    /// trust boundary as [`crate::xray::config::inbound_security::TlsSettingsDraft::ech_sockopt`].
     pub custom_sockopt: Option<Value>,
     /// `happyEyeballs` (outbound-only).
     pub happy_eyeballs: Option<HappyEyeballsDraft>,
@@ -536,5 +565,29 @@ mod tests {
         let mut draft = SockoptDraft::default();
         draft.tproxy = "not-a-real-mode".to_owned();
         assert!(validate_sockopt(&draft).is_ok());
+    }
+
+    #[test]
+    fn direction_lists_cover_only_known_keys_and_never_overlap() {
+        for field in INBOUND_ONLY_SOCKOPT_FIELDS.iter().chain(OUTBOUND_ONLY_SOCKOPT_FIELDS) {
+            assert!(KNOWN_SOCKOPT_KEYS.contains(field), "{field} is not a modeled sockopt key");
+        }
+        for field in INBOUND_ONLY_SOCKOPT_FIELDS {
+            assert!(!OUTBOUND_ONLY_SOCKOPT_FIELDS.contains(field), "{field} in both lists");
+        }
+    }
+
+    #[test]
+    fn field_applicability_follows_direction() {
+        use StreamDirection::{Inbound, Outbound};
+        assert!(sockopt_field_applies("acceptProxyProtocol", Inbound));
+        assert!(!sockopt_field_applies("acceptProxyProtocol", Outbound));
+        assert!(sockopt_field_applies("dialerProxy", Outbound));
+        assert!(!sockopt_field_applies("dialerProxy", Inbound));
+        // Shared and unknown/future keys apply to both sides.
+        for field in ["tcpFastOpen", "tproxy", "customSockopt", "someFutureKey"] {
+            assert!(sockopt_field_applies(field, Inbound), "{field}");
+            assert!(sockopt_field_applies(field, Outbound), "{field}");
+        }
     }
 }
