@@ -29,6 +29,9 @@
 //!
 //! `quicParams` is not shared: its fields tune each side's own QUIC stack (rates, windows,
 //! timeouts), the client keeps its defaults.
+//!
+//! Import (stage 6.2, [`server_finalmask_from_client`]) reads the same table backwards: a pasted
+//! link's `fm` becomes the new inbound's chains, without what only the client uses.
 
 use serde_json::{Map, Value};
 
@@ -133,6 +136,133 @@ fn client_layer(chain: FinalMaskChain, kind: &str, settings: &Value) -> Option<(
     Some((settings, note))
 }
 
+/// The server chains imported from a share link's `fm` (Roadmap §2.6 stage 6.2): the inverse of
+/// [`client_finalmask`]. `None` for a chain with nothing to write.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ServerFinalMaskImport {
+    /// `finalmask.tcp` layers for the new inbound.
+    pub tcp: Option<Vec<FinalMaskLayerDraft>>,
+    /// `finalmask.udp` layers for the new inbound.
+    pub udp: Option<Vec<FinalMaskLayerDraft>>,
+    /// What was not imported or was changed, one sentence each.
+    pub warnings: Vec<String>,
+}
+
+/// Server chains from a share link's `fm` text (the client's `streamSettings.finalmask`).
+///
+/// The same layer table as [`client_finalmask`], read the other way: symmetric masks become the
+/// server layer as they are; what only shapes the client's own traffic (`fragment`, `noise`) or
+/// only works when dialing (`udphop`) has no server pair and is left out; client keys are removed
+/// where the server ignores them (`xdns.resolvers`, `xmc.hostname`, `xicmp.dgram`) or reads them
+/// differently (`xicmp.ips` — accepted peers on a server, targets on a client; `realm.ipMode` /
+/// `portMapping` — the client's own network). `quicParams` tunes the client's QUIC stack and is
+/// not imported. Every omission or change is reported, nothing is dropped silently.
+pub fn server_finalmask_from_client(fm: &str) -> ServerFinalMaskImport {
+    let mut import = ServerFinalMaskImport::default();
+    let object = match serde_json::from_str::<Value>(fm) {
+        Ok(Value::Object(object)) => object,
+        Ok(_) => {
+            import.warnings.push("`fm` is not a JSON object — FinalMask not imported.".to_owned());
+            return import;
+        }
+        Err(_) => {
+            import.warnings.push("`fm` is not valid JSON — FinalMask not imported.".to_owned());
+            return import;
+        }
+    };
+    for (key, value) in &object {
+        let chain = match key.as_str() {
+            "tcp" => FinalMaskChain::Tcp,
+            "udp" => FinalMaskChain::Udp,
+            "quicParams" => {
+                import.warnings.push(
+                    "fm.quicParams tunes the client's own QUIC stack — not imported; set the \
+                     server's on the Stream tab if needed."
+                        .to_owned(),
+                );
+                continue;
+            }
+            other => {
+                import.warnings.push(format!("fm.{other} is not a FinalMask key — not imported."));
+                continue;
+            }
+        };
+        if value.is_null() {
+            continue;
+        }
+        let Some(layers) = value.as_array().and_then(|array| super::finalmask::parse_finalmask_layers(array)) else {
+            import.warnings.push(format!(
+                "fm.{key} can't be read as a layer list — not imported; add the layers on the Stream tab."
+            ));
+            continue;
+        };
+        let mut server_layers = Vec::new();
+        for layer in layers {
+            let kind = layer.layer_type.trim().to_owned();
+            let (settings, warning) = server_layer(chain, &kind, &layer.settings);
+            import.warnings.extend(warning);
+            if let Some(settings) = settings {
+                server_layers.push(FinalMaskLayerDraft {
+                    layer_type: kind,
+                    settings: Value::Object(settings),
+                });
+            }
+        }
+        if !server_layers.is_empty() {
+            match chain {
+                FinalMaskChain::Tcp => import.tcp = Some(server_layers),
+                FinalMaskChain::Udp => import.udp = Some(server_layers),
+            }
+        }
+    }
+    import
+}
+
+/// One client layer as the server needs it: the server's `settings` (`None` = no server pair)
+/// and an optional warning.
+fn server_layer(chain: FinalMaskChain, kind: &str, settings: &Value) -> (Option<Map<String, Value>>, Option<String>) {
+    let mut settings = settings.as_object().cloned().unwrap_or_default();
+    let location = format!("fm.{}", chain.key());
+    let mut strip = |keys: &[&str], why: &str| {
+        let removed: Vec<String> = keys
+            .iter()
+            .filter(|key| settings.remove(**key).is_some())
+            .map(|key| format!("`{key}`"))
+            .collect();
+        (!removed.is_empty()).then(|| format!("{location}: `{kind}` — client keys {} not imported ({why}).", removed.join(", ")))
+    };
+    let warning = match (chain, kind.to_ascii_lowercase().as_str()) {
+        (_, "fragment" | "noise") => {
+            return (
+                None,
+                Some(format!(
+                    "{location}: `{kind}` only shapes what the client sends — the server needs no \
+                     matching layer; not imported."
+                )),
+            );
+        }
+        (_, "udphop") => {
+            return (
+                None,
+                Some(format!("{location}: `{kind}` is client-only — a server cannot listen with it; not imported.")),
+            );
+        }
+        (FinalMaskChain::Udp, "xicmp") => strip(
+            &["ips", "dgram"],
+            "on a server `ips` limits the accepted peers, `dgram` is ignored",
+        ),
+        (FinalMaskChain::Udp, "xdns") => strip(&["resolvers"], "the server ignores them"),
+        (FinalMaskChain::Udp, "realm") => strip(&["ipMode", "portMapping"], "they describe the client's network"),
+        (FinalMaskChain::Tcp, "xmc") => strip(&["hostname"], "the server ignores it"),
+        (_, known) if COPIED_TYPES.contains(&known) => None,
+        _ => Some(format!(
+            "{location}: `{kind}` is not known to Feldjäger — imported as it is; check that the \
+             server needs it."
+        )),
+    };
+    (Some(settings), warning)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +355,71 @@ mod tests {
         let with_resolvers = vec![layer("xdns", json!({"domains": [], "resolvers": [{"addrs": ["1.1.1.1"]}]}))];
         let client = client_finalmask(&[(FinalMaskChain::Udp, &with_resolvers)]).expect("client");
         assert!(client.notes.is_empty());
+    }
+
+    #[test]
+    fn import_keeps_symmetric_layers_and_reports_the_rest() {
+        let fm = json!({
+            "tcp": [
+                {"type": "fragment", "settings": {"packets": "tlshello"}},
+                {"type": "xmc", "settings": {"password": "p", "hostname": "mc.example.com", "profiles": []}},
+                {"type": "sudoku", "settings": {"password": "s"}}
+            ],
+            "udp": [
+                {"type": "udphop", "settings": {"remotePorts": "1000-2000"}},
+                {"type": "xicmp", "settings": {"ips": ["203.0.113.7"], "dgram": true}},
+                {"type": "xdns", "settings": {"domains": [{"names": ["t.example.com"]}], "resolvers": [{"addrs": ["1.1.1.1"]}]}},
+                {"type": "realm", "settings": {"url": "realm://t@r.example.com/id", "stunServers": ["s:3478"], "ipMode": "4"}},
+                {"type": "noise", "settings": {}},
+                {"type": "future-mask", "settings": {}}
+            ],
+            "quicParams": {"congestion": "bbr"},
+            "extra": 1
+        });
+        let import = server_finalmask_from_client(&fm.to_string());
+        assert_eq!(
+            import.tcp,
+            Some(vec![
+                layer("xmc", json!({"password": "p", "profiles": []})),
+                layer("sudoku", json!({"password": "s"})),
+            ])
+        );
+        assert_eq!(
+            import.udp,
+            Some(vec![
+                layer("xicmp", json!({})),
+                layer("xdns", json!({"domains": [{"names": ["t.example.com"]}]})),
+                layer("realm", json!({"url": "realm://t@r.example.com/id", "stunServers": ["s:3478"]})),
+                layer("future-mask", json!({})),
+            ])
+        );
+        let warned = |needle: &str| import.warnings.iter().any(|w| w.contains(needle));
+        for needle in ["`fragment`", "`hostname`", "`udphop`", "`ips`, `dgram`", "`resolvers`", "`ipMode`", "`noise`", "future-mask", "quicParams", "fm.extra"] {
+            assert!(warned(needle), "no warning about {needle}: {:?}", import.warnings);
+        }
+        assert_eq!(import.warnings.len(), 10, "{:?}", import.warnings);
+    }
+
+    #[test]
+    fn import_of_unreadable_fm_imports_nothing() {
+        for (fm, needle) in [("not json", "valid JSON"), ("[1]", "JSON object"), (r#"{"tcp": {"type": "x"}}"#, "fm.tcp")] {
+            let import = server_finalmask_from_client(fm);
+            assert_eq!((import.tcp, import.udp), (None, None), "{fm}");
+            assert!(import.warnings.iter().any(|w| w.contains(needle)), "{fm}: {:?}", import.warnings);
+        }
+        let only_client_side = server_finalmask_from_client(r#"{"tcp": [{"type": "fragment"}], "udp": null}"#);
+        assert_eq!((only_client_side.tcp, only_client_side.udp), (None, None));
+    }
+
+    /// A server chain shared as `fm` and imported again comes back unchanged when it holds only
+    /// symmetric layers.
+    #[test]
+    fn share_then_import_round_trips_symmetric_chains() {
+        let tcp = vec![layer("header-custom", json!({"clients": [[{"rand": 4}]]})), layer("sudoku", json!({"password": "p"}))];
+        let udp = vec![layer("mkcp-legacy", json!({"value": "seed"})), layer("salamander", json!({"password": "cat"}))];
+        let fm = client_finalmask(&[(FinalMaskChain::Tcp, &tcp), (FinalMaskChain::Udp, &udp)]).expect("client");
+        let import = server_finalmask_from_client(&fm.compact_json());
+        assert_eq!((import.tcp, import.udp), (Some(tcp), Some(udp)));
+        assert!(import.warnings.is_empty(), "{:?}", import.warnings);
     }
 }

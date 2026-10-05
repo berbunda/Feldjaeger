@@ -21,6 +21,7 @@ pub use crate::xray::config::stream::{
     TCP_CONGESTION_PRESETS, TCP_FINALMASK_TYPES, TPROXY_MODES, TcpFastOpenDraft,
     UDP_FINALMASK_TYPES, UdpHopSettings, XdnsSettings, XicmpSettings,
     finalmask_layers_to_value, fragment_mask_settings_to_value, client_finalmask, hy2_share_obfs,
+    ServerFinalMaskImport, server_finalmask_from_client,
     noise_mask_settings_to_value, parse_finalmask_layers, parse_fragment_mask_settings,
     parse_noise_mask_settings, parse_quic_params, parse_range_values, parse_realm_settings,
     parse_salamander_settings, parse_sockopt, parse_sudoku_settings, parse_udphop_settings,

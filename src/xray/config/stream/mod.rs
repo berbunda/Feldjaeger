@@ -44,7 +44,9 @@ pub use finalmask::{
     validate_finalmask_layer, hy2_share_obfs, parse_finalmask_layers,
     validate_finalmask_layers,
 };
-pub use finalmask_client::{ClientFinalMask, client_finalmask};
+pub use finalmask_client::{
+    ClientFinalMask, ServerFinalMaskImport, client_finalmask, server_finalmask_from_client,
+};
 pub use finalmask_layers::{
     FRAGMENT_PACKETS_TLSHELLO, FragmentPackets, fragment_packets_mode, NoiseItemPayload, SALAMANDER_MIN_PASSWORD_BYTES,
     SUDOKU_ASCII_MODES, SUDOKU_MAX_PADDING, validate_sudoku_custom_table, validate_sudoku_settings,

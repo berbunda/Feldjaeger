@@ -22,6 +22,9 @@
 //!   field at all — parsed only to warn that it exists, never written anywhere.
 //! - hy2 `obfs=salamander`/`obfs-password` *is* a plain shared secret (both sides must already
 //!   agree on it) and *is* fully reusable — imported into `streamSettings.finalmask.udp[]`.
+//! - `fm` (the client's `finalmask` JSON) is parsed as text; import turns it into the server's
+//!   chains, minus what only the client uses (Roadmap §2.6 stage 6.2,
+//!   [`crate::xray::server_finalmask_from_client`]).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -607,8 +610,14 @@ pub struct ParsedShareUri {
     /// hy2 `obfs-password`, only when `obfs=salamander` was present — the one Hysteria security
     /// param that *is* fully reusable (see module doc).
     pub obfs_salamander_password: Option<String>,
+    /// hy2 `obfs` as written, when present — import warns about a type other than salamander.
+    pub obfs: Option<String>,
     /// hy2 `pinSHA256`, kept only to warn it exists — no server-side field to import it into.
     pub pin_sha256: Option<String>,
+    /// `fm` (percent-decoded): the client's `streamSettings.finalmask` JSON, as the share-link
+    /// standard (§4.3.20) defines it for `vless://` / `trojan://`. Read for hy2 too, as v2rayN
+    /// does. Import turns it into server chains (Roadmap §2.6 stage 6.2).
+    pub finalmask: Option<String>,
 }
 
 /// Parses a `vless://`, `trojan://`, or `hy2://`/`hysteria2://` share URI.
@@ -752,8 +761,15 @@ fn parse_vless_trojan_fields(
         security,
         transport,
         obfs_salamander_password: None,
+        obfs: None,
         pin_sha256: None,
+        finalmask: query_text(query, "fm"),
     }
+}
+
+/// A non-blank query value.
+fn query_text(query: &HashMap<String, String>, key: &str) -> Option<String> {
+    query.get(key).filter(|value| !value.trim().is_empty()).cloned()
 }
 
 fn parse_hy2_fields(
@@ -788,7 +804,9 @@ fn parse_hy2_fields(
         security,
         transport: ShareTransport::Tcp,
         obfs_salamander_password,
+        obfs: query_text(query, "obfs"),
         pin_sha256: query.get("pinSHA256").cloned().filter(|s| !s.is_empty()),
+        finalmask: query_text(query, "fm"),
     }
 }
 
@@ -1107,6 +1125,21 @@ mod tests {
             req.finalmask = Some(empty.to_owned());
             assert!(!build_share_uri(&req).expect("no fm").contains("fm="), "{empty:?}");
         }
+    }
+
+    #[test]
+    fn parses_fm_and_hy2_obfs_type() {
+        let fm = r#"{"tcp":[{"type":"sudoku","settings":{"password":"p&q"}}]}"#;
+        let mut req = reality_tcp_vless();
+        req.finalmask = Some(fm.to_owned());
+        let parsed = parse_share_uri(&build_share_uri(&req).expect("uri")).expect("parse");
+        assert_eq!(parsed.finalmask.as_deref(), Some(fm));
+        assert_eq!(parse_share_uri("trojan://pw@host:443?fm=").expect("parse").finalmask, None);
+
+        let hy2 = parse_share_uri("hy2://a@host:443?obfs=gecko&obfs-password=x&fm=%7B%7D").expect("parse");
+        assert_eq!(hy2.obfs.as_deref(), Some("gecko"));
+        assert_eq!(hy2.obfs_salamander_password, None);
+        assert_eq!(hy2.finalmask.as_deref(), Some("{}"));
     }
 
     #[test]

@@ -8423,3 +8423,51 @@ finalmask, который клиент построил бы сам (`V2rayOutbo
   `domains[].name` → `names[]`, `resolvers[].type`+`settings.addr` → `addrs[]`, умолчание
   `types`. В `fm` `xdns` копируется дословно и от схемы не зависит; типизированный редактор
   (§1.3) — отдельный пункт Roadmap.
+
+# 93	FinalMask — этап 6.2: импорт `fm` в серверные цепочки (0.5.40-0)
+
+## 93.1	Правила (обратные §92.2)
+
+`fm` из вставленной ссылки — клиентский `finalmask`; новому inbound нужна серверная цепочка.
+Та же таблица, прочитанная в обратную сторону (`server_finalmask_from_client`):
+
+| Клиентский слой | На сервер | Предупреждение |
+| --------------- | --------- | -------------- |
+| `fragment`, `noise` | нет | «формирует только то, что шлёт клиент, серверу пара не нужна» |
+| `udphop` | нет | «client-only, сервер не может с ним слушать» |
+| `xicmp` | без `ips`, `dgram` | на сервере `ips` — допустимые пиры (иной смысл), `dgram` игнорируется |
+| `xdns` | без `resolvers` | сервер их игнорирует |
+| `realm` | без `ipMode`, `portMapping` | описывают сеть клиента |
+| `xmc` | без `hostname` | сервер его игнорирует |
+| `header-custom`, `sudoku`, `mkcp-legacy`, `salamander` | как есть | — |
+| неизвестный тип | как есть | «проверьте, нужен ли серверу» |
+| `quicParams`, прочие ключи `fm` | нет | по ключу |
+
+Предупреждение выдаётся только при реальном удалении ключа. Нечитаемый `fm` (не JSON, не
+объект, цепочка не список слоёв) — ничего из этой цепочки не импортируется, с предупреждением.
+Симметричная цепочка проходит круг «сервер → `fm` → сервер» без изменений (тест).
+
+Hysteria: inbound слушает только `udp[]` — `fm.tcp` не импортируется (предупреждение); при
+`fm` и `obfs` одновременно побеждает `fm` (как у v2rayN, где `fm` заменяет собственный
+finalmask клиента); `obfs` не `salamander` (нестандартный `gecko` v2rayN) — предупреждение
+вместо прежнего молчаливого пропуска. Без `fm` — прежний импорт salamander (§83).
+
+## 93.2	Код
+
+- `stream/finalmask_client.rs`: `ServerFinalMaskImport {tcp, udp, warnings}`,
+  `server_finalmask_from_client(fm)`.
+- `share_uri.rs`: `ParsedShareUri.finalmask` (`fm`, у всех схем) и `.obfs` (тип hy2 obfs как
+  есть).
+- `app/inbound_import.rs`: `ImportPreview.finalmask_tcp` / `finalmask_udp` /
+  `finalmask_summary`; `import_finalmask` (в т.ч. перенесённое из GUI построение salamander-слоя
+  из `obfs`).
+- `gui/pages/inbounds.rs`: строка «FinalMask» в предпросмотре импорта; «Create new inbound»
+  присваивает готовые цепочки черновику (раньше GUI сам собирал JSON salamander-слоя). «Add
+  user to existing inbound» цепочки не трогает — сказано в подсказке.
+
+Тесты (+6): `import_keeps_symmetric_layers_and_reports_the_rest`,
+`import_of_unreadable_fm_imports_nothing`, `share_then_import_round_trips_symmetric_chains`
+(`finalmask_client`), `parses_fm_and_hy2_obfs_type` (`share_uri`),
+`vless_fm_becomes_server_chains`, `hysteria_fm_replaces_obfs_and_drops_tcp` (`inbound_import`;
+расширен `hysteria_obfs_password_produces_no_warning_itself`). Итог: **1307 passed / 0 failed**,
+clippy lib 66 (без изменений).

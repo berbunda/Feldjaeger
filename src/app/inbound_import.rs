@@ -17,7 +17,10 @@
 //! (`gui::pages::inbounds`) — the same layer that already owns `apply_inbound_preset`
 //! (Roadmap §3:123), which this mirrors.
 
-use crate::xray::{InboundClientProtocol, ParsedShareUri, ShareProtocol, ShareSecurity, ShareTransport};
+use crate::xray::{
+    FinalMaskLayerDraft, InboundClientProtocol, ParsedShareUri, ShareProtocol, ShareSecurity, ShareTransport,
+    server_finalmask_from_client,
+};
 
 /// A parsed share URI, summarized for display, plus every warning about what this import can't
 /// fully reproduce.
@@ -38,6 +41,14 @@ pub struct ImportPreview {
     pub email_hint: String,
     /// VLESS flow, when present.
     pub flow: Option<String>,
+    /// `finalmask.tcp` layers for a new inbound, from the link's `fm` (Roadmap §2.6 stage 6.2);
+    /// `None` = nothing to write.
+    pub finalmask_tcp: Option<Vec<FinalMaskLayerDraft>>,
+    /// `finalmask.udp` layers for a new inbound, from `fm` or a hy2 salamander `obfs`.
+    pub finalmask_udp: Option<Vec<FinalMaskLayerDraft>>,
+    /// Human-readable FinalMask summary, e.g. `"tcp: sudoku · udp: salamander"`; `None` when the
+    /// link carries no masks.
+    pub finalmask_summary: Option<String>,
     /// Everything this import can't fully reproduce, in a fixed, deterministic order — never
     /// hidden (`rules.md`: "must not hide configuration options").
     pub warnings: Vec<String>,
@@ -85,6 +96,9 @@ pub fn build_import_preview(parsed: ParsedShareUri) -> ImportPreview {
         );
     }
 
+    let (finalmask_tcp, finalmask_udp) = import_finalmask(&parsed, &mut warnings);
+    let finalmask_summary = summarize_finalmask(finalmask_tcp.as_deref(), finalmask_udp.as_deref());
+
     ImportPreview {
         protocol,
         port: parsed.port,
@@ -93,9 +107,68 @@ pub fn build_import_preview(parsed: ParsedShareUri) -> ImportPreview {
         user_id: parsed.user_id.clone(),
         email_hint: parsed.remark.clone().unwrap_or_default(),
         flow: parsed.flow.clone(),
+        finalmask_tcp,
+        finalmask_udp,
+        finalmask_summary,
         warnings,
         parsed,
     }
+}
+
+type Layers = Option<Vec<FinalMaskLayerDraft>>;
+
+/// The new inbound's FinalMask chains (Roadmap §2.6 stage 6.2): `fm` turned into server chains;
+/// for hy2 without `fm`, a salamander `obfs` as one `udp` layer (stage 4.1 import). A hy2 inbound
+/// listens only through `udp[]`, so an `fm.tcp` chain is reported instead of imported; when a hy2
+/// link has both, `fm` wins — clients do the same (v2rayN replaces its own finalmask with `fm`).
+fn import_finalmask(parsed: &ParsedShareUri, warnings: &mut Vec<String>) -> (Layers, Layers) {
+    let hysteria = parsed.protocol == ShareProtocol::Hysteria;
+    if hysteria
+        && let Some(obfs) = parsed.obfs.as_deref()
+        && !obfs.trim().eq_ignore_ascii_case("salamander")
+    {
+        warnings.push(format!(
+            "hy2 `obfs={obfs}` isn't a standard hy2 obfs (only salamander is) — not imported; add the \
+             layer on the Stream tab if the server needs it."
+        ));
+    }
+    let Some(fm) = parsed.finalmask.as_deref() else {
+        let udp = hysteria
+            .then_some(parsed.obfs_salamander_password.as_ref())
+            .flatten()
+            .map(|password| {
+                vec![FinalMaskLayerDraft {
+                    layer_type: "salamander".to_owned(),
+                    settings: serde_json::json!({ "password": password }),
+                }]
+            });
+        return (None, udp);
+    };
+    let import = server_finalmask_from_client(fm);
+    warnings.extend(import.warnings);
+    if !hysteria {
+        return (import.tcp, import.udp);
+    }
+    if import.tcp.is_some() {
+        warnings.push(
+            "fm.tcp is not imported — a Hysteria inbound listens only through finalmask.udp.".to_owned(),
+        );
+    }
+    if parsed.obfs_salamander_password.is_some() {
+        warnings.push("hy2 `obfs` is ignored — the link's `fm` replaces it.".to_owned());
+    }
+    (None, import.udp)
+}
+
+fn summarize_finalmask(tcp: Option<&[FinalMaskLayerDraft]>, udp: Option<&[FinalMaskLayerDraft]>) -> Option<String> {
+    let chain = |key: &str, layers: Option<&[FinalMaskLayerDraft]>| {
+        layers.map(|layers| {
+            let types: Vec<&str> = layers.iter().map(|layer| layer.layer_type.as_str()).collect();
+            format!("{key}: {}", types.join(", "))
+        })
+    };
+    let parts: Vec<String> = [chain("tcp", tcp), chain("udp", udp)].into_iter().flatten().collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 fn describe_security(parsed: &ParsedShareUri, warnings: &mut Vec<String>) -> String {
@@ -258,11 +331,57 @@ mod tests {
         assert!(preview.warnings.iter().any(|w| w.contains("pinSHA256")));
     }
 
+    /// Roadmap §2.6 stage 6.2: a link's `fm` becomes the new inbound's chains, minus what only the
+    /// client uses — each omission is a warning.
+    #[test]
+    fn vless_fm_becomes_server_chains() {
+        let fm = r#"{"tcp":[{"type":"fragment","settings":{}},{"type":"sudoku","settings":{"password":"p"}}],"udp":[{"type":"mkcp-legacy","settings":{"value":"s"}}]}"#;
+        let uri = format!(
+            "vless://11111111-1111-1111-1111-111111111111@host:443?security=tls&type=kcp&fm={}",
+            crate::xray::pct_encode(fm)
+        );
+        let preview = build_import_preview(parse_share_uri(&uri).expect("parse"));
+        let layer = |kind: &str, settings: serde_json::Value| FinalMaskLayerDraft {
+            layer_type: kind.to_owned(),
+            settings,
+        };
+        assert_eq!(preview.finalmask_tcp, Some(vec![layer("sudoku", serde_json::json!({"password": "p"}))]));
+        assert_eq!(preview.finalmask_udp, Some(vec![layer("mkcp-legacy", serde_json::json!({"value": "s"}))]));
+        assert_eq!(preview.finalmask_summary.as_deref(), Some("tcp: sudoku · udp: mkcp-legacy"));
+        assert!(preview.warnings.iter().any(|w| w.contains("`fragment`")), "{:?}", preview.warnings);
+
+        let plain = build_import_preview(parse_share_uri("trojan://pw@host:443?security=tls").expect("parse"));
+        assert_eq!((plain.finalmask_tcp, plain.finalmask_udp, plain.finalmask_summary), (None, None, None));
+    }
+
+    #[test]
+    fn hysteria_fm_replaces_obfs_and_drops_tcp() {
+        let fm = r#"{"tcp":[{"type":"sudoku","settings":{}}],"udp":[{"type":"salamander","settings":{"password":"fm"}}]}"#;
+        let uri = format!(
+            "hy2://auth@host:443?obfs=salamander&obfs-password=cat&fm={}",
+            crate::xray::pct_encode(fm)
+        );
+        let preview = build_import_preview(parse_share_uri(&uri).expect("parse"));
+        assert_eq!(preview.finalmask_tcp, None);
+        let udp = preview.finalmask_udp.expect("udp");
+        assert_eq!(udp[0].settings, serde_json::json!({"password": "fm"}));
+        assert!(preview.warnings.iter().any(|w| w.contains("fm.tcp is not imported")));
+        assert!(preview.warnings.iter().any(|w| w.contains("`obfs` is ignored")));
+
+        let gecko = build_import_preview(parse_share_uri("hy2://a@host:443?obfs=gecko&obfs-password=x").expect("parse"));
+        assert_eq!(gecko.finalmask_udp, None);
+        assert!(gecko.warnings.iter().any(|w| w.contains("obfs=gecko")), "{:?}", gecko.warnings);
+    }
+
     #[test]
     fn hysteria_obfs_password_produces_no_warning_itself() {
         let parsed = parse_share_uri("hy2://auth@host:443?obfs=salamander&obfs-password=cat").expect("parse");
         let preview = build_import_preview(parsed);
         assert!(!preview.warnings.iter().any(|w| w.contains("obfs")));
         assert_eq!(preview.parsed.obfs_salamander_password.as_deref(), Some("cat"));
+        let udp = preview.finalmask_udp.expect("salamander layer");
+        assert_eq!(udp[0].layer_type, "salamander");
+        assert_eq!(udp[0].settings, serde_json::json!({"password": "cat"}));
+        assert_eq!(preview.finalmask_summary.as_deref(), Some("udp: salamander"));
     }
 }

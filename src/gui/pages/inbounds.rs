@@ -27,7 +27,7 @@ use crate::gui::pages::{
 };
 use crate::xray::{
     ALPN_PRESETS, CERT_USAGE_PRESETS, CURVE_PRESETS, CompatibilityWarning, FINGERPRINT_PRESETS, FallbackDest,
-    FallbackDestKind, FallbackObject, FinalMaskLayerDraft, InboundStreamDraft, InboundSummary,
+    FallbackDestKind, FallbackObject, InboundStreamDraft, InboundSummary,
     KCP_CWND_MULTIPLIER_MIN, KCP_DEFAULT_CWND_MULTIPLIER, KCP_DEFAULT_MAX_SENDING_WINDOW,
     KCP_IGNORED_FIELDS, KCP_MTU_MIN, KCP_TTI_MAX, KCP_TTI_MIN, KcpStreamSettings, ShareSecurity, ShareTransport, StreamDirection,
     TLS_VERSION_PRESETS, TUNNEL_NETWORKS, CertificateDraft,
@@ -4861,6 +4861,14 @@ fn show_import_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                         ui.label(flow);
                         ui.end_row();
                     }
+                    if let Some(finalmask) = &preview.finalmask_summary {
+                        ui.label("FinalMask:");
+                        ui.label(finalmask).on_hover_text(
+                            "Server layers from the link's fm / obfs — applied when creating a new \
+                             inbound; adding a user to an existing inbound keeps its own chains.",
+                        );
+                        ui.end_row();
+                    }
                 });
 
             for warning in &preview.warnings {
@@ -5047,11 +5055,15 @@ fn apply_import_to_new_inbound(ui: &Ui, service: &mut ApplicationService, previe
                     session.stream.method = Some(StreamMethod::Mkcp);
                 }
             }
-        } else if let Some(password) = &parsed.obfs_salamander_password {
-            session.stream.finalmask_udp = vec![FinalMaskLayerDraft {
-                layer_type: "salamander".to_owned(),
-                settings: serde_json::json!({ "password": password }),
-            }];
+        }
+        // FinalMask from `fm` / hy2 `obfs`, already turned into server chains by the preview
+        // (Roadmap §2.6 stage 6.2).
+        if let Some(layers) = &preview.finalmask_tcp {
+            session.stream.finalmask_tcp = layers.clone();
+            session.stream.write_finalmask_tcp = true;
+        }
+        if let Some(layers) = &preview.finalmask_udp {
+            session.stream.finalmask_udp = layers.clone();
             session.stream.write_finalmask_udp = true;
         }
     }
