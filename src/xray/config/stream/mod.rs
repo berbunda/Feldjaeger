@@ -10,6 +10,7 @@
 //!
 //! Contents:
 //! - [`finalmask`] — `finalmask.tcp[]` / `finalmask.udp[]` layer chains;
+//! - [`finalmask_client`] — the client chain of an inbound's chains (share `fm`, stage 6.1);
 //! - [`finalmask_layers`] — typed `settings` of individual layer types (`realm`, `xdns`,
 //!   `mkcp-legacy`, `header-custom` and `xmc` in their own modules);
 //! - [`values`] — shape-preserving `Int32Range` / `PortList` / `packet` values;
@@ -20,6 +21,7 @@
 //! `inbound_stream` and move here with the Outbound `streamSettings` editor (Tier 4 §4.2).
 
 pub mod finalmask;
+pub mod finalmask_client;
 #[cfg(test)]
 mod finalmask_fixtures;
 #[cfg(test)]
@@ -36,11 +38,13 @@ pub mod sockopt;
 pub mod values;
 
 pub use finalmask::{
-    CLIENT_ONLY_UDP_FINALMASK_TYPES, FinalMaskChain, FinalMaskLayerDraft, TCP_FINALMASK_TYPES,
+    CLIENT_ONLY_UDP_FINALMASK_TYPES, FinalMaskChain, FinalMaskLayerDraft,
+    TCP_FINALMASK_TYPES, finalmask_tcp_layer_faces_probes,
     UDP_FINALMASK_TYPES, finalmask_layer_type_applies, finalmask_layers_to_value,
     validate_finalmask_layer, hy2_share_obfs, parse_finalmask_layers,
     validate_finalmask_layers,
 };
+pub use finalmask_client::{ClientFinalMask, client_finalmask};
 pub use finalmask_layers::{
     FRAGMENT_PACKETS_TLSHELLO, FragmentPackets, fragment_packets_mode, NoiseItemPayload, SALAMANDER_MIN_PASSWORD_BYTES,
     SUDOKU_ASCII_MODES, SUDOKU_MAX_PADDING, validate_sudoku_custom_table, validate_sudoku_settings,
@@ -69,7 +73,8 @@ pub use finalmask_header_custom::{
 };
 pub use finalmask_mkcp::{
     MKCP_LEGACY_DEFAULT_DNS_DOMAIN, MKCP_LEGACY_HEADERS, MkcpLegacyMode, MkcpLegacySettings,
-    mkcp_legacy_settings_to_value, parse_mkcp_legacy_settings, validate_mkcp_legacy_settings,
+    mkcp_legacy_layers_from_kcp, mkcp_legacy_settings_to_value, parse_mkcp_legacy_settings,
+    validate_mkcp_legacy_settings,
 };
 pub use finalmask_raw::HEADER_CUSTOM_UDP_MODES;
 pub use finalmask_xmc::{

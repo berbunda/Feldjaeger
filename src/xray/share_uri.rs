@@ -135,6 +135,10 @@ pub struct ShareUriRequest {
     /// SHA-256 pin of the leaf TLS certificate, surfaced as hy2 `pinSHA256` (Roadmap §3:121).
     /// Ignored for VLESS/Trojan.
     pub pin_sha256: Option<String>,
+    /// The client's `streamSettings.finalmask` as one-line JSON, surfaced as `fm` (share-link
+    /// standard §4.3.20, Roadmap §2.6 stage 6.1). Ignored for Hysteria — hy2 links carry only
+    /// `obfs`. May hold mask passwords: redacted in [`Debug`].
+    pub finalmask: Option<String>,
 }
 
 impl fmt::Debug for ShareUriRequest {
@@ -149,6 +153,7 @@ impl fmt::Debug for ShareUriRequest {
             .field("encryption", &redact_encryption(&self.encryption))
             .field("security", &self.security)
             .field("transport", &self.transport)
+            .field("finalmask", &self.finalmask.as_ref().map(|_| "[REDACTED]"))
             .finish()
     }
 }
@@ -377,6 +382,14 @@ pub fn build_share_uri(request: &ShareUriRequest) -> Result<String, ShareUriErro
                 query.push(("flow".to_owned(), flow.to_owned()));
             }
         }
+    }
+    if let Some(finalmask) = request
+        .finalmask
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && *s != "{}")
+    {
+        query.push(("fm".to_owned(), finalmask.to_owned()));
     }
 
     uri.push('?');
@@ -820,6 +833,7 @@ mod tests {
             port_hop: None,
             obfs_salamander_password: None,
             pin_sha256: None,
+            finalmask: None,
         }
     }
 
@@ -841,6 +855,7 @@ mod tests {
             port_hop: None,
             obfs_salamander_password: None,
             pin_sha256: None,
+            finalmask: None,
         }
     }
 
@@ -899,6 +914,7 @@ mod tests {
             port_hop: None,
             obfs_salamander_password: None,
             pin_sha256: None,
+            finalmask: None,
         };
         let uri = build_share_uri(&req).expect("uri");
         assert!(uri.starts_with("trojan://p%40ss%20word@example.com:8443?"));
@@ -926,6 +942,7 @@ mod tests {
             port_hop: None,
             obfs_salamander_password: None,
             pin_sha256: None,
+            finalmask: None,
         };
         let uri = build_share_uri(&req).expect("uri");
         assert!(uri.contains("security=none"));
@@ -959,6 +976,7 @@ mod tests {
             port_hop: None,
             obfs_salamander_password: None,
             pin_sha256: None,
+            finalmask: None,
         };
         let uri = build_share_uri(&req).expect("uri");
         assert!(uri.contains("security=tls"));
@@ -986,6 +1004,7 @@ mod tests {
             port_hop: None,
             obfs_salamander_password: None,
             pin_sha256: None,
+            finalmask: None,
         };
         let err = build_share_uri(&req).unwrap_err();
         assert!(err.detail().contains("TLS"));
@@ -1010,6 +1029,7 @@ mod tests {
             port_hop: None,
             obfs_salamander_password: None,
             pin_sha256: None,
+            finalmask: None,
         };
         let uri = build_share_uri(&req).expect("uri");
         assert!(uri.contains("security=tls"));
@@ -1031,6 +1051,7 @@ mod tests {
             port_hop: None,
             obfs_salamander_password: None,
             pin_sha256: None,
+            finalmask: None,
         };
         let err = build_share_uri(&req).unwrap_err();
         assert!(err.detail().contains("mKCP"));
@@ -1060,6 +1081,39 @@ mod tests {
         req.address = "2001:db8::1".to_owned();
         let uri = build_share_uri(&req).expect("uri");
         assert!(uri.contains("@[2001:db8::1]:443?"));
+    }
+
+    #[test]
+    fn builds_fm_as_encoded_json_for_vless_and_trojan() {
+        let fm = r#"{"tcp":[{"type":"sudoku","settings":{"password":"p&q"}}]}"#;
+        let mut req = reality_tcp_vless();
+        req.finalmask = Some(fm.to_owned());
+        let uri = build_share_uri(&req).expect("vless fm");
+        let value = uri
+            .split(['?', '#'])
+            .nth(1)
+            .and_then(|query| query.split('&').find_map(|pair| pair.strip_prefix("fm=")))
+            .expect("fm in the query");
+        // Fully escaped (`{`, `"`, `:`, `&` too), so the JSON survives any query parser.
+        assert!(value.chars().all(|c| c.is_ascii_alphanumeric() || "%-._~".contains(c)), "{value}");
+        assert_eq!(pct_decode(value), fm);
+        assert!(format!("{req:?}").contains("finalmask: Some(\"[REDACTED]\")"));
+        assert!(!format!("{req:?}").contains("p&q"));
+
+        req.protocol = ShareProtocol::Trojan;
+        assert!(build_share_uri(&req).expect("trojan fm").contains("&fm=%7B"));
+
+        for empty in ["", "  ", "{}"] {
+            req.finalmask = Some(empty.to_owned());
+            assert!(!build_share_uri(&req).expect("no fm").contains("fm="), "{empty:?}");
+        }
+    }
+
+    #[test]
+    fn hy2_ignores_fm() {
+        let mut req = hy2_base();
+        req.finalmask = Some(r#"{"udp":[{"type":"xdns","settings":{}}]}"#.to_owned());
+        assert!(!build_share_uri(&req).expect("hy2").contains("fm="));
     }
 
     #[test]
@@ -1127,6 +1181,7 @@ mod tests {
             port_hop: None,
             obfs_salamander_password: None,
             pin_sha256: None,
+            finalmask: None,
         })
         .expect("tls");
         assert!(uri.contains("security=tls"));
@@ -1201,6 +1256,7 @@ mod tests {
             port_hop: None,
             obfs_salamander_password: None,
             pin_sha256: None,
+            finalmask: None,
         })
         .expect("uri");
         let parsed = parse_share_uri(&uri).expect("parse");

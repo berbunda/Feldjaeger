@@ -276,6 +276,20 @@ fn compose_session_inbound(
     Some(inbound)
 }
 
+/// The FinalMask a client of an inbound needs (Roadmap §2.6 stage 6.1), ready for the Share menu.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientShareFinalMask {
+    /// The client's `streamSettings.finalmask` as indented JSON — what "Copy client finalmask
+    /// JSON" copies. Holds mask passwords: never log it.
+    pub json: String,
+    /// Types of the mirrored layers, in chain order.
+    pub layer_types: Vec<String>,
+    /// What the client still has to add or check.
+    pub notes: Vec<String>,
+    /// Whether the share URI carries it as `fm` (VLESS / Trojan); hy2 links do not.
+    pub in_share_uri: bool,
+}
+
 /// Top-level application service exposed to the GUI.
 ///
 /// Hides SSH, init-system, Xray, and config-file wiring from presentation code.
@@ -4650,6 +4664,14 @@ impl ApplicationService {
         } else {
             None
         };
+        // VLESS / Trojan links carry the client's FinalMask as `fm` (Roadmap §2.6 stage 6.1).
+        let finalmask = match protocol {
+            InboundClientProtocol::Vless | InboundClientProtocol::Trojan => {
+                Self::client_finalmask_of(Some(inbound_value), &stream_draft, security_draft.as_ref())?
+                    .map(|finalmask| finalmask.compact_json())
+            }
+            _ => None,
+        };
 
         let request = ShareUriRequest {
             protocol: share_protocol,
@@ -4664,8 +4686,99 @@ impl ApplicationService {
             port_hop,
             obfs_salamander_password,
             pin_sha256,
+            finalmask,
         };
         build_share_uri(&request).map_err(|e| e.detail().to_owned())
+    }
+
+    /// The client's FinalMask for an inbound (Roadmap §2.6 stage 6.1): the chain its listener
+    /// uses, as [`crate::xray::client_finalmask`] mirrors it. `stream` / `security` are the typed
+    /// drafts (editor session or disk), `on_disk` the saved inbound when there is one.
+    ///
+    /// Only the chain the transport dials through goes to the client — `udp[]` for mKCP,
+    /// Hysteria and XHTTP/3 (TLS with `alpn` exactly `["h3"]`), `tcp[]` otherwise; VLESS / Trojan
+    /// / Hysteria have no separate UDP worker (`inbound_finalmask_chain_use`). A chain on disk the
+    /// typed model can't read is an error, not "no masks": the client built from it would not
+    /// connect.
+    fn client_finalmask_of(
+        on_disk: Option<&serde_json::Value>,
+        stream: &crate::xray::InboundStreamDraft,
+        security: Option<&InboundSecurityDraft>,
+    ) -> Result<Option<crate::xray::ClientFinalMask>, String> {
+        use crate::xray::{FinalMaskChain, StreamMethod};
+
+        if stream.finalmask_foreign {
+            return Err(
+                "streamSettings.finalmask is not a JSON object — fix it on the Raw JSON tab before sharing."
+                    .to_owned(),
+            );
+        }
+        let http3 = security.is_some_and(|security| {
+            security.mode == InboundSecurityMode::Tls && crate::xray::alpn_selects_http3(&security.tls.alpn)
+        });
+        let chain = match stream.method {
+            Some(StreamMethod::Mkcp | StreamMethod::Hysteria) => FinalMaskChain::Udp,
+            Some(StreamMethod::Xhttp) if http3 => FinalMaskChain::Udp,
+            Some(_) => FinalMaskChain::Tcp,
+            None if stream.other_method.is_none() => FinalMaskChain::Tcp,
+            None => return Ok(None),
+        };
+        let (layers, typed) = match chain {
+            FinalMaskChain::Tcp => (&stream.finalmask_tcp, stream.write_finalmask_tcp),
+            FinalMaskChain::Udp => (&stream.finalmask_udp, stream.write_finalmask_udp),
+        };
+        let on_disk_chain = on_disk
+            .and_then(|inbound| inbound.pointer(&format!("/streamSettings/finalmask/{}", chain.key())))
+            .is_some_and(|value| !value.is_null());
+        if on_disk_chain && !typed {
+            return Err(format!(
+                "streamSettings.finalmask.{} can't be read — fix it on the Stream tab before sharing.",
+                chain.key()
+            ));
+        }
+        Ok(crate::xray::client_finalmask(&[(chain, layers.as_slice())]))
+    }
+
+    /// The FinalMask a client of inbound `inbound_index` needs, for the Share menu's "Copy client
+    /// finalmask JSON" (Roadmap §2.6 stage 6.1). `Ok(None)` when the client needs no masks or the
+    /// protocol has no share link; `Err` when the chain can't be read (Share then says why).
+    /// Like [`Self::build_client_share_uri`], prefers the open editor draft of that inbound.
+    pub fn client_share_finalmask(&self, inbound_index: usize) -> Result<Option<ClientShareFinalMask>, String> {
+        let Some(inbound) = self
+            .loaded_config
+            .editable()
+            .and_then(|editable| editable.sections().inbounds().get(inbound_index))
+            .map(|inbound| inbound.value())
+        else {
+            return Ok(None);
+        };
+        let in_share_uri = match inbound
+            .get("protocol")
+            .and_then(serde_json::Value::as_str)
+            .and_then(InboundClientProtocol::from_wire)
+        {
+            Some(InboundClientProtocol::Vless | InboundClientProtocol::Trojan) => true,
+            Some(InboundClientProtocol::Hysteria) => false,
+            _ => return Ok(None),
+        };
+        let session = self
+            .inbound_editor_session
+            .as_ref()
+            .filter(|s| !s.is_add && s.inbound_index == inbound_index);
+        let finalmask = match session {
+            Some(session) => Self::client_finalmask_of(Some(inbound), &session.stream, session.security.as_ref())?,
+            None => Self::client_finalmask_of(
+                Some(inbound),
+                &crate::xray::parse_inbound_stream(inbound),
+                Some(&crate::xray::parse_inbound_security(inbound)),
+            )?,
+        };
+        Ok(finalmask.map(|finalmask| ClientShareFinalMask {
+            json: finalmask.pretty_json(),
+            layer_types: finalmask.layer_types,
+            notes: finalmask.notes,
+            in_share_uri,
+        }))
     }
 
     /// hy2 `obfs` of a Hysteria inbound, from the typed `finalmask.udp` chain (Roadmap §2.6 stage
@@ -4729,6 +4842,66 @@ impl ApplicationService {
                 .map(|inbound| inbound.value())
         };
         Self::hysteria_share_obfs(on_disk, &session.stream).err()
+    }
+
+    /// Why "Migrate header/seed to FinalMask" (Roadmap §2.6 stage 5.2) can't run for the open
+    /// editor session, if it can't: the installed core predates `mkcp-legacy` (before v26.1.31
+    /// the legacy keys even still work), or `finalmask.udp` is on disk but the typed model could
+    /// not read it, so writing the new chain would replace it. `None` also when there is nothing
+    /// to migrate — the editor then shows no button. Draft-level refusals (a non-empty chain, a
+    /// value without a faithful equivalent) come from the migration itself.
+    pub fn editor_kcp_legacy_migration_blocked_reason(&self) -> Option<String> {
+        let session = self.inbound_editor_session.as_ref()?;
+        if session.stream.method != Some(crate::xray::StreamMethod::Mkcp)
+            || !session.stream.kcp.has_legacy_obfuscation()
+        {
+            return None;
+        }
+        if let Some(installed) = self.xray_core_version()
+            && !crate::xray::CoreFeature::MkcpLegacyMask.available_in(Some(installed))
+        {
+            return Some(format!(
+                "the installed Xray-core {installed} has no `mkcp-legacy` mask (v26.6.1+, \
+                 XTLS/Xray-core#6201) — upgrade the core first"
+            ));
+        }
+        let udp_on_disk = !session.is_add
+            && self
+                .loaded_config
+                .editable()
+                .and_then(|editable| editable.sections().inbounds().get(session.inbound_index))
+                .and_then(|inbound| inbound.value().pointer("/streamSettings/finalmask/udp"))
+                .is_some_and(|udp| !udp.is_null());
+        if udp_on_disk && !session.stream.write_finalmask_udp {
+            return Some(
+                "streamSettings.finalmask.udp on disk can't be read by the editor; fix it on the \
+                 Raw JSON tab first"
+                    .to_owned(),
+            );
+        }
+        None
+    }
+
+    /// Runs the mKCP header/seed migration on the editor draft (Roadmap §2.6 stage 5.2) and
+    /// fills the session's JSON diff preview, so the change is reviewed before Save writes it.
+    /// Returns a status line; `Err` = the migration was refused and the draft is unchanged. A
+    /// preview that fails for another reason in the draft does not undo the migration — the
+    /// status line says so.
+    pub fn migrate_editor_kcp_legacy_obfuscation(&mut self) -> Result<String, String> {
+        if let Some(reason) = self.editor_kcp_legacy_migration_blocked_reason() {
+            return Err(reason);
+        }
+        let session = self
+            .inbound_editor_session
+            .as_mut()
+            .ok_or_else(|| "Not editing an inbound.".to_owned())?;
+        let added = session.stream.migrate_kcp_legacy_obfuscation()?;
+        session.dirty = true;
+        let moved = format!("Moved kcpSettings.header/seed into finalmask.udp ({added} mkcp-legacy layer(s)).");
+        Ok(match self.preview_inbound_shell_diff() {
+            Ok(()) => format!("{moved} Review the diff, then Save."),
+            Err(error) => format!("{moved} Diff preview unavailable: {error}"),
+        })
     }
 
     /// Refreshes the fingerprint in the editor session after a users mutation.
@@ -12397,6 +12570,100 @@ mod tests {
         let _ = fs::remove_dir_all(service.config.path().parent().unwrap());
     }
 
+    /// Roadmap §2.6 stage 6.1: VLESS / Trojan links carry the client's FinalMask as `fm` — only
+    /// the chain the transport uses, without one-sided layers; hy2 offers the JSON instead.
+    #[test]
+    fn share_uri_fm_carries_the_client_finalmask() {
+        fn fm_of(uri: &str) -> Option<serde_json::Value> {
+            let query = uri.split(['?', '#']).nth(1)?;
+            let value = query.split('&').find_map(|pair| pair.strip_prefix("fm="))?;
+            Some(serde_json::from_str(&crate::xray::pct_decode(value)).expect("fm is JSON"))
+        }
+        fn vless_json(stream: &str) -> String {
+            format!(
+                r#"{{"inbounds":[{{
+                    "tag":"vl-in","protocol":"vless","port":443,"listen":"0.0.0.0",
+                    "settings":{{"clients":[{{"id":"11111111-1111-1111-1111-111111111111"}}],"decryption":"none"}},
+                    "streamSettings":{stream}
+                }}]}}"#
+            )
+        }
+        let tcp = r#"[{"type":"fragment","settings":{"packets":"tlshello"}},{"type":"sudoku","settings":{"password":"p"}}]"#;
+        let udp = r#"[{"type":"noise","settings":{}},{"type":"salamander","settings":{"password":"cat"}}]"#;
+        let share = |name: &str, stream: String| {
+            let mut service = loaded_service_from_json(name, &vless_json(&stream));
+            service.connection_draft_mut().host = "203.0.113.10".to_owned();
+            let result = (service.build_client_share_uri(0, 0), service.client_share_finalmask(0));
+            let _ = fs::remove_dir_all(service.config.path().parent().unwrap());
+            result
+        };
+
+        // RAW dials through `tcp[]`: `fragment` is dropped, `udp[]` is not the client's business.
+        let (uri, copied) = share(
+            "share-fm-raw",
+            format!(r#"{{"network":"raw","security":"none","finalmask":{{"tcp":{tcp},"udp":{udp}}}}}"#),
+        );
+        let uri = uri.expect("raw share");
+        let expected = serde_json::json!({"tcp": [{"type": "sudoku", "settings": {"password": "p"}}]});
+        assert_eq!(fm_of(&uri), Some(expected.clone()), "{uri}");
+        let copied = copied.expect("readable").expect("client masks");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&copied.json).expect("json"), expected);
+        assert_eq!(copied.layer_types, ["sudoku"]);
+        assert!(copied.in_share_uri && copied.notes.is_empty());
+
+        // XHTTP/3 (TLS, `alpn` exactly h3) dials QUIC through `udp[]`.
+        let (uri, _) = share(
+            "share-fm-h3",
+            format!(
+                r#"{{"network":"xhttp","security":"tls","xhttpSettings":{{"path":"/x"}},
+                    "tlsSettings":{{"alpn":["h3"],"certificates":[{{"certificateFile":"/c","keyFile":"/k"}}]}},
+                    "finalmask":{{"tcp":{tcp},"udp":{udp}}}}}"#
+            ),
+        );
+        let uri = uri.expect("h3 share");
+        assert_eq!(
+            fm_of(&uri),
+            Some(serde_json::json!({"udp": [{"type": "salamander", "settings": {"password": "cat"}}]})),
+            "{uri}"
+        );
+
+        // Only one-sided layers: no `fm`, nothing to copy.
+        let (uri, copied) = share(
+            "share-fm-none",
+            r#"{"network":"raw","finalmask":{"tcp":[{"type":"fragment","settings":{}}]}}"#.to_owned(),
+        );
+        assert_eq!(fm_of(&uri.expect("share")), None);
+        assert_eq!(copied, Ok(None));
+
+        // A chain the typed model can't read disables Share rather than dropping the masks.
+        let (uri, copied) = share(
+            "share-fm-unreadable",
+            r#"{"network":"raw","finalmask":{"tcp":[{"settings":{"password":"p"}}]}}"#.to_owned(),
+        );
+        assert!(uri.unwrap_err().contains("finalmask.tcp can't be read"));
+        assert!(copied.unwrap_err().contains("can't be read"));
+
+        // hy2: Share is disabled for a sudoku chain, but the client JSON is still offered.
+        let mut service = loaded_service_from_json(
+            "share-fm-hy2",
+            r#"{"inbounds":[{
+                "tag":"hy-in","protocol":"hysteria","port":443,
+                "settings":{"version":2,"clients":[{"auth":"secret"}]},
+                "streamSettings":{"network":"hysteria","security":"tls",
+                    "tlsSettings":{"certificates":[{"certificateFile":"/c","keyFile":"/k"}]},
+                    "hysteriaSettings":{"version":2},
+                    "finalmask":{"udp":[{"type":"sudoku","settings":{"password":"p"}}]}}
+            }]}"#,
+        );
+        service.connection_draft_mut().host = "203.0.113.10".to_owned();
+        assert!(service.build_client_share_uri(0, 0).is_err());
+        let copied = service.client_share_finalmask(0).expect("readable").expect("client masks");
+        assert!(!copied.in_share_uri);
+        assert_eq!(copied.layer_types, ["sudoku"]);
+        assert_eq!(service.client_share_finalmask(7), Ok(None), "no such inbound");
+        let _ = fs::remove_dir_all(service.config.path().parent().unwrap());
+    }
+
     fn loaded_service_from_json(name: &str, json: &str) -> ApplicationService {
         use crate::xray::XrayConfigParser;
 
@@ -12703,7 +12970,8 @@ mod tests {
     }
 
     /// VLESS inbound with a client-only `udphop` layer that still carries the removed `sockopt`
-    /// (Roadmap §2.6 stages 0.3 / 1.1): one `UdpHopClientOnly` warning on the layer type.
+    /// (Roadmap §2.6 stages 0.3 / 1.1): one `UdpHopClientOnly` warning on the layer type. mKCP,
+    /// so the `udp[]` chain is in use (stage 4.3 flags it on a TCP transport).
     const UDPHOP_SOCKOPT_INBOUND: &str = r#"{
         "inbounds":[{
             "tag":"vless-in",
@@ -12711,7 +12979,7 @@ mod tests {
             "port":443,
             "settings":{"clients":[],"decryption":"none"},
             "streamSettings":{
-                "network":"tcp",
+                "network":"mkcp",
                 "finalmask":{"udp":[
                     {"type":"udphop","settings":{"mode":"intervalRemote","sockopt":{"mark":1}}}
                 ]}
@@ -12808,6 +13076,62 @@ mod tests {
         service.cancel_inbound_editor_session();
         assert!(service.inbound_editor_warnings().is_empty());
         assert!(service.inbound_warnings_cache.is_none());
+    }
+
+    /// Roadmap §2.6 stage 5.2: the migration is refused on a core without `mkcp-legacy`, and
+    /// otherwise moves header/seed on the draft and fills the diff preview — nothing is saved.
+    #[test]
+    fn kcp_legacy_migration_follows_the_core_and_fills_the_diff_preview() {
+        const KCP_LEGACY_INBOUND: &str = r#"{
+            "inbounds":[{
+                "tag":"kcp-in",
+                "protocol":"vless",
+                "port":443,
+                "settings":{"clients":[],"decryption":"none"},
+                "streamSettings":{
+                    "network":"mkcp",
+                    "kcpSettings":{"header":{"type":"utp"},"seed":"s3cret"}
+                }
+            }]
+        }"#;
+        let mut service = loaded_service_from_json("kcp-legacy-migration", KCP_LEGACY_INBOUND);
+        service.begin_edit_inbound_shell(0).expect("begin edit");
+        let discover = |service: &mut ApplicationService, version: &str| {
+            service.discovery = DiscoveryState::Succeeded(crate::xray::XrayInstallation {
+                operating_system: "Debian".to_owned(),
+                architecture: "x86_64".to_owned(),
+                init_system: crate::xray::InitSystemKind::Systemd,
+                binary_path: None,
+                version: Some(version.to_owned()),
+                service_name: None,
+                service_state: None,
+                exec_start: None,
+                config_source: crate::xray::ConfigSource::NotFound,
+                config_readable: false,
+                config_files: Vec::new(),
+                discovery_warnings: Vec::new(),
+            });
+        };
+
+        discover(&mut service, "26.5.9");
+        let reason = service.editor_kcp_legacy_migration_blocked_reason().expect("blocked");
+        assert!(reason.contains("v26.6.1"), "{reason}");
+        let before = service.inbound_editor_session().expect("session").clone();
+        assert_eq!(service.migrate_editor_kcp_legacy_obfuscation(), Err(reason));
+        assert_eq!(service.inbound_editor_session(), Some(&before));
+
+        discover(&mut service, "26.9.30");
+        assert_eq!(service.editor_kcp_legacy_migration_blocked_reason(), None);
+        let message = service.migrate_editor_kcp_legacy_obfuscation().expect("migrated");
+        assert!(message.contains("2 mkcp-legacy layer(s)") && message.contains("Review the diff"), "{message}");
+        let session = service.inbound_editor_session().expect("session");
+        assert!(session.dirty);
+        assert!(!session.stream.kcp.has_legacy_obfuscation());
+        assert!(session.diff_preview.as_ref().is_some_and(|entries| !entries.is_empty()));
+        // Nothing to migrate any more: no button, no reason.
+        assert_eq!(service.editor_kcp_legacy_migration_blocked_reason(), None);
+        // Only the draft changed; the loaded config still has the legacy keys.
+        assert_eq!(service.inbound_warnings_at(0).len(), 2);
     }
 
     #[test]

@@ -2254,7 +2254,7 @@ GUI → ApplicationService (InboundShellDrafts + InboundRef)
   - Remote TLS paths (после G12, до write): `verify_remote_tls_cert_paths` → `SshSession::path_is_file` (SFTP metadata) для non-empty `certificateFile`/`keyFile` на Shell Save / Add
   - Security modes: VLESS `none|tls|reality`; Trojan `tls|reality` (Add default Reality); Hysteria `tls` only; Tunnel — security `none` only (matrix), без Security tab; WebSocket / mKCP ⇒ Reality недоступен (matrix `websocket×reality` / `mkcp×reality` = false)
   - Symmetric strip `tlsSettings` ↔ `realitySettings` на смене mode; unknown `security` → read-only open + Save `ValidationFailed`
-  - Hysteria transport (`StreamMethod::Hysteria`, `hysteriaSettings`, typed `finalmask.quicParams`); Tunnel — transport tcp locked (matrix), Shell Save по-прежнему не мутирует `streamSettings`/`security` в целом, кроме узкого `sockopt.tproxy` (Roadmap §2.3:88, `apply_tunnel_sockopt`) — всё остальное (network/tlsSettings/прочие sockopt-поля) preserve on disk
+  - Hysteria transport (`StreamMethod::Hysteria`, `hysteriaSettings`, typed `finalmask.quicParams`); Tunnel — transport tcp locked (matrix), Shell Save по-прежнему не мутирует `streamSettings`/`security` в целом, кроме узкого `sockopt.tproxy` (Roadmap §2.3:88) и `finalmask.tcp`/`.udp` (Roadmap §2.6 4.2, §88; `apply_tunnel_stream`) — всё остальное (network/tlsSettings/прочие sockopt-поля) preserve on disk
   - WebSocket transport (`StreamMethod::Ws`, `wsSettings`: `path` / `host` / `acceptProxyProtocol` / Early Data `ed`; extras preserve incl. client-only `headers`); wire write всегда `websocket` (read `ws`|`websocket`); не для Hysteria
   - mKCP transport (`StreamMethod::Mkcp`, `kcpSettings` — поля `KCPConfig` ядра, §65: `mtu` / `tti` / `uplinkCapacity` / `downlinkCapacity` + опциональные `cwndMultiplier` / `maxSendingWindow`; defaults ядра на выборе метода; hard-validate как `KCPConfig.Build()`; ядром игнорируемые `congestion`/`readBufferSize`/`writeBufferSize` и legacy `header`/`seed` — extras preserve + предупреждения); wire write всегда `mkcp` (read `kcp`|`mkcp`); не для Hysteria
   - XHTTP transport (`StreamMethod::Xhttp`, `xhttpSettings` Wave C3): `host`/`path`/`mode` + `headers` + ranges (`xPaddingBytes`, `scMaxEachPostBytes`, `scMinPostsIntervalMs`, `scStreamUpServerSecs`, …) + bools (`noSSEHeader`/`noGRPCHeader`) + placement/obfs + nested `xmux` + one-level `downloadSettings` (nested xhttp без рекурсивного download); documented defaults на выборе метода; Save пишет typed surface; hard-validate mode/placement/xmux conflict/ranges; extras preserve; не для Hysteria
@@ -2395,7 +2395,7 @@ GUI (inbounds.rs + users.rs)
 ## 34.7	Compatibility gates (Wave A)
 Save / Add / VLESS client mutate — hard-block через `first_failing_gate`.
 
-Порядок Wave A: G9→G10→G6→G5→G1→G2→G8→G12→G4→G3  
+Порядок Wave A: G9→G10→G6→G5→G1→G2→G8→G12→G3→G13 (G4 выведен в Roadmap §2.6 5.1, §90)  
 (G7 удалён из Save; G11 не в Save до Wave B — SS+exotic configs не ломаем.)
 
 | ID | Правило | Статус |
@@ -2403,7 +2403,7 @@ Save / Add / VLESS client mutate — hard-block через `first_failing_gate`.
 | G1 | Reality ⇒ raw\|tcp\|xhttp\|grpc | Save + filter |
 | G2 | Reality dest host:port | Save |
 | G3 | Vision flow ⇒ raw\|tcp | Save + Users mutate + Stream filter |
-| G4 | Reality + non-empty `streamSettings.finalmask.tcp` (top-level, sibling of `realitySettings`; path fixed §2.3:86 — was incorrectly reading `realitySettings.finalmask.tcp`, which never fires on real configs) | Save |
+| G4 | *(retired, §90)* Reality + non-empty `streamSettings.finalmask.tcp` (top-level, sibling of `realitySettings`; path fixed §2.3:86 — was incorrectly reading `realitySettings.finalmask.tcp`, which never fires on real configs) | message id retained; не в `first_failing_gate`; заменён предупреждением `RealityProbeSeesFinalMask` |
 | G5 | VLESS decryption non-empty | Save |
 | G6 | Trojan ⇒ security ≠ none | Save + filter |
 | G7 | *(retired)* Hysteria shell/users gate | message id retained; не в `first_failing_gate`; GUI IB-L7 block removed |
@@ -5854,7 +5854,7 @@ share-ссылке (6.1).
 
 Композиция Shell Save вынесена из `update_inbound_shell` в `pub fn compose_inbound_shell(inbound,
 protocol, general, protocol_draft, stream, security, sniffing)` — все `apply_*` (general → protocol →
-stream/security или `apply_tunnel_sockopt` для Tunnel → `reconcile_inbound_fallbacks` → sniffing)
+stream/security или `apply_tunnel_stream` для Tunnel (до §88 — `apply_tunnel_sockopt`) → `reconcile_inbound_fallbacks` → sniffing)
 **без** gates (уникальность tag, compatibility, проверка clients). `update_inbound_shell` вызывает её
 внутри `with_inbound_mut`, затем `check_inbound_compatibility`. `build_add_inbound_value` стал `pub`
 для Add-сессий. Итог: предупреждения считаются ровно по тому JSON, который запишет Save / Add —
@@ -5966,7 +5966,7 @@ xray/config/
 │   ├── values.rs              RangeValue / PortListValue / PacketValue (перенесён без изменений)
 │   ├── quic_params.rs         QuicParamsDraft + parse_quic_params + quic_params_to_value (новый)
 │   └── sockopt.rs             SockoptDraft + таблица применимости по направлению
-└── inbound_stream/            транспортные *Settings + apply_inbound_stream / apply_tunnel_sockopt
+└── inbound_stream/            транспортные *Settings + apply_inbound_stream / apply_tunnel_stream
     └── mod.rs                 pub use crate::xray::config::stream::{…}  — API inbound не изменился
 ```
 
@@ -8093,3 +8093,333 @@ self.show_status_message("Saving DNS settings...");
 
 - Новый тест `settings_save_worker_crash_is_reported_even_after_other_message`. Итог:
   **1278 passed / 0 failed**, clippy lib 66 (без изменений).
+
+# 88	FinalMask — этап 4.2: показ по наличию `streamSettings`, FinalMask для Tunnel (0.5.35-0)
+
+## 88.1	Сверка с ядром
+
+`XTLS/Xray-core@main`: `app/proxyman/inbound/always.go` создаёт по `Network()` прокси
+`tcpWorker` и/или `udpWorker`, оба получают `streamSettings` (`mss`):
+
+- `tcpWorker.Start` → `internet.ListenTCP` → для raw-транспорта `tcp/hub.go`:
+  `FinalMask.Listen(ctx, addr)` — цепочка `tcp[]`;
+- `udpWorker.Start` → `udp.ListenUDP` (`transport/internet/udp/hub.go`):
+  `FinalMask.ListenPacket(ctx, addr)` — цепочка `udp[]`.
+
+Tunnel (`proxy/dokodemo`, `Network()` = `settings.allowedNetwork`) проходит оба пути, поэтому для
+него применимы **обе** цепочки: `tcp[]` — при `allowedNetwork` с `tcp`, `udp[]` — с `udp`.
+TUN воркеров не создаёт (`streamSettings` нет) — FinalMask не показывается.
+Предупреждение «слой не будет задействован» по транспорту/сети — этап 4.3.
+
+## 88.2	Модель
+
+`xray/config/inbound_stream/mod.rs`:
+
+- Запись FinalMask вынесена из `apply_inbound_stream` в приватные хелперы
+  `reject_foreign_finalmask_write(stream, writes)` (не-объектный `finalmask` не трогается, §0.5),
+  `validate_finalmask_draft(draft, with_quic_params)` и
+  `write_finalmask_draft(stream, draft, with_quic_params)`; поведение `apply_inbound_stream` не
+  изменилось (`with_quic_params = true`).
+- `apply_tunnel_sockopt` → `apply_tunnel_stream`: Tunnel Shell Save пишет `sockopt` (как раньше)
+  и `finalmask.tcp`/`.udp`. Всё валидируется **до** первой мутации — отклонённый черновик
+  оставляет inbound как был (в т.ч. не создаёт `streamSettings`). `quicParams` у Tunnel не
+  валидируется и не переписывается (QUIC-транспорта нет, редактор его не показывает) — чужой
+  невалидный `quicParams` не ломает Save. Прочие ключи `streamSettings` и `finalmask` — как на
+  диске. Нетронутый `sockopt` (`write_sockopt == false`) больше не пересоздаётся.
+- Add Tunnel уже шёл через `apply_inbound_stream` (метод `Tcp`) — FinalMask из Add-формы
+  записывается без изменений в коде.
+
+## 88.3	GUI
+
+`gui/pages/inbounds.rs`:
+
+- Вкладка Stream: `stream_enabled = shell_ok && has_stream_settings`
+  (`InboundClientProtocol::has_stream_settings`) — Tunnel получил вкладку; Security для Tunnel
+  по-прежнему выключена.
+- `show_stream_edit` разделён: `show_stream_transport_edit(ui, session, protocol) -> bool`
+  (метод и поля транспорта; `false` для экзотического метода — остальное не показывается, как
+  раньше) и общая часть — FinalMask, hy2-предупреждение, Sockopt. Для Tunnel транспортная часть
+  заменена серой строкой «raw TCP / no security (locked)… sockopt.tproxy is on the Protocol tab».
+- Условие показа FinalMask: `matches!(protocol, "vless"|"trojan"|"hysteria")` →
+  `InboundClientProtocol::from_wire(protocol).is_some_and(has_stream_settings)`;
+  `udp_only` — только Hysteria (не Tunnel). Sockopt-секция осталась для VLESS/Trojan/Hysteria:
+  у Tunnel узкий редактор `tproxy` на вкладке Protocol (§2.3:88).
+- Add-форма: секция Stream показывается для всего, кроме TUN.
+- `HELP_FINALMASK_SECTION` (`stream_finalmask.rs`): Tunnel — `tcp[]` для TCP-листенера,
+  `udp[]` для UDP (`settings.allowedNetwork`).
+
+## 88.4	Код и итог
+
+| Область | Путь |
+| ------- | ---- |
+| Модель | `xray/config/inbound_stream/mod.rs`, реэкспорт `xray/config/mod.rs`, `xray/mod.rs` |
+| Shell Save | `xray/config/modify.rs` (`compose_inbound_shell`) |
+| GUI | `gui/pages/inbounds.rs`, `gui/pages/stream_finalmask.rs` |
+
+- Тесты (+3): `apply_tunnel_stream_writes_finalmask_chains_and_leaves_quic_params_alone`,
+  `apply_tunnel_stream_rejects_bad_finalmask_and_leaves_inbound_unchanged` (невалидный слой без
+  `streamSettings`; чужой `finalmask`), `tunnel_shell_save_writes_finalmask_udp_and_preserves_other_stream_fields`
+  (`modify_tests`); три `apply_tunnel_sockopt_*` переименованы в `apply_tunnel_stream_*`. Итог:
+  **1281 passed / 0 failed**.
+
+# 89	FinalMask — этап 4.3: матрица применимости цепочек к листенерам (0.5.36-0)
+
+## 89.1	Сверка с ядром
+
+`XTLS/Xray-core@main`, `transport/internet/finalmask/finalmask.go`: `FinalMask.Listen` (TCP-листенер)
+применяет только `tcp[]`, `FinalMask.ListenPacket` (UDP-сокет) — только `udp[]`. Кто что вызывает:
+
+| Листенер | Вызов | Цепочка |
+| -------- | ----- | ------- |
+| RAW (`tcp/hub.go`), WebSocket, gRPC, HTTPUpgrade, XHTTP без h3 | `FinalMask.Listen` | `tcp[]` |
+| mKCP (`kcp/listener.go` → `udp.ListenUDP`) | `FinalMask.ListenPacket` | `udp[]` |
+| Hysteria (`hysteria/hub.go`), XHTTP/3 (`splithttp/hub.go`, `isH3`) | `FinalMask.ListenPacket` | `udp[]` |
+| UDP-воркер прокси (`udpWorker` → `udp.ListenUDP`), независимо от транспорта | `FinalMask.ListenPacket` | `udp[]` |
+
+Какие воркеры создаются (`app/proxyman/inbound/always.go`) — по `Network()` прокси: IP-`listen`
+→ stream-воркер на порт при TCP (через транспорт) и UDP-воркер при UDP; Unix-`listen`
+(абсолютный путь или `@…`, `InboundDetourConfig.Build`) → только domain-socket воркер (через
+транспорт) и только при UNIX. `Network()`: VLESS/Trojan — TCP+UNIX, Hysteria — TCP, Tunnel —
+`allowedNetwork` (+UNIX при TCP). `DokodemoConfig.Build()`: legacy `network` перекрывает
+`allowedNetwork`, отсутствие/`null` → TCP. `NetworkList`: массив строк или строка, разрезанная
+по `,` **без trim**, имена без учёта регистра, неизвестные игнорируются — `"tcp, udp"` = только
+TCP. Имя протокола ядро сравнивает без учёта регистра (`JSONConfigLoader.LoadWithID`).
+`masque` (H3 + H2) и `xdrive` — транспорты вне таблицы.
+
+## 89.2	Модель
+
+`xray/config/compatibility/matrix.rs`:
+
+- `FinalMaskChainUse { tcp, udp }` + `uses(chain)`;
+- `inbound_finalmask_chain_use(&inbound) -> Option<FinalMaskChainUse>` — по таблице выше;
+  `None` (молчать, а не гадать) для протокола вне VLESS/Trojan/Hysteria/Tunnel/`dokodemo-door`,
+  транспорта вне таблицы (если stream-воркер вообще создаётся) и значения `allowedNetwork`,
+  которое ядро не загрузит. Транспорт — через существующие `normalized_method` /
+  `matrix_transport` / `quic_transport_of`, как в gates и редакторе.
+
+`xray/config/compatibility/warnings.rs`: новый `CompatibilityWarningId::FinalMaskChainUnused` —
+непустая `finalmask.tcp`/`.udp`, которую не применяет ни один листенер inbound; по одному на
+цепочку, location `streamSettings.finalmask.tcp|udp`, перед предупреждениями по слоям.
+Save не блокирует (слои остаются на диске). GUI — существующая инфраструктура §0.3: жёлтые строки
+вверху Stream-таба (черновик в edit, диск в view) и суффикс статуса после Save.
+
+Расхождение, найденное при сверке (не исправлено, вне этапа): при одновременных `network` и
+`method` ядро берёт `method` (`StreamConfig.Build`: `if c.Method != nil { c.Network = c.Method }`),
+а Feldjäger везде — `network` (`parse_inbound_stream`, `normalized_method`, `quic_transport_of`).
+
+## 89.3	Код и итог
+
+| Область | Путь |
+| ------- | ---- |
+| Матрица | `xray/config/compatibility/matrix.rs` |
+| Предупреждение | `xray/config/compatibility/warnings.rs` |
+| Фикстура теста сервиса | `app/service.rs` (`UDPHOP_SOCKOPT_INBOUND`: `tcp` → `mkcp`, чтобы `udp[]` использовалась) |
+
+- Тесты (+4): `finalmask_chain_use_follows_the_transport`,
+  `finalmask_chain_use_of_a_tunnel_follows_its_networks`, `finalmask_chain_use_on_a_unix_socket`
+  (`matrix`), `flags_finalmask_chain_no_listener_uses` (`warnings`). Итог: **1285 passed / 0 failed**.
+
+# 90	FinalMask — этап 5.1: gate G4 → предупреждение `RealityProbeSeesFinalMask` (0.5.37-0)
+
+## 90.1	Проблема
+
+G4 («Reality + непустой `finalmask.tcp`») стоял в `first_failing_gate`, а тот вызывается из
+`check_inbound_compatibility` не только на Shell Save, но и на Add, Duplicate и после **каждой**
+мутации клиентов (`check_inbound_after_client_mutate`). Рабочий inbound с такой конфигурацией на
+диске нельзя было ни сохранить, ни дополнить пользователем — хотя ядро её штатно запускает.
+
+## 90.2	Сверка с ядром
+
+`XTLS/Xray-core@main`, `transport/internet/tcp/hub.go`: `FinalMask.Listen` оборачивает сокет
+(строка 50), REALITY (`reality.Server`, строка 109) работает поверх. ClientHello активного
+сканера сначала проходит серверную сторону маски:
+
+- `header-custom` (`header/custom/tcp.go`): при несовпадении `clients[i]` пишет `errors[i]` и отказывает;
+- `sudoku` (`newPackedDirectionalConn`): декодирует входящий поток, fallback нет;
+- `xmc` (`wrapConnServer`): ждёт Minecraft-рукопожатие;
+- `fragment`: `Read` не переопределён — входящее сквозное, режутся только записи.
+
+Сканер видит поведение маски, а не настоящий TLS-сайт `target`, куда REALITY проксировал бы
+чужой ClientHello: маскировка ослаблена, но конфиг корректен.
+
+## 90.3	Изменения
+
+- `compatibility/mod.rs`: проверка G4 убрана из `first_failing_gate`, предикат
+  `reality_finalmask_tcp_nonempty` удалён; вариант `CompatibilityGateId::G4` оставлен
+  «retired» (как G7 — стабильность id/сообщений); doc-комментарии порядка обновлены.
+- `stream/finalmask.rs`: `PROBE_VISIBLE_TCP_FINALMASK_TYPES` (`header-custom`/`sudoku`/`xmc`) и
+  `finalmask_tcp_layer_faces_probes(type)` (trim + без учёта регистра, как
+  `finalmask_layer_type_applies`); реэкспорт до `crate::xray`.
+- `compatibility/warnings.rs`: `CompatibilityWarningId::RealityProbeSeesFinalMask` — при
+  `effective_security == "reality"` по одному на такой слой, location
+  `streamSettings.finalmask.tcp[i].type`.
+- GUI (`inbounds.rs`): notice в секции FinalMask «…Save will be blocked (G4)» заменён на
+  пояснение (Reality + слой из списка по типизированному черновику, «Save is allowed»);
+  предупреждение также вверху Stream-таба и в статусе Save (инфраструктура §0.3).
+- Бывшая часть (б) пункта («клиенту нужна идентичная цепочка») перенесена в Roadmap 6.1.
+
+## 90.4	Код и итог
+
+| Область | Путь |
+| ------- | ---- |
+| Gates | `xray/config/compatibility/mod.rs` |
+| Предупреждение | `xray/config/compatibility/warnings.rs` |
+| Типы масок | `xray/config/stream/finalmask.rs`, реэкспорт `stream/mod.rs`, `config/mod.rs`, `xray/mod.rs` |
+| GUI | `gui/pages/inbounds.rs`, `gui/pages/stream_finalmask.rs` (doc) |
+
+- Тесты: `g4_*` → `reality_*_passes_gates*` (первый теперь с `sudoku`);
+  `finalmask_tcp_blocked_by_g4_with_reality_security` → `finalmask_tcp_with_reality_security_is_added_and_warned`
+  (Add проходит, предупреждение только на `sudoku`, не на `fragment`); новые
+  `client_add_on_reality_inbound_with_finalmask_tcp_is_not_blocked`,
+  `flags_probe_facing_tcp_layers_only_with_reality`. Итог: **1287 passed / 0 failed**.
+
+# 91	FinalMask — этап 5.2: миграция mKCP `header`/`seed` → `mkcp-legacy` (0.5.38-0)
+
+## 91.1	Хронология ядра (сверено по релизам XTLS/Xray-core)
+
+Аудит этапа 5 (2026-10-04) называл v26.1.31 релизом `mkcp-legacy` — неверно. Сканирование
+`infra/conf/*.go` по тегам и `compare` дали:
+
+| Ядро | `kcpSettings.header`/`seed` | Эквивалент в FinalMask |
+| ---- | --------------------------- | ---------------------- |
+| ≤ v26.1.23 | работают | — |
+| v26.1.31 … v26.5.9 | фатальная ошибка загрузки (`PrintRemovedFeatureError("mkcp header & seed")`, #5560) | `header-*`, `mkcp-original`, `mkcp-aes128gcm` |
+| v26.6.1 … v26.9.8 | фатальная ошибка загрузки | `mkcp-legacy` (#6201) |
+| ≥ v26.9.9 | молча игнорируются (#6327) | `mkcp-legacy` |
+
+`congestion`/`readBufferSize`/`writeBufferSize` читались до v26.9.8 и перестали в v26.9.9 (#6327).
+
+Старое ядро (родитель #5560, `kcp/config.go`, `kcp/io.go`): шифрование **всегда** —
+`seed` → AES-128-GCM, иначе `SimpleAuthenticator` (`original`); заголовок пишется перед
+запечатанными байтами (`[header][sealed]`). `header` грузится loader'ом по ключу `type`
+(без учёта регистра; `none`/`srtp`/`utp`/`wechat-video`/`dtls`/`wireguard`/`dns`, у `dns` —
+`domain`, пусто → `www.baidu.com`); `seed` — `*string`: `""` всё равно включает AES-GCM.
+
+## 91.2	Модель
+
+- `compatibility/core_version.rs`: `CoreFeature::KcpHeaderSeedRemoved` (v26.1.31, #5560),
+  `MkcpLegacyMask` (v26.6.1, #6201), `KcpConfigSlimmed` (v26.9.9, #6327).
+- `compatibility/warnings.rs`: по версии ядра — до v26.1.31 ничего; v26.1.31…v26.9.8 новый
+  `KcpLegacyObfuscationRejected` («конфиг не загрузится»; `"seed": null` не в счёт — в ядре
+  nil-указатель, `"header": null` — в счёт, `RawMessage` не nil); с v26.9.9 / неизвестно —
+  `KcpLegacyObfuscationIgnored` (текст: «один или два слоя», кнопка). `KcpFieldIgnored` теперь
+  тоже только с v26.9.9 (был тот же баг). Слой `mkcp-legacy` на ядре < v26.6.1 →
+  `RequiresNewerCore`.
+- `stream/finalmask_mkcp.rs`: `mkcp_legacy_layers_from_kcp(header, seed)` — чистое
+  преобразование в **два** слоя: шифр (`{"value": seed}` | `{}` = original) первым
+  (внутренний), заголовок последним (внешний: `FinalMask.ListenPacket` разворачивает список).
+  `wechat-video` → `wechat`, `none` → без слоя, `dns.domain` → `value` (пустой опускается —
+  то же значение по умолчанию). Отказ: `seed` не строка или `""`, `header` не объект / без
+  строкового `type` / неизвестный тип, `domain` не строка, домен не кодируется
+  (`validate_mkcp_legacy`). Прочие ключи внутри `header` старое ядро игнорировало — не переносятся.
+- `inbound_stream/mod.rs`: `KcpStreamSettings::has_legacy_obfuscation`;
+  `InboundStreamDraft::migrate_kcp_legacy_obfuscation() -> Result<usize, String>` — только mKCP,
+  отказ при чужом `finalmask` и **непустом `udp[]`**; убирает ключи из `kcp.extras`, ставит слои,
+  `write_finalmask_udp = true`; при ошибке черновик не меняется.
+
+## 91.3	Сервис и GUI
+
+- `ApplicationService::editor_kcp_legacy_migration_blocked_reason()` — ядро известно и
+  < v26.6.1; `finalmask.udp` на диске, который типизированная модель не прочла (запись бы его
+  заменила). `migrate_editor_kcp_legacy_obfuscation()` — миграция черновика, `dirty`, затем
+  `preview_inbound_shell_diff()` (редактированный JSON-diff; его ошибка не откатывает миграцию,
+  а попадает в статус).
+- `inbounds.rs`: `show_kcp_legacy_migration` после транспортной части Stream-таба (mKCP с
+  `header`/`seed`): значения (`seed` не показывается), пояснение по версиям, причина
+  недоступности, кнопка «Migrate header/seed to FinalMask». Diff — в существующем блоке
+  предпросмотра сессии. На диск ничего не пишется до Save.
+
+## 91.4	Код и итог
+
+| Область | Путь |
+| ------- | ---- |
+| Версии ядра | `xray/config/compatibility/core_version.rs` |
+| Предупреждения | `xray/config/compatibility/warnings.rs` |
+| Преобразование | `xray/config/stream/finalmask_mkcp.rs`, реэкспорт `stream/mod.rs` |
+| Миграция черновика | `xray/config/inbound_stream/mod.rs` |
+| Сервис | `app/service.rs` |
+| GUI | `gui/pages/inbounds.rs` |
+
+- Тесты (+6): `legacy_kcp_header_and_seed_become_cipher_then_header`,
+  `legacy_kcp_values_without_a_faithful_equivalent_are_refused` (`finalmask_mkcp`),
+  `mkcp_legacy_keys_follow_the_core_version` (`warnings`),
+  `mkcp_legacy_migration_writes_layers_and_drops_the_keys`,
+  `mkcp_legacy_migration_refusals_leave_the_draft_unchanged` (`inbound_stream`),
+  `kcp_legacy_migration_follows_the_core_and_fills_the_diff_preview` (`service`).
+  Итог: **1293 passed / 0 failed**.
+
+# 92	FinalMask — этап 6.1: клиентская цепочка в share-ссылке (`fm`) (0.5.39-0)
+
+## 92.1	Стандарт share-ссылок
+
+Стандарт VLESS/VMess-ссылок (XTLS/Xray-core discussion #716, §4.3.20, добавлено RPRX
+2026-01-31) **уже имеет** параметр `fm`: «соответствует `finalmask` в конфиге; из-за
+многоуровневой вложенности, как XHTTP `extra`, передаётся весь JSON-сегмент; обязательно
+`encodeURIComponent`». Формулировка пункта 6.1 («при отсутствии параметра — предупреждение»)
+устарела: предупреждение заменено на передачу цепочки в ссылке.
+
+Эталонный клиент v2rayN (`ServiceLib/Handler/Fmt/BaseFmt.cs`): `fm` читается общим
+`ResolveUriQuery` — для `vless://` и `trojan://` (у Trojan те же параметры), `ToUriQuery` пишет
+его в обе; JSON кладётся в `streamSettings.finalmask` исходящего **как есть** и заменяет
+finalmask, который клиент построил бы сам (`V2rayOutboundService`). У `hy2://` v2rayN `fm`
+тоже читает (общий `ResolveUriQuery`), но не пишет, а в официальной схеме hy2 его нет — hy2
+остаётся на `obfs` (§83).
+
+## 92.2	Что получает клиент (сверено с `transport/internet/finalmask/*`)
+
+Ссылка должна нести **клиентскую** цепочку, а не серверную. Порядок слоёв у сторон один
+(первый — внутренний), большинство масок симметричны:
+
+| Слой | В `fm` | Почему |
+| ---- | ------ | ------ |
+| `fragment`, `noise` | нет | действуют только на запись своей стороны, чтение сквозное (`fragment/conn.go`, `noise/conn.go`); выпадение не сдвигает остальные слои |
+| `udphop` | нет | client-only, на inbound не сохраняется (§79) |
+| `xicmp` | без `ips` | на сервере `ips` — допустимые адреса пиров (`server.go`), на клиенте — куда слать (`client.go`; пусто = адрес дозвона); `dgram` копируется |
+| `realm` | без `ipMode`, `portMapping` | локальная сеть своей стороны (семейство адресов, UPnP/NAT-PMP на шлюзе); `url`/`stunServers`/`tlsConfig` — общий realm-сервер |
+| `xdns` | как есть + заметка, если нет `resolvers` | клиенту нужен свой резолвер (`NewClient`), сервер их игнорирует |
+| `header-custom`, `sudoku`, `xmc`, `mkcp-legacy`, `salamander` | как есть | симметричны; ключи, которые сервер игнорирует (`xmc.hostname`), сохраняются |
+| неизвестный тип | как есть + заметка | Feldjäger не знает, нужен ли он клиенту |
+
+`quicParams` не передаётся — настройки собственного QUIC-стека стороны. Цепочка — только та,
+через которую клиент дозванивается: `udp[]` у mKCP / Hysteria / XHTTP/3 (TLS + `alpn` ровно
+`["h3"]`), иначе `tcp[]` (отдельного UDP-воркера у VLESS/Trojan нет, §89).
+
+## 92.3	Модель, сервис, GUI
+
+- `stream/finalmask_client.rs`: `ClientFinalMask {value, layer_types, notes}` (+
+  `compact_json`/`pretty_json`), `client_finalmask(&[(FinalMaskChain, &[FinalMaskLayerDraft])])`
+  → `None`, если зеркалить нечего.
+- `share_uri.rs`: `ShareUriRequest.finalmask` → `fm` (полное percent-кодирование, строже
+  `encodeURIComponent`); пустое/`{}` не пишется; Hysteria игнорирует; в `Debug` — `[REDACTED]`
+  (пароли масок).
+- `service.rs`: `client_finalmask_of(on_disk, stream, security)` — выбор цепочки по транспорту
+  черновика, ошибка при `finalmask` не-объекте или нечитаемой цепочке на диске (Share
+  выключается с причиной, вместо ссылки без масок); `build_client_share_uri` добавляет `fm`
+  для VLESS/Trojan; `client_share_finalmask(index) -> Result<Option<ClientShareFinalMask>>`
+  (`json`, `layer_types`, `notes`, `in_share_uri`) для GUI, черновик редактора приоритетнее
+  диска.
+- `users.rs`: в контекстном меню клиента под Share — «Copy client finalmask JSON» + пояснение
+  (VLESS/Trojan: «ссылка несёт `fm`; клиенты без поддержки `fm` подключатся без масок»; hy2:
+  «hy2-ссылка несёт только plain salamander») + заметки слоёв. Предупреждение «Share links are
+  disabled» у Hysteria указывает на эту кнопку.
+
+## 92.4	Код и итог
+
+| Область | Путь |
+| ------- | ---- |
+| Клиентская цепочка | `xray/config/stream/finalmask_client.rs`, реэкспорт `stream/mod.rs` |
+| Share URI | `xray/share_uri.rs` |
+| Сервис | `app/service.rs` (`ClientShareFinalMask`) |
+| GUI | `gui/pages/users.rs` |
+| Интероп | `xray/config/stream/finalmask_interop.rs` (`run_echo` вынесен из hy2-теста) |
+
+- Тесты (+8): 4 модельных (`finalmask_client`), `builds_fm_as_encoded_json_for_vless_and_trojan`,
+  `hy2_ignores_fm` (`share_uri`), `share_uri_fm_carries_the_client_finalmask` (`service`),
+  интероп `vless_share_fm_matches_the_core` — Xray 26.9.30: VLESS-сервер с цепочкой ↔ клиент с
+  `fm` (RAW: `fragment`+`sudoku`, `header-custom`; mKCP: `mkcp-legacy`+`noise`; неиспользуемая
+  цепочка на сервере), контроль — клиент без `fm` не подключается. Итог: **1301 passed /
+  0 failed**, clippy lib 66 (без изменений).
+- Найдено вне пункта: XTLS/Xray-core#7090 (2026-10-05, после v26.9.30) меняет схему `xdns` —
+  `domains[].name` → `names[]`, `resolvers[].type`+`settings.addr` → `addrs[]`, умолчание
+  `types`. В `fm` `xdns` копируется дословно и от схемы не зависит; типизированный редактор
+  (§1.3) — отдельный пункт Roadmap.

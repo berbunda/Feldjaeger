@@ -1,7 +1,7 @@
 //! CompatibilityGate for inbound Shell Save / Add / client mutate.
 //!
-//! Wave A Save order: **G9→G10→G6→G5→G1→G2→G8→G12→G4→G3→G13** (G7 retired;
-//! G11 predicate+tests only until Wave B).
+//! Wave A Save order: **G9→G10→G6→G5→G1→G2→G8→G12→G3→G13** (G7 retired; G4 retired in Roadmap
+//! §2.6 stage 5.1 — now a warning; G11 predicate+tests only until Wave B).
 
 mod core_version;
 mod matrix;
@@ -14,9 +14,10 @@ pub use warnings::{
 };
 pub use matrix::{
     allowed_security_modes, allowed_stream_methods, coerce_display_stream_method,
-    coerce_security_mode_for_transport, g10_hysteria_requires_tls, g11_shadowsocks_tcp_only,
-    g9_hysteria_protocol_transport_ok, matrix_transport, selectable_stream_methods,
-    transport_security_allowed, vision_active_from_inbound,
+    coerce_security_mode_for_transport, g10_hysteria_requires_tls,
+    g11_shadowsocks_tcp_only, g9_hysteria_protocol_transport_ok, inbound_finalmask_chain_use,
+    matrix_transport, selectable_stream_methods, transport_security_allowed,
+    vision_active_from_inbound,
 };
 
 use serde_json::Value;
@@ -32,7 +33,8 @@ pub enum CompatibilityGateId {
     G2,
     /// Vision flow with non-tcp/raw method.
     G3,
-    /// Reality + non-empty finalmask.tcp.
+    /// Reality + non-empty finalmask.tcp (retired, Roadmap §2.6 stage 5.1 — Xray-core composes
+    /// them; now [`CompatibilityWarningId::RealityProbeSeesFinalMask`]. Kept for message stability).
     G4,
     /// VLESS missing/empty decryption.
     G5,
@@ -61,7 +63,7 @@ impl CompatibilityGateId {
             Self::G1 => "Reality requires transport raw/tcp, xhttp, or grpc",
             Self::G2 => "Reality destination must be host:port (target or dest)",
             Self::G3 => "xtls-rprx-vision requires transport raw/tcp",
-            Self::G4 => "Reality is incompatible with non-empty finalmask.tcp",
+            Self::G4 => "Reality is incompatible with non-empty finalmask.tcp (retired)",
             Self::G5 => "VLESS requires non-empty settings.decryption",
             Self::G6 => "Trojan requires transport security (none is not allowed)",
             Self::G7 => "Hysteria inbound editing is not available yet (retired)",
@@ -90,7 +92,7 @@ pub fn check_inbound_compatibility(inbound: &Value) -> ConfigModifyResult<()> {
 
 /// Returns the first failing gate id, if any.
 ///
-/// Wave A order: **G9→G10→G11→G6→G5→G1→G2→G8→G12→G4→G3→G13**.
+/// Wave A order: **G9→G10→G11→G6→G5→G1→G2→G8→G12→G3→G13** (G4 retired, stage 5.1).
 pub fn first_failing_gate(inbound: &Value) -> Option<CompatibilityGateId> {
     let protocol = inbound
         .get("protocol")
@@ -138,10 +140,6 @@ pub fn first_failing_gate(inbound: &Value) -> Option<CompatibilityGateId> {
     // G12: TLS ⇒ every certificates[] entry complete (file or PEM; verify key optional)
     if security == "tls" && !tls_certificates_ok(inbound) {
         return Some(CompatibilityGateId::G12);
-    }
-
-    if security == "reality" && reality_finalmask_tcp_nonempty(inbound) {
-        return Some(CompatibilityGateId::G4);
     }
 
     if inbound_has_vision_flow(inbound) {
@@ -356,17 +354,6 @@ fn reality_required_fields_ok(inbound: &Value) -> bool {
         })
         .unwrap_or(false);
     server_names && short_ids
-}
-
-fn reality_finalmask_tcp_nonempty(inbound: &Value) -> bool {
-    // `finalmask` is a sibling of `realitySettings` under `streamSettings`, not nested inside
-    // it — see https://xtls.github.io/ru/config/transports/finalmask.html.
-    inbound
-        .get("streamSettings")
-        .and_then(|s| s.get("finalmask"))
-        .and_then(|f| f.get("tcp"))
-        .and_then(Value::as_array)
-        .is_some_and(|a| !a.is_empty())
 }
 
 #[cfg(test)]
@@ -700,7 +687,7 @@ mod tests {
     }
 
     #[test]
-    fn g4_blocks_reality_with_top_level_finalmask_tcp() {
+    fn reality_with_top_level_finalmask_tcp_passes_gates_since_g4_retired() {
         let inbound = json!({
             "protocol":"trojan",
             "settings":{"clients":[]},
@@ -713,14 +700,15 @@ mod tests {
                     "serverNames":["www.example.com"],
                     "shortIds":["abcd"]
                 },
-                "finalmask":{"tcp":[{"type":"fragment","settings":{}}]}
+                "finalmask":{"tcp":[{"type":"sudoku","settings":{"password":"abc"}}]}
             }
         });
-        assert_eq!(first_failing_gate(&inbound), Some(CompatibilityGateId::G4));
+        // Xray-core composes them (Roadmap §2.6 stage 5.1): a warning, not a gate.
+        assert_eq!(first_failing_gate(&inbound), None);
     }
 
     #[test]
-    fn g4_ignores_finalmask_tcp_nested_inside_reality_settings() {
+    fn reality_with_finalmask_tcp_nested_inside_reality_settings_passes_gates() {
         // Historical (buggy) shape: `finalmask` nested inside `realitySettings` is not the
         // official wire location (finalmask is a sibling of realitySettings), so it must not
         // false-positive block an otherwise-valid Reality inbound.
@@ -743,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn g4_passes_when_finalmask_tcp_empty_or_absent() {
+    fn reality_passes_gates_when_finalmask_tcp_empty_or_absent() {
         let base = json!({
             "protocol":"trojan",
             "settings":{"clients":[]},

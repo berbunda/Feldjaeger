@@ -11,7 +11,7 @@
 - Reading support must be broader than writing support.
 
 # Technology stack
-Programming language: Rust 1.98
+Programming language: Rust 1.99
 Edition: Rust 2024
 Build system: Cargo
 Compiler: Cargo
@@ -26,7 +26,7 @@ Logging: tracing, tracing-subscriber, tracing-appender
 Async runtime: tokio
 
 # Required tools
-Rust 1.98
+Rust 1.99
 Cargo
 Git
 Cursor

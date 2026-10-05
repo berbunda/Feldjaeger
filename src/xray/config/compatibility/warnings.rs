@@ -23,12 +23,13 @@ use std::borrow::Cow;
 use serde_json::Value;
 
 use super::core_version::{CoreFeature, XrayCoreVersion};
-use super::effective_security;
+use super::{effective_security, inbound_finalmask_chain_use};
 use crate::xray::config::inbound_security::REALITY_IGNORED_ALPN_KEY;
 
 use crate::xray::config::stream::{
     quic_transport_of,
     FinalMaskChain, NOISE_EXP_KIND, StreamDirection, finalmask_layer_type_applies,
+    finalmask_tcp_layer_faces_probes,
     xdns_has_legacy_fields, xmc_has_legacy_usernames,
 };
 
@@ -53,6 +54,15 @@ pub enum CompatibilityWarningId {
     /// `streamSettings.finalmask.quicParams` on a transport that does not run over QUIC — only
     /// Hysteria and XHTTP with TLS ALPN exactly `["h3"]` read it (Roadmap §2.6 stage 3.3).
     QuicParamsUnusedTransport,
+    /// A non-empty `finalmask.tcp[]` / `finalmask.udp[]` that none of the inbound's listeners
+    /// applies — e.g. `udp[]` on RAW, `tcp[]` on mKCP / Hysteria / XHTTP/3 (Roadmap §2.6 stage
+    /// 4.3, [`super::inbound_finalmask_chain_use`]). The layers stay on disk, unused.
+    FinalMaskChainUnused,
+    /// `security: reality` with a `finalmask.tcp[]` layer that transforms or checks the incoming
+    /// stream (`header-custom` / `sudoku` / `xmc`). Xray-core composes them — the mask wraps the
+    /// socket, REALITY runs on top (`tcp/hub.go`) — but an active prober now meets the mask
+    /// instead of REALITY forwarding it to `target` (Roadmap §2.6 stage 5.1; formerly gate G4).
+    RealityProbeSeesFinalMask,
     /// `streamSettings.realitySettings.alpn` with `security: reality` — not a field of the core's
     /// `REALITYConfig` nor of the REALITY docs; the REALITY server negotiates no ALPN.
     RealityAlpnIgnored,
@@ -68,11 +78,17 @@ pub enum CompatibilityWarningId {
     /// -test` passes — it never listens); on a TCP-only transport the layer is simply unused.
     UdpHopClientOnly,
     /// `kcpSettings.congestion` / `readBufferSize` / `writeBufferSize` — not fields of the core's
-    /// `KCPConfig` (`infra/conf/transport_method.go`) any more (Roadmap §2.6 stage 0.6).
+    /// `KCPConfig` (`infra/conf/transport_method.go`) any more (Roadmap §2.6 stage 0.6); read up to
+    /// v26.9.8 ([`CoreFeature::KcpConfigSlimmed`]).
     KcpFieldIgnored,
     /// `kcpSettings.header` / `seed` — still declared in `KCPConfig` but never read by its
-    /// `Build()`; mKCP obfuscation is a `mkcp-legacy` layer in `finalmask.udp` now.
+    /// `Build()` (v26.9.9+); mKCP obfuscation is one or two `mkcp-legacy` layers in
+    /// `finalmask.udp` now (Roadmap §2.6 stage 5.2 migrates them).
     KcpLegacyObfuscationIgnored,
+    /// `kcpSettings.header` / `seed` on a core from v26.1.31 to v26.9.8: `KCPConfig.Build()` fails
+    /// with a "removed feature" error, so Xray does not start at all
+    /// ([`CoreFeature::KcpHeaderSeedRemoved`] up to [`CoreFeature::KcpConfigSlimmed`]).
+    KcpLegacyObfuscationRejected,
     /// `xdns` settings in the pre-v26.9.30 string schema (`domains` / `resolvers` strings, or
     /// `domain`) on a core with the object schema (XTLS/Xray-core#6718): strings fail to decode,
     /// `domain` is ignored. The editor offers a migration.
@@ -114,6 +130,18 @@ impl CompatibilityWarningId {
                 "no effect: quicParams is read only by QUIC transports — Hysteria, and XHTTP with \
                  `security: tls` and `tlsSettings.alpn` exactly [\"h3\"]"
             }
+            Self::FinalMaskChainUnused => {
+                "no effect: none of this inbound's listeners uses this chain, so its layers are \
+                 never applied — tcp[] wraps TCP listeners (RAW, WebSocket, gRPC, HTTPUpgrade, \
+                 XHTTP over TCP), udp[] wraps UDP sockets (mKCP, Hysteria, XHTTP/3, a Tunnel \
+                 whose allowedNetwork includes udp)"
+            }
+            Self::RealityProbeSeesFinalMask => {
+                "weakens REALITY's camouflage: this layer sits below REALITY, so a scanner probing \
+                 the port meets the mask's handshake instead of being forwarded to the REALITY \
+                 target and seeing its real TLS site. Works, but the port no longer looks like the \
+                 target (fragment layers are fine)"
+            }
             Self::RealityAlpnIgnored => {
                 "ignored by Xray-core: REALITY has no `alpn` setting and negotiates no ALPN; use \
                  \"Remove alpn\" on the Security tab"
@@ -137,7 +165,13 @@ impl CompatibilityWarningId {
             }
             Self::KcpLegacyObfuscationIgnored => {
                 "ignored by Xray-core: mKCP header/seed obfuscation is not applied any more; the \
-                 equivalent is a `mkcp-legacy` layer in `finalmask.udp`"
+                 equivalent is one or two `mkcp-legacy` layers in `finalmask.udp` — use \
+                 \"Migrate header/seed to FinalMask\" in the editor"
+            }
+            Self::KcpLegacyObfuscationRejected => {
+                "rejected by the installed Xray-core: from v26.1.31 to v26.9.8 mKCP header/seed is a \
+                 removed feature and the config does not load (XTLS/Xray-core#5560); move it to \
+                 `finalmask.udp` (\"Migrate header/seed to FinalMask\", needs v26.6.1+)"
             }
             Self::XdnsLegacySchema => {
                 "pre-v26.9.30 xdns schema: Xray-core v26.9.30+ rejects string domains / resolvers \
@@ -185,6 +219,21 @@ pub fn inbound_warnings(inbound: &Value, core: Option<XrayCoreVersion>) -> Vec<C
         return warnings;
     };
     if let Some(finalmask) = stream.get("finalmask") {
+        // Unknown listener set (protocol / transport outside the table) → no claim either way.
+        if let Some(used) = inbound_finalmask_chain_use(inbound) {
+            for chain in [FinalMaskChain::Tcp, FinalMaskChain::Udp] {
+                let has_layers = finalmask
+                    .get(chain.key())
+                    .and_then(Value::as_array)
+                    .is_some_and(|layers| !layers.is_empty());
+                if has_layers && !used.uses(chain) {
+                    warnings.push(CompatibilityWarning {
+                        id: CompatibilityWarningId::FinalMaskChainUnused,
+                        location: format!("streamSettings.finalmask.{}", chain.key()),
+                    });
+                }
+            }
+        }
         finalmask_warnings(finalmask, StreamDirection::Inbound, core, &mut warnings);
         let has_quic_params = finalmask.get("quicParams").is_some_and(|value| !value.is_null());
         if has_quic_params && quic_transport_of(stream).is_none() {
@@ -196,12 +245,27 @@ pub fn inbound_warnings(inbound: &Value, core: Option<XrayCoreVersion>) -> Vec<C
     }
     if let Some(kcp) = stream.get("kcpSettings").and_then(Value::as_object) {
         // The core builds `kcpSettings` whenever it is present, whatever `network` says, so the
-        // keys are ignored in either case.
-        for key in kcp.keys() {
+        // keys matter in either case. What they do depends on the release (Roadmap §2.6 stage
+        // 5.2): up to v26.1.23 header/seed work, v26.1.31 – v26.9.8 they fail the load, from
+        // v26.9.9 they and the buffer/congestion keys are ignored.
+        let slimmed = CoreFeature::KcpConfigSlimmed.available_in(core);
+        let header_seed_removed = CoreFeature::KcpHeaderSeedRemoved.available_in(core);
+        for (key, value) in kcp {
             let id = if KCP_IGNORED_FIELDS.contains(&key.as_str()) {
+                if !slimmed {
+                    continue;
+                }
                 CompatibilityWarningId::KcpFieldIgnored
             } else if KCP_LEGACY_OBFUSCATION_FIELDS.contains(&key.as_str()) {
-                CompatibilityWarningId::KcpLegacyObfuscationIgnored
+                if slimmed {
+                    CompatibilityWarningId::KcpLegacyObfuscationIgnored
+                } else if header_seed_removed && !(key == "seed" && value.is_null()) {
+                    // The check is `HeaderConfig != nil || Seed != nil`: a raw `"header": null`
+                    // is non-nil, a `"seed": null` pointer is nil.
+                    CompatibilityWarningId::KcpLegacyObfuscationRejected
+                } else {
+                    continue;
+                }
             } else {
                 continue;
             };
@@ -212,6 +276,22 @@ pub fn inbound_warnings(inbound: &Value, core: Option<XrayCoreVersion>) -> Vec<C
         }
     }
     if effective_security(inbound) == "reality" {
+        let tcp_layers = stream
+            .get("finalmask")
+            .and_then(|finalmask| finalmask.get("tcp"))
+            .and_then(Value::as_array);
+        for (index, layer) in tcp_layers.into_iter().flatten().enumerate() {
+            let faces_probes = layer
+                .get("type")
+                .and_then(Value::as_str)
+                .is_some_and(finalmask_tcp_layer_faces_probes);
+            if faces_probes {
+                warnings.push(CompatibilityWarning {
+                    id: CompatibilityWarningId::RealityProbeSeesFinalMask,
+                    location: format!("streamSettings.finalmask.tcp[{index}].type"),
+                });
+            }
+        }
         if stream
             .get("realitySettings")
             .is_some_and(|reality| reality.get(REALITY_IGNORED_ALPN_KEY).is_some())
@@ -313,6 +393,15 @@ fn finalmask_warnings(
 
     if let Some(udp) = finalmask.get("udp").and_then(Value::as_array) {
         for (index, layer) in udp.iter().enumerate() {
+            if layer_is(layer, "mkcp-legacy") {
+                push_if_core_too_old(
+                    CoreFeature::MkcpLegacyMask,
+                    core,
+                    format!("streamSettings.finalmask.udp[{index}].type"),
+                    warnings,
+                );
+                continue;
+            }
             if layer_is(layer, "xdns") {
                 let settings = layer.get("settings").filter(|settings| settings.is_object());
                 let location = format!("streamSettings.finalmask.udp[{index}].settings");
@@ -517,6 +606,74 @@ mod tests {
         assert!(inbound_warnings(&null, None).is_empty());
     }
 
+    /// Roadmap §2.6 stage 5.1 (formerly gate G4): with REALITY, each tcp layer a prober meets
+    /// first is flagged at its type; `fragment` only cuts writes and is not; TLS is never flagged.
+    #[test]
+    fn flags_probe_facing_tcp_layers_only_with_reality() {
+        let inbound = |security: &str| {
+            json!({"protocol": "vless", "streamSettings": {"network": "raw", "security": security,
+                "finalmask": {"tcp": [
+                    {"type": "fragment", "settings": {}},
+                    {"type": " Sudoku ", "settings": {"password": "abc"}},
+                    {"type": "header-custom", "settings": {}},
+                    {"type": "XMC", "settings": {}}
+                ]}}})
+        };
+        let found: Vec<_> = inbound_warnings(&inbound("reality"), None)
+            .into_iter()
+            .filter(|w| w.id == CompatibilityWarningId::RealityProbeSeesFinalMask)
+            .map(|w| w.location)
+            .collect();
+        assert_eq!(
+            found,
+            [
+                "streamSettings.finalmask.tcp[1].type",
+                "streamSettings.finalmask.tcp[2].type",
+                "streamSettings.finalmask.tcp[3].type",
+            ]
+        );
+        assert!(
+            !inbound_warnings(&inbound("tls"), None)
+                .iter()
+                .any(|w| w.id == CompatibilityWarningId::RealityProbeSeesFinalMask)
+        );
+    }
+
+    /// Roadmap §2.6 stage 4.3: a non-empty chain that no listener applies is flagged once, at the
+    /// chain; an empty chain or an unknown protocol never is.
+    #[test]
+    fn flags_finalmask_chain_no_listener_uses() {
+        let unused = |inbound: Value| {
+            inbound_warnings(&inbound, None)
+                .into_iter()
+                .filter(|w| w.id == CompatibilityWarningId::FinalMaskChainUnused)
+                .map(|w| w.location)
+                .collect::<Vec<_>>()
+        };
+        let layer = json!([{"type": "salamander", "settings": {"password": "secret-pw"}}]);
+        let both = json!({"tcp": [{"type": "fragment", "settings": {}}], "udp": layer});
+
+        let vless = json!({"protocol": "vless", "streamSettings": {"network": "raw", "finalmask": both}});
+        assert_eq!(unused(vless), ["streamSettings.finalmask.udp"]);
+        let kcp = json!({"protocol": "trojan", "streamSettings": {"network": "mkcp", "finalmask": both}});
+        assert_eq!(unused(kcp), ["streamSettings.finalmask.tcp"]);
+        let hysteria = json!({"protocol": "hysteria", "streamSettings": {"network": "hysteria", "finalmask": both}});
+        assert_eq!(unused(hysteria), ["streamSettings.finalmask.tcp"]);
+        let tunnel = json!({"protocol": "tunnel", "settings": {"allowedNetwork": "tcp,udp"},
+                            "streamSettings": {"network": "tcp", "finalmask": both}});
+        assert!(unused(tunnel).is_empty());
+        let udp_tunnel = json!({"protocol": "tunnel", "settings": {"allowedNetwork": "udp"},
+                                "streamSettings": {"network": "tcp", "finalmask": both}});
+        assert_eq!(unused(udp_tunnel), ["streamSettings.finalmask.tcp"]);
+
+        // Empty chains and protocols outside the table: nothing to say.
+        let empty = json!({"protocol": "vless", "streamSettings": {"network": "raw",
+                           "finalmask": {"tcp": [], "udp": []}}});
+        assert!(unused(empty).is_empty());
+        let vmess = json!({"protocol": "vmess", "streamSettings": {"network": "raw", "finalmask": both}});
+        assert!(unused(vmess).is_empty());
+    }
+
     /// FinalMask warnings of an *outbound* `finalmask` (Roadmap §2.6 stage 7 wires the caller).
     fn outbound_finalmask_warnings(finalmask: &Value, core: Option<XrayCoreVersion>) -> Vec<CompatibilityWarning> {
         let mut warnings = Vec::new();
@@ -578,6 +735,45 @@ mod tests {
         // A clean mKCP block (only core fields) has no warnings.
         let clean = json!({"streamSettings": {"kcpSettings": {"mtu": 1350, "cwndMultiplier": 2}}});
         assert!(inbound_warnings(&clean, None).is_empty());
+    }
+
+    /// Roadmap §2.6 stage 5.2: header/seed work up to v26.1.23, fail the load from v26.1.31 to
+    /// v26.9.8 and are ignored from v26.9.9 — like congestion / buffer sizes, read until v26.9.8.
+    /// `mkcp-legacy` itself needs v26.6.1.
+    #[test]
+    fn mkcp_legacy_keys_follow_the_core_version() {
+        use CompatibilityWarningId::{KcpFieldIgnored, KcpLegacyObfuscationIgnored, KcpLegacyObfuscationRejected};
+        let inbound = json!({"streamSettings": {"network": "mkcp",
+            "kcpSettings": {"header": {"type": "utp"}, "seed": null, "congestion": true},
+            "finalmask": {"udp": [{"type": "mkcp-legacy", "settings": {}}]}}});
+        let at = |key: &str| format!("streamSettings.kcpSettings.{key}");
+        let found = |version: &str| {
+            inbound_warnings(&inbound, XrayCoreVersion::parse(version))
+                .into_iter()
+                .map(|w| (w.id, w.location))
+                .collect::<Vec<_>>()
+        };
+        let too_old = |installed: &str| {
+            (
+                CompatibilityWarningId::RequiresNewerCore {
+                    feature: CoreFeature::MkcpLegacyMask,
+                    installed: XrayCoreVersion::parse(installed).unwrap(),
+                },
+                "streamSettings.finalmask.udp[0].type".to_owned(),
+            )
+        };
+        // Old core: the keys work; only the new layer is unknown to it.
+        assert_eq!(found("26.1.23"), vec![too_old("26.1.23")]);
+        // `"seed": null` is a nil pointer, not part of the core's removed-feature check.
+        assert_eq!(found("26.5.9"), vec![too_old("26.5.9"), (KcpLegacyObfuscationRejected, at("header"))]);
+        assert_eq!(found("26.9.8"), vec![(KcpLegacyObfuscationRejected, at("header"))]);
+        let current = vec![
+            (KcpFieldIgnored, at("congestion")),
+            (KcpLegacyObfuscationIgnored, at("header")),
+            (KcpLegacyObfuscationIgnored, at("seed")),
+        ];
+        assert_eq!(found("26.9.9"), current);
+        assert_eq!(found(""), current, "unknown core = current");
     }
 
     #[test]

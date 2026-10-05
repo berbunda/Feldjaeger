@@ -20,6 +20,7 @@
 
 use serde_json::{Map, Value};
 
+use super::finalmask::FinalMaskLayerDraft;
 use super::finalmask_layers::{apply_extras, extras_of};
 
 /// `mkcp-legacy` `header` values (case-insensitive; empty = no header — `value` is then the
@@ -146,6 +147,93 @@ pub fn validate_mkcp_legacy(settings: &Value) -> Result<(), String> {
     }
 }
 
+/// The pre-v26.1.31 `kcpSettings.header.type` values (`kcpHeaderLoader`, lower-cased by
+/// `LoadWithID`) → the `mkcp-legacy` `header`; `None` = `none`, a header of size 0.
+const LEGACY_KCP_HEADER_TYPES: &[(&str, Option<&str>)] = &[
+    ("none", None),
+    ("srtp", Some("srtp")),
+    ("utp", Some("utp")),
+    ("wechat-video", Some("wechat")),
+    ("dtls", Some("dtls")),
+    ("wireguard", Some("wireguard")),
+    ("dns", Some("dns")),
+];
+
+/// The `finalmask.udp[]` layers that put the same bytes on the wire as the pre-v26.1.31
+/// `kcpSettings.header` / `seed` (Roadmap §2.6 stage 5.2; `header` / `seed` are the raw values,
+/// `None` = key absent).
+///
+/// Checked against the core before XTLS/Xray-core#5560 (`kcp/config.go`, `kcp/io.go`,
+/// `infra/conf/transport_internet.go`): the old mKCP **always** sealed packets — AES-128-GCM keyed
+/// by `seed` when set, the original obfuscation otherwise — and wrote the fake header in front of
+/// the sealed bytes (`[header][sealed]`). One `mkcp-legacy` layer is either a header or a cipher,
+/// so the result is two layers: the cipher first (innermost), then the header, which ends up
+/// outside (`FinalMask.ListenPacket` wraps the socket with the last layer first).
+///
+/// Errors (nothing to migrate faithfully): a `seed` that is not a string; an empty-string `seed`
+/// (the old core keyed AES-128-GCM with it, while an empty `value` means the original
+/// obfuscation); a `header` that is not an object with a string `type` the old loader knew; a
+/// non-string `dns` `domain`; a domain the core cannot encode. Other keys inside `header` were
+/// ignored by the old core and are not carried over.
+pub fn mkcp_legacy_layers_from_kcp(
+    header: Option<&Value>,
+    seed: Option<&Value>,
+) -> Result<Vec<FinalMaskLayerDraft>, String> {
+    let cipher = match seed {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::String(seed)) if seed.is_empty() => {
+            return Err("kcpSettings.seed is an empty string: the old core encrypted with \
+                        AES-128-GCM keyed by it, which a mkcp-legacy layer cannot express (an empty \
+                        value means the original obfuscation)"
+                .to_owned());
+        }
+        Some(Value::String(seed)) => Map::from_iter([("value".to_owned(), Value::String(seed.clone()))]),
+        Some(_) => return Err("kcpSettings.seed must be a string".to_owned()),
+    };
+    let mut layers = vec![cipher];
+
+    match header {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(object)) => {
+            let kind = object
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or("kcpSettings.header has no string `type`")?;
+            let lower = kind.to_lowercase();
+            let header = LEGACY_KCP_HEADER_TYPES
+                .iter()
+                .find(|(legacy, _)| *legacy == lower)
+                .map(|(_, header)| *header)
+                .ok_or_else(|| format!("kcpSettings.header.type \"{kind}\" is not an mKCP header"))?;
+            if let Some(header) = header {
+                let mut settings = Map::from_iter([("header".to_owned(), Value::String(header.to_owned()))]);
+                if header == "dns" {
+                    let domain = verbatim_string(object.get("domain"))
+                        .ok_or("kcpSettings.header.domain must be a string")?;
+                    // Both cores fall back to the same default for an empty domain.
+                    if !domain.is_empty() {
+                        settings.insert("value".to_owned(), Value::String(domain));
+                    }
+                }
+                layers.push(settings);
+            }
+        }
+        Some(_) => return Err("kcpSettings.header must be a JSON object".to_owned()),
+    }
+
+    layers
+        .into_iter()
+        .map(|settings| {
+            let settings = Value::Object(settings);
+            validate_mkcp_legacy(&settings).map_err(|error| format!("mkcp-legacy: {error}"))?;
+            Ok(FinalMaskLayerDraft {
+                layer_type: "mkcp-legacy".to_owned(),
+                settings,
+            })
+        })
+        .collect()
+}
+
 /// Size of the 256-byte buffer `NewHeaderDNS` packs the query name into.
 const DNS_NAME_BUFFER: usize = 256;
 
@@ -242,6 +330,62 @@ mod tests {
         assert!(validate_mkcp_legacy(&json!({"header": "none"})).unwrap_err().contains("invalid header"));
         assert!(validate_mkcp_legacy(&json!({"value": 1})).unwrap_err().contains("value"));
         assert!(validate_mkcp_legacy(&json!([])).unwrap_err().contains("JSON object"));
+    }
+
+    fn migrated(header: Option<Value>, seed: Option<Value>) -> Result<Vec<Value>, String> {
+        mkcp_legacy_layers_from_kcp(header.as_ref(), seed.as_ref()).map(|layers| {
+            layers
+                .into_iter()
+                .map(|layer| {
+                    assert_eq!(layer.layer_type, "mkcp-legacy");
+                    layer.settings
+                })
+                .collect()
+        })
+    }
+
+    /// Roadmap §2.6 stage 5.2: cipher first (innermost), header last (outermost), like the old
+    /// `[header][sealed]`; the old core always sealed, so no seed is the original obfuscation.
+    #[test]
+    fn legacy_kcp_header_and_seed_become_cipher_then_header() {
+        assert_eq!(
+            migrated(Some(json!({"type": "WeChat-Video"})), Some(json!("s3cret"))),
+            Ok(vec![json!({"value": "s3cret"}), json!({"header": "wechat"})])
+        );
+        assert_eq!(migrated(Some(json!({"type": "none"})), None), Ok(vec![json!({})]));
+        assert_eq!(migrated(None, Some(json!("s3cret"))), Ok(vec![json!({"value": "s3cret"})]));
+        assert_eq!(migrated(None, Some(Value::Null)), Ok(vec![json!({})]));
+        for kind in ["srtp", "utp", "dtls", "wireguard"] {
+            assert_eq!(
+                migrated(Some(json!({"type": kind, "ignored": 1})), None),
+                Ok(vec![json!({}), json!({"header": kind})]),
+                "{kind}"
+            );
+        }
+        // `dns.domain` becomes `value`; empty falls back to the same default in both cores.
+        assert_eq!(
+            migrated(Some(json!({"type": "dns", "domain": "q.example"})), None),
+            Ok(vec![json!({}), json!({"header": "dns", "value": "q.example"})])
+        );
+        assert_eq!(
+            migrated(Some(json!({"type": "dns"})), None),
+            Ok(vec![json!({}), json!({"header": "dns"})])
+        );
+    }
+
+    #[test]
+    fn legacy_kcp_values_without_a_faithful_equivalent_are_refused() {
+        let refused = |header: Option<Value>, seed: Option<Value>, needle: &str| {
+            let error = migrated(header.clone(), seed.clone()).unwrap_err();
+            assert!(error.contains(needle), "{header:?} {seed:?}: {error}");
+        };
+        refused(None, Some(json!("")), "empty string");
+        refused(None, Some(json!(42)), "seed must be a string");
+        refused(Some(json!({"type": "http"})), None, "not an mKCP header");
+        refused(Some(json!({"domain": "a"})), None, "no string `type`");
+        refused(Some(json!("dns")), None, "JSON object");
+        refused(Some(json!({"type": "dns", "domain": 1})), None, "domain must be a string");
+        refused(Some(json!({"type": "dns", "domain": "a".repeat(64)})), None, "mkcp-legacy: value");
     }
 
     /// `NewHeaderDNS` / `packDomainName` limits, including the slice panic at exactly 256 bytes.

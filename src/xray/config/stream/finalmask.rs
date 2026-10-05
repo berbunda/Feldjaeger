@@ -45,6 +45,21 @@ pub const UDP_FINALMASK_TYPES: &[&str] = &[
 /// listener cannot start with them — and `xray run -test` does not notice, it never listens.
 pub const CLIENT_ONLY_UDP_FINALMASK_TYPES: &[&str] = &["udphop"];
 
+/// `finalmask.tcp[].type` values whose server side transforms or checks the *incoming* stream, so
+/// a peer that does not speak the mask (an active prober sending a plain TLS ClientHello) gets
+/// the mask's behaviour: `header-custom` answers with `errors[i]` and refuses, `sudoku` decodes
+/// the bytes as Sudoku clues, `xmc` expects a Minecraft handshake. `fragment` is absent — it
+/// only cuts what this side writes, reads pass through (`fragment/conn.go`).
+pub const PROBE_VISIBLE_TCP_FINALMASK_TYPES: &[&str] = &["header-custom", "sudoku", "xmc"];
+
+/// Whether a `finalmask.tcp[]` layer of `layer_type` is what an active prober meets first on a
+/// listener ([`PROBE_VISIBLE_TCP_FINALMASK_TYPES`]); matched like [`finalmask_layer_type_applies`].
+pub fn finalmask_tcp_layer_faces_probes(layer_type: &str) -> bool {
+    PROBE_VISIBLE_TCP_FINALMASK_TYPES
+        .iter()
+        .any(|kind| layer_type.trim().eq_ignore_ascii_case(kind))
+}
+
 /// Which `finalmask` layer chain a list of layers belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FinalMaskChain {

@@ -101,7 +101,8 @@ const HELP_FINALMASK_SECTION: &str =
     "The final layer of traffic camouflage, applied after transport-layer encryption (TLS/\
      REALITY) has already been processed. `tcp[]` and `udp[]` are ordered chains of masking \
      layers — the first entry is the innermost. Hysteria runs over UDP, so only `udp[]` applies \
-     to it. `salamander` (udp) is the same obfuscation algorithm as Hysteria2's \
+     to it. A Tunnel uses `tcp[]` for its TCP listener and `udp[]` for its UDP listener \
+     (settings.allowedNetwork). `salamander` (udp) is the same obfuscation algorithm as Hysteria2's \
      `obfs=salamander`: a Hysteria share link carries it as obfs when it is the only layer the \
      client must mirror (`noise` needs no client layer) and has no packetSize (Gecko).";
 
@@ -700,7 +701,7 @@ pub(crate) struct FinalMaskEdit {
     pub(crate) udp: bool,
 }
 
-/// The FinalMask section: heading, optional `notice` (e.g. a gate that Save will enforce), and
+/// The FinalMask section: heading, optional `notice` (e.g. a non-blocking REALITY hint), and
 /// the `tcp[]` / `udp[]` layer chains.
 ///
 /// `udp_only`: the transport is QUIC over UDP (Hysteria, Roadmap §2.6 stage 4.1), so a `tcp[]`

@@ -48,6 +48,18 @@ impl fmt::Display for XrayCoreVersion {
 /// A config feature (or a schema change) that appeared in a specific Xray-core release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CoreFeature {
+    /// mKCP obfuscation moved to FinalMask: from this release `kcpSettings.header` / `seed` are no
+    /// longer applied — a fatal "removed feature" error at load, until
+    /// [`Self::KcpConfigSlimmed`] — XTLS/Xray-core#5560.
+    KcpHeaderSeedRemoved,
+    /// `mkcp-legacy` layer in `finalmask.udp[]`, replacing the `header-*` / `mkcp-original` /
+    /// `mkcp-aes128gcm` masks of #5560 — XTLS/Xray-core#6201.
+    MkcpLegacyMask,
+    /// `KCPConfig` reduced to mtu / tti / capacities / cwndMultiplier / maxSendingWindow: from this
+    /// release `congestion` / `readBufferSize` / `writeBufferSize` are no longer read, and
+    /// `header` / `seed` are silently ignored instead of failing the load — XTLS/Xray-core#6327
+    /// (the only FinalMask change between v26.9.8 and v26.9.9).
+    KcpConfigSlimmed,
     /// `xmc` (Minecraft) layer in `finalmask.tcp[]` — XTLS/Xray-core#6210.
     XmcTcpMask,
     /// `xmc` `profiles[]` (signed Minecraft profiles) replacing `usernames` — XTLS/Xray-core#6487.
@@ -67,9 +79,12 @@ pub enum CoreFeature {
 
 /// The table of Roadmap §2.6 stage 0.7, oldest first.
 pub const CORE_FEATURES: &[CoreFeature] = &[
+    CoreFeature::KcpHeaderSeedRemoved,
+    CoreFeature::MkcpLegacyMask,
     CoreFeature::XmcTcpMask,
     CoreFeature::XmcProfilesSchema,
     CoreFeature::UdpHopUdpMask,
+    CoreFeature::KcpConfigSlimmed,
     CoreFeature::UdpHopSockoptRemoved,
     CoreFeature::NoiseExpPacket,
     CoreFeature::XdnsObjectSchema,
@@ -79,6 +94,9 @@ impl CoreFeature {
     /// First Xray-core release with this feature.
     pub const fn min_version(self) -> XrayCoreVersion {
         match self {
+            Self::KcpHeaderSeedRemoved => XrayCoreVersion::new(26, 1, 31),
+            Self::MkcpLegacyMask => XrayCoreVersion::new(26, 6, 1),
+            Self::KcpConfigSlimmed => XrayCoreVersion::new(26, 9, 9),
             Self::XmcTcpMask => XrayCoreVersion::new(26, 7, 11),
             Self::XmcProfilesSchema => XrayCoreVersion::new(26, 7, 28),
             Self::UdpHopUdpMask => XrayCoreVersion::new(26, 9, 9),
@@ -91,6 +109,9 @@ impl CoreFeature {
     /// `XTLS/Xray-core` pull request that introduced it.
     pub const fn pull_request(self) -> u32 {
         match self {
+            Self::KcpHeaderSeedRemoved => 5560,
+            Self::MkcpLegacyMask => 6201,
+            Self::KcpConfigSlimmed => 6327,
             Self::XmcTcpMask => 6210,
             Self::XmcProfilesSchema => 6487,
             Self::UdpHopUdpMask => 6327,
@@ -103,6 +124,9 @@ impl CoreFeature {
     /// What the config uses, as the user sees it in JSON.
     pub const fn label(self) -> &'static str {
         match self {
+            Self::KcpHeaderSeedRemoved => "mKCP obfuscation in finalmask (kcpSettings.header / seed removed)",
+            Self::MkcpLegacyMask => "`mkcp-legacy` UDP mask",
+            Self::KcpConfigSlimmed => "slimmed kcpSettings (legacy keys ignored)",
             Self::XmcTcpMask => "`xmc` TCP mask",
             Self::XmcProfilesSchema => "`xmc` profiles[] (signed Minecraft profiles)",
             Self::UdpHopUdpMask => "`udphop` UDP mask",

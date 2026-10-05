@@ -4,9 +4,10 @@
 //! Typed [`allowed_stream_methods`] / [`allowed_security_modes`] intersect the
 //! matrix with currently editable enums ([`StreamMethod`], [`InboundSecurityMode`]).
 
-use super::inbound_has_vision_flow;
+use super::{inbound_has_vision_flow, normalized_method};
 use crate::xray::config::inbound_security::InboundSecurityMode;
 use crate::xray::config::inbound_stream::StreamMethod;
+use crate::xray::config::stream::{FinalMaskChain, QuicTransport, quic_transport_of};
 use serde_json::Value;
 
 /// Canonical transport key for matrix lookups (`raw` → `tcp`, `ws` → `websocket`).
@@ -172,6 +173,143 @@ pub fn coerce_display_stream_method(
 /// Whether any client on the inbound uses Vision flow (same scan as G3).
 pub fn vision_active_from_inbound(inbound: &Value) -> bool {
     inbound_has_vision_flow(inbound)
+}
+
+/// Which FinalMask chains an inbound's listeners wrap (Roadmap §2.6 stage 4.3).
+///
+/// Verified against `XTLS/Xray-core@main` (`transport/internet/finalmask/finalmask.go`):
+/// `FinalMask.Listen` (a TCP listener) applies only the `tcp[]` masks, `FinalMask.ListenPacket`
+/// (a UDP socket) only the `udp[]` masks.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FinalMaskChainUse {
+    /// Some listener wraps its socket with `finalmask.tcp[]`.
+    pub tcp: bool,
+    /// Some listener wraps its socket with `finalmask.udp[]`.
+    pub udp: bool,
+}
+
+impl FinalMaskChainUse {
+    /// Whether some listener applies `chain`.
+    pub fn uses(self, chain: FinalMaskChain) -> bool {
+        match chain {
+            FinalMaskChain::Tcp => self.tcp,
+            FinalMaskChain::Udp => self.udp,
+        }
+    }
+
+    fn mark(&mut self, chain: FinalMaskChain) {
+        match chain {
+            FinalMaskChain::Tcp => self.tcp = true,
+            FinalMaskChain::Udp => self.udp = true,
+        }
+    }
+}
+
+/// The networks a proxy's `Network()` returns — they decide which workers
+/// `AlwaysOnInboundHandler` creates.
+#[derive(Debug, Default)]
+struct ProxyNetworks {
+    tcp: bool,
+    udp: bool,
+    unix: bool,
+}
+
+/// The FinalMask chains the inbound's listeners actually wrap, or `None` when that cannot be told
+/// for sure (a protocol or transport this table does not know, or a value the core refuses to
+/// load) — callers then stay silent rather than guess.
+///
+/// How the core decides (`app/proxyman/inbound/always.go`): an IP `listen` gets, per port, a
+/// stream worker when the proxy's networks include TCP — it listens through the transport, so
+/// the transport picks the chain — and a UDP worker when they include UDP (`udp.ListenUDP`,
+/// always `udp[]`, whatever the transport). A Unix-socket `listen` (absolute path or `@…`) gets
+/// only the domain-socket worker (through the transport), and only when the networks include
+/// UNIX.
+pub fn inbound_finalmask_chain_use(inbound: &Value) -> Option<FinalMaskChainUse> {
+    let networks = proxy_networks(inbound)?;
+    let unix_listen = inbound
+        .get("listen")
+        .and_then(Value::as_str)
+        .is_some_and(|listen| listen.starts_with('/') || listen.starts_with('@'));
+    let mut used = FinalMaskChainUse::default();
+    let stream_worker = if unix_listen { networks.unix } else { networks.tcp };
+    if stream_worker {
+        used.mark(transport_finalmask_chain(inbound)?);
+    }
+    if networks.udp && !unix_listen {
+        used.mark(FinalMaskChain::Udp);
+    }
+    Some(used)
+}
+
+/// `Network()` of the inbound's proxy; the protocol name is case-insensitive in the core
+/// (`JSONConfigLoader.LoadWithID`). `None` for protocols this table does not cover.
+fn proxy_networks(inbound: &Value) -> Option<ProxyNetworks> {
+    let protocol = inbound.get("protocol")?.as_str()?.to_ascii_lowercase();
+    match protocol.as_str() {
+        // `proxy/vless/inbound`, `proxy/trojan`.
+        "vless" | "trojan" => Some(ProxyNetworks {
+            tcp: true,
+            udp: false,
+            unix: true,
+        }),
+        // `proxy/hysteria`: QUIC is the hysteria transport's own UDP socket, behind the stream
+        // worker.
+        "hysteria" => Some(ProxyNetworks {
+            tcp: true,
+            ..ProxyNetworks::default()
+        }),
+        "tunnel" | "dokodemo-door" => tunnel_networks(inbound.get("settings")),
+        _ => None,
+    }
+}
+
+/// `DokodemoConfig.Build()`: a legacy `network` replaces `allowedNetwork`; neither (or `null`)
+/// means TCP. `NetworkList` is an array of strings or one string split at `,` — not trimmed, each
+/// name compared case-insensitively, anything else ignored (`"tcp, udp"` is TCP only). The
+/// proxy's `Network()` adds UNIX whenever TCP is allowed.
+fn tunnel_networks(settings: Option<&Value>) -> Option<ProxyNetworks> {
+    let present = |key: &str| {
+        settings
+            .and_then(|settings| settings.get(key))
+            .filter(|value| !value.is_null())
+    };
+    let names: Vec<String> = match present("network").or_else(|| present("allowedNetwork")) {
+        None => vec!["tcp".to_owned()],
+        Some(Value::String(text)) => text.split(',').map(str::to_owned).collect(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|item| item.as_str().map(str::to_owned))
+            .collect::<Option<_>>()?,
+        // The core refuses to load it.
+        Some(_) => return None,
+    };
+    let mut networks = ProxyNetworks::default();
+    for name in names {
+        match name.to_ascii_lowercase().as_str() {
+            "tcp" => networks.tcp = true,
+            "udp" => networks.udp = true,
+            "unix" => networks.unix = true,
+            _ => {}
+        }
+    }
+    networks.unix |= networks.tcp;
+    Some(networks)
+}
+
+/// The chain the inbound's transport listener applies: TCP listeners — RAW, WebSocket, gRPC,
+/// HTTPUpgrade, XHTTP over TCP (`FinalMask.Listen`); UDP sockets — mKCP (`udp.ListenUDP`),
+/// Hysteria and XHTTP/3 (`FinalMask.ListenPacket`). `None` for any other transport.
+fn transport_finalmask_chain(inbound: &Value) -> Option<FinalMaskChain> {
+    match matrix_transport(&normalized_method(inbound)).as_str() {
+        "tcp" | "websocket" | "grpc" | "httpupgrade" => Some(FinalMaskChain::Tcp),
+        "xhttp" | "splithttp" => {
+            let h3 = inbound.get("streamSettings").and_then(quic_transport_of)
+                == Some(QuicTransport::XhttpH3);
+            Some(if h3 { FinalMaskChain::Udp } else { FinalMaskChain::Tcp })
+        }
+        "mkcp" | "hysteria" => Some(FinalMaskChain::Udp),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -397,5 +535,78 @@ mod tests {
             vec![InboundSecurityMode::None]
         );
         assert!(transport_security_allowed("tcp", "none"));
+    }
+
+    const TCP: Option<FinalMaskChainUse> = Some(FinalMaskChainUse { tcp: true, udp: false });
+    const UDP: Option<FinalMaskChainUse> = Some(FinalMaskChainUse { tcp: false, udp: true });
+    const BOTH: Option<FinalMaskChainUse> = Some(FinalMaskChainUse { tcp: true, udp: true });
+    const NONE: Option<FinalMaskChainUse> = Some(FinalMaskChainUse { tcp: false, udp: false });
+
+    /// Roadmap §2.6 stage 4.3: the transport picks the chain of a TCP-only proxy.
+    #[test]
+    fn finalmask_chain_use_follows_the_transport() {
+        let vless = |stream: Value| json!({"protocol": "VLESS", "streamSettings": stream});
+        for (stream, expected) in [
+            (json!({}), TCP),
+            (json!({"network": "raw"}), TCP),
+            (json!({"network": "ws"}), TCP),
+            (json!({"network": "grpc"}), TCP),
+            (json!({"network": "httpupgrade"}), TCP),
+            (json!({"network": "xhttp", "security": "tls", "tlsSettings": {"alpn": ["h3", "h2"]}}), TCP),
+            (json!({"network": "xhttp", "security": "tls", "tlsSettings": {"alpn": ["h3"]}}), UDP),
+            (json!({"method": "splithttp", "security": "tls", "tlsSettings": {"alpn": "h3"}}), UDP),
+            (json!({"network": "kcp"}), UDP),
+            (json!({"network": "masque"}), None),
+        ] {
+            assert_eq!(inbound_finalmask_chain_use(&vless(stream.clone())), expected, "{stream}");
+        }
+        let hysteria = json!({"protocol": "hysteria", "streamSettings": {"network": "hysteria"}});
+        assert_eq!(inbound_finalmask_chain_use(&hysteria), UDP);
+        // Protocols outside the table: no claim.
+        assert_eq!(inbound_finalmask_chain_use(&json!({"protocol": "vmess"})), None);
+        assert_eq!(inbound_finalmask_chain_use(&json!({})), None);
+    }
+
+    /// A Tunnel adds a UDP worker (`udp.ListenUDP`, always `udp[]`) for `allowedNetwork` udp;
+    /// `NetworkList` is split at `,` without trimming, and a legacy `network` wins.
+    #[test]
+    fn finalmask_chain_use_of_a_tunnel_follows_its_networks() {
+        let tunnel = |settings: Value| json!({"protocol": "tunnel", "settings": settings});
+        for (settings, expected) in [
+            (json!({}), TCP),
+            (json!({"allowedNetwork": null}), TCP),
+            (json!({"allowedNetwork": "udp"}), UDP),
+            (json!({"allowedNetwork": "TCP,UDP"}), BOTH),
+            (json!({"allowedNetwork": "tcp, udp"}), TCP),
+            (json!({"allowedNetwork": ["udp", "tcp"]}), BOTH),
+            (json!({"allowedNetwork": ""}), NONE),
+            (json!({"allowedNetwork": "tcp", "network": "udp"}), UDP),
+            (json!({"allowedNetwork": "udp", "network": null}), UDP),
+            (json!({"allowedNetwork": 5}), None),
+            (json!({"allowedNetwork": ["tcp", 5]}), None),
+        ] {
+            assert_eq!(inbound_finalmask_chain_use(&tunnel(settings.clone())), expected, "{settings}");
+        }
+        // The UDP worker does not depend on the transport; the stream worker does.
+        let udp_only = json!({"protocol": "dokodemo-door", "settings": {"allowedNetwork": "udp"},
+                              "streamSettings": {"network": "masque"}});
+        assert_eq!(inbound_finalmask_chain_use(&udp_only), UDP);
+    }
+
+    /// A Unix-socket `listen` gets only the domain-socket worker, and only with UNIX networks.
+    #[test]
+    fn finalmask_chain_use_on_a_unix_socket() {
+        for listen in ["/run/xray/vless.sock", "@vless"] {
+            let vless = json!({"protocol": "vless", "listen": listen});
+            assert_eq!(inbound_finalmask_chain_use(&vless), TCP, "{listen}");
+        }
+        let tunnel = json!({"protocol": "tunnel", "listen": "/run/t.sock",
+                            "settings": {"allowedNetwork": "tcp,udp"}});
+        assert_eq!(inbound_finalmask_chain_use(&tunnel), TCP);
+        let udp_tunnel = json!({"protocol": "tunnel", "listen": "@t", "settings": {"allowedNetwork": "udp"}});
+        assert_eq!(inbound_finalmask_chain_use(&udp_tunnel), NONE);
+        let hysteria = json!({"protocol": "hysteria", "listen": "/run/hy.sock",
+                              "streamSettings": {"network": "hysteria"}});
+        assert_eq!(inbound_finalmask_chain_use(&hysteria), NONE);
     }
 }

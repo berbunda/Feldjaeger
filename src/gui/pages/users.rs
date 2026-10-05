@@ -323,8 +323,17 @@ fn show_protocol_users_body(
                 .selected_inbound_index
                 .and_then(|index| service.hy2_share_blocked_reason(index))
             {
+                // The client can still be set up by hand (Roadmap §2.6 stage 6.1).
+                let by_hand = model
+                    .selected_inbound_index
+                    .is_some_and(|index| matches!(service.client_share_finalmask(index), Ok(Some(_))));
+                let hint = if by_hand {
+                    " — use \"Copy client finalmask JSON\" in a user's context menu to set up the client by hand"
+                } else {
+                    ""
+                };
                 ui.label(
-                    RichText::new(format!("Share links are disabled for this inbound: {reason}"))
+                    RichText::new(format!("Share links are disabled for this inbound: {reason}{hint}"))
                         .color(SHARE_WARNING_COLOR),
                 );
                 ui.add_space(6.0);
@@ -1900,6 +1909,43 @@ fn show_share_menu_items(
                     .color(SHARE_WARNING_COLOR),
             );
         }
+    }
+    show_client_finalmask_items(ui, service, inbound_index);
+}
+
+/// "Copy client finalmask JSON" for an inbound whose client needs FinalMask layers (Roadmap §2.6
+/// stage 6.1), with what the link does with them: a VLESS / Trojan link carries them as `fm`,
+/// which not every client reads; a hy2 link carries at most a plain salamander `obfs`. An
+/// unreadable chain is already explained by the Share items above.
+fn show_client_finalmask_items(ui: &mut Ui, service: &ApplicationService, inbound_index: usize) {
+    let Ok(Some(finalmask)) = service.client_share_finalmask(inbound_index) else {
+        return;
+    };
+    ui.separator();
+    if ui
+        .button("Copy client finalmask JSON")
+        .on_hover_text(
+            "The client's streamSettings.finalmask: the layers it must mirror, in the same order. \
+             Paste it as the value of \"finalmask\" in the client outbound's streamSettings.",
+        )
+        .clicked()
+    {
+        ui.ctx().copy_text(finalmask.json.clone());
+        ui.close();
+    }
+    ui.set_max_width(320.0);
+    let layers = finalmask.layer_types.join(", ");
+    let about = if finalmask.in_share_uri {
+        format!(
+            "The link carries the client FinalMask ({layers}) as `fm`. Clients that don't read `fm` \
+             connect without these masks and fail — give them the JSON."
+        )
+    } else {
+        format!("Clients need FinalMask layers ({layers}); hy2 links carry only a plain salamander obfs.")
+    };
+    ui.label(RichText::new(about).size(12.0).color(Color32::from_rgb(140, 140, 140)));
+    for note in &finalmask.notes {
+        ui.label(RichText::new(note).size(12.0).color(SHARE_WARNING_COLOR));
     }
 }
 

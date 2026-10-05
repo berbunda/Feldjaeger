@@ -8,19 +8,19 @@
 use serde_json::{Map, Value};
 
 use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
-use crate::xray::config::stream::{FinalMaskChain, StreamDirection};
+use crate::xray::config::stream::{FinalMaskChain, StreamDirection, mkcp_legacy_layers_from_kcp};
 
 mod xhttp;
 
 // FinalMask, quicParams and sockopt live in the direction-aware `stream` module (Roadmap §2.6
 // stage 0.4); re-exported here so the inbound API is unchanged.
 pub use crate::xray::config::stream::{
-    ADDRESS_PORT_STRATEGIES, DOMAIN_STRATEGIES, FinalMaskLayerDraft, FragmentMaskSettings,
+    ADDRESS_PORT_STRATEGIES, ClientFinalMask, DOMAIN_STRATEGIES, FinalMaskLayerDraft, FragmentMaskSettings,
     HappyEyeballsDraft, NoiseMaskItem, NoiseMaskSettings, PacketValue, PortListValue,
     QuicParamsDraft, RangeValue, RealmSettings, SalamanderSettings, SockoptDraft, SudokuSettings,
     TCP_CONGESTION_PRESETS, TCP_FINALMASK_TYPES, TPROXY_MODES, TcpFastOpenDraft,
     UDP_FINALMASK_TYPES, UdpHopSettings, XdnsSettings, XicmpSettings,
-    finalmask_layers_to_value, fragment_mask_settings_to_value, hy2_share_obfs,
+    finalmask_layers_to_value, fragment_mask_settings_to_value, client_finalmask, hy2_share_obfs,
     noise_mask_settings_to_value, parse_finalmask_layers, parse_fragment_mask_settings,
     parse_noise_mask_settings, parse_quic_params, parse_range_values, parse_realm_settings,
     parse_salamander_settings, parse_sockopt, parse_sudoku_settings, parse_udphop_settings,
@@ -261,6 +261,51 @@ impl KcpStreamSettings {
         self.extras.retain(|key, _| !KCP_IGNORED_FIELDS.contains(&key.as_str()));
         self.extras.len() != before
     }
+
+    /// True when [`Self::extras`] holds the legacy [`KCP_LEGACY_OBFUSCATION_FIELDS`].
+    pub fn has_legacy_obfuscation(&self) -> bool {
+        KCP_LEGACY_OBFUSCATION_FIELDS.iter().any(|key| self.extras.contains_key(*key))
+    }
+}
+
+impl InboundStreamDraft {
+    /// Moves the legacy `kcpSettings.header` / `seed` into `finalmask.udp` as the equivalent
+    /// `mkcp-legacy` layers ([`mkcp_legacy_layers_from_kcp`]) — the explicit migration action of
+    /// Roadmap §2.6 stage 5.2; Save then writes both. Returns the number of layers added. On
+    /// error nothing is changed.
+    ///
+    /// Refused when the chain is not empty: the old mKCP had no other layers, so where the new
+    /// ones belong next to existing ones is a choice only the user can make. The caller checks
+    /// the installed core (`mkcp-legacy` needs v26.1.31) and an on-disk chain the typed model could
+    /// not read.
+    pub fn migrate_kcp_legacy_obfuscation(&mut self) -> Result<usize, String> {
+        if self.method != Some(StreamMethod::Mkcp) {
+            return Err("the mKCP header/seed migration applies to the mKCP transport only".to_owned());
+        }
+        if !self.kcp.has_legacy_obfuscation() {
+            return Err("kcpSettings has no header or seed to migrate".to_owned());
+        }
+        if self.finalmask_foreign {
+            return Err("streamSettings.finalmask is not a JSON object; fix or remove it on the Raw \
+                        JSON tab first"
+                .to_owned());
+        }
+        if !self.finalmask_udp.is_empty() {
+            return Err(format!(
+                "finalmask.udp already has {} layer(s); remove them first or add the mkcp-legacy \
+                 layers by hand — where they belong among existing layers is your choice",
+                self.finalmask_udp.len()
+            ));
+        }
+        let layers = mkcp_legacy_layers_from_kcp(self.kcp.extras.get("header"), self.kcp.extras.get("seed"))?;
+        let added = layers.len();
+        for key in KCP_LEGACY_OBFUSCATION_FIELDS {
+            self.kcp.extras.remove(*key);
+        }
+        self.finalmask_udp = layers;
+        self.write_finalmask_udp = true;
+        Ok(added)
+    }
 }
 
 /// Nested fields for `hysteriaSettings` (Wave A allowlist + extras).
@@ -301,11 +346,12 @@ pub struct InboundStreamDraft {
     pub quic_params: QuicParamsDraft,
     /// Whether to write `finalmask.quicParams` from [`Self::quic_params`].
     pub write_quic_params: bool,
-    /// Typed `finalmask.tcp` masking layers (VLESS/Trojan; Hysteria never applies them).
+    /// Typed `finalmask.tcp` masking layers (VLESS/Trojan/Tunnel; Hysteria never applies them).
     pub finalmask_tcp: Vec<FinalMaskLayerDraft>,
     /// Whether to write `finalmask.tcp` from [`Self::finalmask_tcp`].
     pub write_finalmask_tcp: bool,
-    /// Typed `finalmask.udp` masking layers (VLESS/Trojan/Hysteria; Roadmap §2.6 stage 4.1).
+    /// Typed `finalmask.udp` masking layers (VLESS/Trojan/Hysteria/Tunnel; Roadmap §2.6 stages
+    /// 4.1–4.2).
     pub finalmask_udp: Vec<FinalMaskLayerDraft>,
     /// Whether to write `finalmask.udp` from [`Self::finalmask_udp`].
     pub write_finalmask_udp: bool,
@@ -774,21 +820,8 @@ pub fn apply_inbound_stream(
             )
         })?;
 
-    // A non-object `finalmask` on disk is not Feldjäger's (Roadmap §2.6 stage 0.5): never wrap or
-    // overwrite it. Checked before anything is mutated, so a rejected draft leaves the inbound as
-    // it was.
-    if draft.writes_finalmask()
-        && let Some(existing) = stream.get("finalmask").filter(|v| is_foreign_finalmask(v))
-    {
-        return Err(ConfigModifyError::new(
-            ConfigModifyErrorKind::ValidationFailed,
-            format!(
-                "streamSettings.finalmask is {}, not a JSON object; Feldjäger leaves it as is — \
-                 fix or remove it on the Raw JSON tab before editing FinalMask or quicParams",
-                json_kind(existing)
-            ),
-        ));
-    }
+    // Checked before anything is mutated, so a rejected draft leaves the inbound as it was.
+    reject_foreign_finalmask_write(stream, draft.writes_finalmask())?;
 
     // Preserve security-related keys.
     let security = stream.get("security").cloned();
@@ -942,46 +975,9 @@ pub fn apply_inbound_stream(
         stream.insert("tlsSettings".to_owned(), value);
     }
 
-    if draft.write_finalmask_tcp {
-        validate_finalmask_layers(&draft.finalmask_tcp, FinalMaskChain::Tcp, StreamDirection::Inbound)?;
-    }
-    if draft.write_finalmask_udp {
-        validate_finalmask_layers(&draft.finalmask_udp, FinalMaskChain::Udp, StreamDirection::Inbound)?;
-    }
-    if draft.write_quic_params {
-        validate_quic_params(&draft.quic_params).map_err(|message| {
-            ConfigModifyError::new(
-                ConfigModifyErrorKind::ValidationFailed,
-                format!("streamSettings.finalmask.{message}"),
-            )
-        })?;
-    }
-
-    // `finalmask` is never removed above, so when nothing is written it simply stays as it was
-    // (object, `null` or a foreign value alike). When writing, the value is an object or
-    // absent/`null` (foreign values were rejected before any mutation).
-    if draft.writes_finalmask() {
-        let mut finalmask = match stream.remove("finalmask") {
-            Some(Value::Object(existing)) => existing,
-            _ => Map::new(),
-        };
-        if draft.write_quic_params {
-            finalmask.insert("quicParams".to_owned(), quic_params_to_value(&draft.quic_params));
-        }
-        if draft.write_finalmask_tcp {
-            finalmask.insert(
-                "tcp".to_owned(),
-                finalmask_layers_to_value(&draft.finalmask_tcp),
-            );
-        }
-        if draft.write_finalmask_udp {
-            finalmask.insert(
-                "udp".to_owned(),
-                finalmask_layers_to_value(&draft.finalmask_udp),
-            );
-        }
-        stream.insert("finalmask".to_owned(), Value::Object(finalmask));
-    }
+    // `finalmask` is never removed above, so when nothing is written it simply stays as it was.
+    validate_finalmask_draft(draft, true)?;
+    write_finalmask_draft(stream, draft, true);
 
     if draft.write_sockopt {
         validate_sockopt(&draft.sockopt)?;
@@ -998,17 +994,103 @@ pub fn apply_inbound_stream(
     Ok(())
 }
 
-/// Applies only `streamSettings.sockopt` (Tunnel Shell Save, Roadmap §2.3:88). Unlike
-/// [`apply_inbound_stream`], leaves every other `streamSettings` key (network, security,
-/// tlsSettings, …) byte-for-byte untouched — Tunnel Shell Save must not mutate transport/security.
-pub fn apply_tunnel_sockopt(
+/// Rejects a draft that would write into a `streamSettings.finalmask` Feldjäger does not own: a
+/// non-object value on disk is never wrapped or overwritten (Roadmap §2.6 stage 0.5).
+fn reject_foreign_finalmask_write(
+    stream: &Map<String, Value>,
+    writes_finalmask: bool,
+) -> ConfigModifyResult<()> {
+    match stream.get("finalmask").filter(|v| is_foreign_finalmask(v)) {
+        Some(existing) if writes_finalmask => Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            format!(
+                "streamSettings.finalmask is {}, not a JSON object; Feldjäger leaves it as is — \
+                 fix or remove it on the Raw JSON tab before editing FinalMask or quicParams",
+                json_kind(existing)
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Validates the `finalmask` parts the draft writes; `with_quic_params` is false where the
+/// protocol has no QUIC transport (Tunnel), so `quicParams` is neither validated nor written.
+fn validate_finalmask_draft(
+    draft: &InboundStreamDraft,
+    with_quic_params: bool,
+) -> ConfigModifyResult<()> {
+    if draft.write_finalmask_tcp {
+        validate_finalmask_layers(&draft.finalmask_tcp, FinalMaskChain::Tcp, StreamDirection::Inbound)?;
+    }
+    if draft.write_finalmask_udp {
+        validate_finalmask_layers(&draft.finalmask_udp, FinalMaskChain::Udp, StreamDirection::Inbound)?;
+    }
+    if with_quic_params && draft.write_quic_params {
+        validate_quic_params(&draft.quic_params).map_err(|message| {
+            ConfigModifyError::new(
+                ConfigModifyErrorKind::ValidationFailed,
+                format!("streamSettings.finalmask.{message}"),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+/// Writes the `finalmask` parts the draft owns into `stream`, keeping every other `finalmask`
+/// key. Nothing to write leaves `finalmask` as it was (object, `null` or a foreign value alike);
+/// otherwise the value on disk is an object or absent/`null` — callers reject a foreign one
+/// first ([`reject_foreign_finalmask_write`]).
+fn write_finalmask_draft(
+    stream: &mut Map<String, Value>,
+    draft: &InboundStreamDraft,
+    with_quic_params: bool,
+) {
+    let write_quic_params = with_quic_params && draft.write_quic_params;
+    if !(write_quic_params || draft.write_finalmask_tcp || draft.write_finalmask_udp) {
+        return;
+    }
+    let mut finalmask = match stream.remove("finalmask") {
+        Some(Value::Object(existing)) => existing,
+        _ => Map::new(),
+    };
+    if write_quic_params {
+        finalmask.insert("quicParams".to_owned(), quic_params_to_value(&draft.quic_params));
+    }
+    if draft.write_finalmask_tcp {
+        finalmask.insert("tcp".to_owned(), finalmask_layers_to_value(&draft.finalmask_tcp));
+    }
+    if draft.write_finalmask_udp {
+        finalmask.insert("udp".to_owned(), finalmask_layers_to_value(&draft.finalmask_udp));
+    }
+    stream.insert("finalmask".to_owned(), Value::Object(finalmask));
+}
+
+/// Applies `streamSettings.sockopt` and `streamSettings.finalmask.tcp`/`.udp` (Tunnel Shell
+/// Save; Roadmap §2.3:88 and §2.6 stage 4.2). Unlike [`apply_inbound_stream`], leaves every other
+/// `streamSettings` key (network, security, tlsSettings, `finalmask.quicParams`, …) byte-for-byte
+/// untouched — Tunnel Shell Save must not mutate transport/security.
+///
+/// Both chains matter: Xray-core listens for a Tunnel's `settings.allowedNetwork` `tcp` through
+/// the raw TCP hub (`FinalMask.Listen`, `tcp[]`) and for `udp` through `udp.ListenUDP`
+/// (`FinalMask.ListenPacket`, `udp[]`). Tunnel has no QUIC transport, so `quicParams` is left
+/// alone.
+pub fn apply_tunnel_stream(
     inbound: &mut Value,
     draft: &InboundStreamDraft,
 ) -> ConfigModifyResult<()> {
-    if !draft.write_sockopt {
+    let writes_finalmask = draft.write_finalmask_tcp || draft.write_finalmask_udp;
+    if !draft.write_sockopt && !writes_finalmask {
         return Ok(());
     }
-    validate_sockopt(&draft.sockopt)?;
+    // Everything is validated before the first mutation, so a rejected draft leaves the inbound
+    // as it was.
+    if draft.write_sockopt {
+        validate_sockopt(&draft.sockopt)?;
+    }
+    validate_finalmask_draft(draft, false)?;
+    if let Some(stream) = inbound.get("streamSettings").and_then(Value::as_object) {
+        reject_foreign_finalmask_write(stream, writes_finalmask)?;
+    }
 
     let root = inbound.as_object_mut().ok_or_else(|| {
         ConfigModifyError::new(
@@ -1030,11 +1112,14 @@ pub fn apply_tunnel_sockopt(
             )
         })?;
 
-    let value = sockopt_to_value(&draft.sockopt);
-    if value.as_object().is_some_and(Map::is_empty) {
-        stream.remove("sockopt");
-    } else {
-        stream.insert("sockopt".to_owned(), value);
+    write_finalmask_draft(stream, draft, false);
+    if draft.write_sockopt {
+        let value = sockopt_to_value(&draft.sockopt);
+        if value.as_object().is_some_and(Map::is_empty) {
+            stream.remove("sockopt");
+        } else {
+            stream.insert("sockopt".to_owned(), value);
+        }
     }
     Ok(())
 }
@@ -1328,6 +1413,67 @@ mod tests {
         assert_eq!(kcp["futureKey"], 1);
     }
 
+    /// Roadmap §2.6 stage 5.2: the migration moves header/seed into `finalmask.udp` on the draft;
+    /// Save then writes the layers and drops the keys, keeping everything else.
+    #[test]
+    fn mkcp_legacy_migration_writes_layers_and_drops_the_keys() {
+        let mut inbound = json!({"streamSettings": {"network": "mkcp",
+            "kcpSettings": {"mtu": 1350, "header": {"type": "dns", "domain": "q.example"},
+                            "seed": "s3cret", "futureKey": 1},
+            "finalmask": {"quicParams": {"congestion": "bbr"}}}});
+        let mut draft = parse_inbound_stream(&inbound);
+        assert!(draft.kcp.has_legacy_obfuscation());
+        assert_eq!(draft.migrate_kcp_legacy_obfuscation(), Ok(2));
+        assert!(!draft.kcp.has_legacy_obfuscation());
+        apply_inbound_stream(&mut inbound, &draft).unwrap();
+        let stream = &inbound["streamSettings"];
+        assert_eq!(
+            stream["finalmask"]["udp"],
+            json!([
+                {"type": "mkcp-legacy", "settings": {"value": "s3cret"}},
+                {"type": "mkcp-legacy", "settings": {"header": "dns", "value": "q.example"}}
+            ])
+        );
+        assert_eq!(stream["finalmask"]["quicParams"]["congestion"], "bbr");
+        let kcp = stream["kcpSettings"].as_object().expect("object");
+        assert!(!kcp.contains_key("header") && !kcp.contains_key("seed"));
+        assert_eq!(kcp["mtu"], 1350);
+        assert_eq!(kcp["futureKey"], 1);
+    }
+
+    #[test]
+    fn mkcp_legacy_migration_refusals_leave_the_draft_unchanged() {
+        let base = json!({"streamSettings": {"network": "mkcp", "kcpSettings": {"seed": "s"}}});
+        let refused = |mut draft: InboundStreamDraft, needle: &str| {
+            let before = draft.clone();
+            let error = draft.migrate_kcp_legacy_obfuscation().unwrap_err();
+            assert!(error.contains(needle), "{error}");
+            assert_eq!(draft, before);
+        };
+        let mut with_layer = parse_inbound_stream(&base);
+        with_layer.finalmask_udp = vec![FinalMaskLayerDraft {
+            layer_type: "noise".to_owned(),
+            settings: json!({}),
+        }];
+        refused(with_layer, "already has 1 layer");
+        let mut not_kcp = parse_inbound_stream(&base);
+        not_kcp.method = Some(StreamMethod::Tcp);
+        refused(not_kcp, "mKCP transport only");
+        refused(
+            parse_inbound_stream(&json!({"streamSettings": {"network": "mkcp", "kcpSettings": {}}})),
+            "no header or seed",
+        );
+        refused(
+            parse_inbound_stream(&json!({"streamSettings": {"network": "mkcp", "kcpSettings": {"seed": ""}}})),
+            "empty string",
+        );
+        refused(
+            parse_inbound_stream(&json!({"streamSettings": {"network": "mkcp", "kcpSettings": {"seed": "s"},
+                                         "finalmask": "opaque"}})),
+            "not a JSON object",
+        );
+    }
+
     #[test]
     fn apply_mkcp_rejects_invalid_ranges() {
         let mut inbound = json!({"streamSettings": {"network": "tcp"}});
@@ -1612,7 +1758,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_tunnel_sockopt_noop_when_not_edited() {
+    fn apply_tunnel_stream_noop_when_not_edited() {
         let mut inbound = json!({
             "protocol": "tunnel",
             "streamSettings": {
@@ -1628,12 +1774,12 @@ mod tests {
         // Simulate a Shell Save where the Tunnel GUI never touched sockopt.
         let mut untouched = InboundStreamDraft::default();
         untouched.sockopt = draft.sockopt.clone();
-        apply_tunnel_sockopt(&mut inbound, &untouched).unwrap();
+        apply_tunnel_stream(&mut inbound, &untouched).unwrap();
         assert_eq!(inbound["streamSettings"], before);
     }
 
     #[test]
-    fn apply_tunnel_sockopt_writes_only_sockopt_key() {
+    fn apply_tunnel_stream_writes_only_sockopt_key() {
         let mut inbound = json!({
             "protocol": "tunnel",
             "streamSettings": {
@@ -1646,7 +1792,7 @@ mod tests {
         let mut draft = parse_inbound_stream(&inbound);
         assert!(draft.write_sockopt);
         draft.sockopt.tproxy = "tproxy".to_owned();
-        apply_tunnel_sockopt(&mut inbound, &draft).unwrap();
+        apply_tunnel_stream(&mut inbound, &draft).unwrap();
         let stream = &inbound["streamSettings"];
         assert_eq!(stream["sockopt"]["tproxy"], "tproxy");
         assert_eq!(stream["sockopt"]["acceptProxyProtocol"], true);
@@ -1656,12 +1802,74 @@ mod tests {
     }
 
     #[test]
-    fn apply_tunnel_sockopt_creates_stream_settings_when_absent() {
+    fn apply_tunnel_stream_creates_stream_settings_when_absent() {
         let mut inbound = json!({"protocol": "tunnel"});
         let mut draft = InboundStreamDraft::default();
         draft.sockopt.tproxy = "off".to_owned();
         draft.write_sockopt = true;
-        apply_tunnel_sockopt(&mut inbound, &draft).unwrap();
+        apply_tunnel_stream(&mut inbound, &draft).unwrap();
         assert_eq!(inbound["streamSettings"]["sockopt"]["tproxy"], "off");
+    }
+
+    #[test]
+    fn apply_tunnel_stream_writes_finalmask_chains_and_leaves_quic_params_alone() {
+        // quicParams is invalid for Xray (numeric brutalUp) and the Tunnel GUI never shows it:
+        // Tunnel Save must neither validate nor rewrite it.
+        let mut inbound = json!({
+            "protocol": "tunnel",
+            "streamSettings": {
+                "network": "tcp",
+                "security": "none",
+                "finalmask": {"quicParams": {"brutalUp": 1000000}, "other": "keep"},
+                "futureField": "keep"
+            }
+        });
+        let mut draft = parse_inbound_stream(&inbound);
+        draft.finalmask_tcp = vec![FinalMaskLayerDraft {
+            layer_type: "sudoku".to_owned(),
+            settings: json!({"password": "abc"}),
+        }];
+        draft.write_finalmask_tcp = true;
+        draft.finalmask_udp = vec![FinalMaskLayerDraft {
+            layer_type: "salamander".to_owned(),
+            settings: json!({"password": "secret-pw"}),
+        }];
+        draft.write_finalmask_udp = true;
+        apply_tunnel_stream(&mut inbound, &draft).unwrap();
+        let stream = &inbound["streamSettings"];
+        assert_eq!(stream["finalmask"]["tcp"][0]["type"], "sudoku");
+        assert_eq!(stream["finalmask"]["udp"][0]["type"], "salamander");
+        assert_eq!(stream["finalmask"]["quicParams"], json!({"brutalUp": 1000000}));
+        assert_eq!(stream["finalmask"]["other"], "keep");
+        assert_eq!(stream["network"], "tcp");
+        assert_eq!(stream["security"], "none");
+        assert_eq!(stream["futureField"], "keep");
+        assert!(stream.get("sockopt").is_none(), "an untouched sockopt is not created");
+    }
+
+    #[test]
+    fn apply_tunnel_stream_rejects_bad_finalmask_and_leaves_inbound_unchanged() {
+        let invalid_layer = vec![FinalMaskLayerDraft::default()];
+        let foreign = json!({
+            "protocol": "tunnel",
+            "streamSettings": {"network": "tcp", "finalmask": "not-an-object"}
+        });
+        let valid_layer = vec![FinalMaskLayerDraft {
+            layer_type: "sudoku".to_owned(),
+            settings: json!({"password": "abc"}),
+        }];
+        for (original, layers) in [
+            (json!({"protocol": "tunnel"}), invalid_layer),
+            (foreign, valid_layer),
+        ] {
+            let mut inbound = original.clone();
+            let mut draft = parse_inbound_stream(&inbound);
+            draft.finalmask_tcp = layers;
+            draft.write_finalmask_tcp = true;
+            draft.sockopt.tproxy = "tproxy".to_owned();
+            draft.write_sockopt = true;
+            assert!(apply_tunnel_stream(&mut inbound, &draft).is_err(), "{original}");
+            assert_eq!(inbound, original);
+        }
     }
 }

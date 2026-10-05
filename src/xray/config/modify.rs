@@ -23,7 +23,7 @@ use super::inbound_protocol::{InboundProtocolDraft, apply_inbound_protocol};
 use super::inbound_security::{
     InboundSecurityDraft, InboundSecurityMode, apply_inbound_security,
 };
-use super::inbound_stream::{InboundStreamDraft, apply_inbound_stream, apply_tunnel_sockopt};
+use super::inbound_stream::{InboundStreamDraft, apply_inbound_stream, apply_tunnel_stream};
 use super::api_settings::{ApiSettings, apply_api_settings_to_value, validate_api_settings};
 use super::dns_settings::{DnsSettings, apply_dns_settings_to_value, validate_dns_settings};
 use super::fakedns_settings::{
@@ -973,10 +973,10 @@ pub fn compose_inbound_shell(
     apply_inbound_general(inbound, general)?;
     apply_inbound_protocol(inbound, protocol_draft)?;
 
-    // Tunnel: leave streamSettings/security on disk except sockopt.tproxy (Roadmap
-    // §2.3:88); GUI does not otherwise edit them.
+    // Tunnel: leave streamSettings/security on disk except sockopt (Roadmap §2.3:88) and
+    // finalmask.tcp/udp (Roadmap §2.6 stage 4.2); GUI does not otherwise edit them.
     if protocol == InboundClientProtocol::Tunnel {
-        apply_tunnel_sockopt(inbound, stream)?;
+        apply_tunnel_stream(inbound, stream)?;
     } else {
         apply_inbound_stream(inbound, stream)?;
         if let Some(security) = security {

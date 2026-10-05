@@ -2618,8 +2618,11 @@ fn finalmask_tcp_ok_with_tls_security() {
     );
 }
 
+/// Roadmap §2.6 stage 5.1: Xray-core composes REALITY and `finalmask.tcp` (the mask wraps the
+/// socket, REALITY runs on top), so Add succeeds; a probe-facing layer only gets a warning.
 #[test]
-fn finalmask_tcp_blocked_by_g4_with_reality_security() {
+fn finalmask_tcp_with_reality_security_is_added_and_warned() {
+    use super::compatibility::{CompatibilityWarningId, inbound_warnings};
     use super::inbound_protocol::InboundProtocolDraft;
     use super::inbound_security::{InboundSecurityDraft, InboundSecurityMode, RealitySettingsDraft};
     use super::inbound_stream::{FinalMaskLayerDraft, InboundStreamDraft};
@@ -2627,12 +2630,19 @@ fn finalmask_tcp_blocked_by_g4_with_reality_security() {
 
     let mut config = single_file_editable(r#"{"inbounds":[]}"#);
     let mut stream = InboundStreamDraft::default();
-    stream.finalmask_tcp = vec![FinalMaskLayerDraft {
-        layer_type: "fragment".to_owned(),
-        settings: serde_json::json!({}),
-    }];
+    stream.method = Some(super::inbound_stream::StreamMethod::Tcp);
+    stream.finalmask_tcp = vec![
+        FinalMaskLayerDraft {
+            layer_type: "fragment".to_owned(),
+            settings: serde_json::json!({"length": "100-200"}),
+        },
+        FinalMaskLayerDraft {
+            layer_type: "sudoku".to_owned(),
+            settings: serde_json::json!({"password": "abc"}),
+        },
+    ];
     stream.write_finalmask_tcp = true;
-    let err = add_inbound(
+    add_inbound(
         &mut config,
         AddInboundRequest {
             protocol: InboundClientProtocol::Vless,
@@ -2658,9 +2668,64 @@ fn finalmask_tcp_blocked_by_g4_with_reality_security() {
             preferred_source_file: None,
         },
     )
-    .expect_err("reality + finalmask.tcp must be blocked by G4");
-    assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
-    assert!(err.message().contains("finalmask"));
+    .expect("reality + finalmask.tcp is a valid Xray config");
+
+    let inbound = &config.file_roots()["/etc/xray/config.json"]["inbounds"][0];
+    assert_eq!(inbound["streamSettings"]["security"], "reality");
+    assert_eq!(inbound["streamSettings"]["finalmask"]["tcp"][1]["type"], "sudoku");
+    let found: Vec<_> = inbound_warnings(inbound, None)
+        .into_iter()
+        .map(|w| (w.id, w.location))
+        .collect();
+    assert_eq!(
+        found,
+        vec![(
+            CompatibilityWarningId::RealityProbeSeesFinalMask,
+            "streamSettings.finalmask.tcp[1].type".to_owned(),
+        )],
+        "only the probe-facing sudoku layer, not fragment"
+    );
+}
+
+/// The G4 gate also ran after every client mutation, so a working REALITY inbound with
+/// `finalmask.tcp` on disk could not even get a new user (Roadmap §2.6 stage 5.1).
+#[test]
+fn client_add_on_reality_inbound_with_finalmask_tcp_is_not_blocked() {
+    use super::modify::{AddInboundClientRequest, add_inbound_client};
+    use crate::xray::secret::SecretString;
+
+    let mut config = single_file_editable(
+        r#"{
+            "inbounds":[{
+                "protocol":"trojan",
+                "port":443,
+                "settings":{"clients":[{"password":"secret","email":"t@example.com"}]},
+                "streamSettings":{
+                    "network":"tcp",
+                    "security":"reality",
+                    "realitySettings":{
+                        "target":"www.example.com:443",
+                        "privateKey":"abc",
+                        "serverNames":["www.example.com"],
+                        "shortIds":["abcd"]
+                    },
+                    "finalmask":{"tcp":[{"type":"xmc","settings":{"password":"p"}}]}
+                }
+            }]
+        }"#,
+    );
+    add_inbound_client(
+        &mut config,
+        AddInboundClientRequest::Trojan {
+            inbound_index: 0,
+            email: "x@example.com".to_owned(),
+            password: SecretString::new("new-pass"),
+            level: 0,
+        },
+    )
+    .expect("client add on reality + finalmask.tcp");
+    let clients = &config.file_roots()["/etc/xray/config.json"]["inbounds"][0]["settings"]["clients"];
+    assert_eq!(clients.as_array().map(Vec::len), Some(2));
 }
 
 #[test]
@@ -3885,6 +3950,74 @@ fn tunnel_shell_save_edits_tproxy_and_preserves_other_stream_fields() {
         &config.file_roots()["/etc/xray/config.json"]["inbounds"][0]["streamSettings"];
     assert_eq!(stream_settings["sockopt"]["tproxy"], "tproxy");
     assert_eq!(stream_settings["sockopt"]["acceptProxyProtocol"], true);
+    assert_eq!(stream_settings["network"], "tcp");
+    assert_eq!(stream_settings["security"], "none");
+    assert_eq!(stream_settings["futureStreamField"], "keep");
+}
+
+/// Roadmap §2.6 stage 4.2: a Tunnel with `allowedNetwork: udp` listens through `udp.ListenUDP`, which
+/// wraps the socket with `finalmask.udp` — Tunnel Shell Save writes the chain and nothing else.
+#[test]
+fn tunnel_shell_save_writes_finalmask_udp_and_preserves_other_stream_fields() {
+    use super::inbound_protocol::InboundProtocolDraft;
+    use super::inbound_stream::{FinalMaskLayerDraft, parse_inbound_stream};
+    use super::modify::{UpdateInboundShellRequest, update_inbound_shell};
+
+    let mut config = single_file_editable(
+        r#"{
+            "inbounds":[{
+                "tag":"dns-in",
+                "protocol":"tunnel",
+                "port":5353,
+                "listen":"127.0.0.1",
+                "settings":{"allowedNetwork":"udp","rewriteAddress":"1.1.1.1","rewritePort":53},
+                "streamSettings":{
+                    "network":"tcp",
+                    "security":"none",
+                    "sockopt":{"tproxy":"off"},
+                    "futureStreamField":"keep"
+                }
+            }]
+        }"#,
+    );
+    let inbound_ref = shell_ref(&config, 0);
+    let mut stream = parse_inbound_stream(
+        &config.file_roots()["/etc/xray/config.json"]["inbounds"][0],
+    );
+    stream.finalmask_udp = vec![FinalMaskLayerDraft {
+        layer_type: "salamander".to_owned(),
+        settings: serde_json::json!({"password": "secret-pw"}),
+    }];
+    stream.write_finalmask_udp = true;
+    update_inbound_shell(
+        &mut config,
+        UpdateInboundShellRequest {
+            inbound_ref,
+            general: InboundGeneral {
+                tag: Some("dns-in".to_owned()),
+                listen: Some("127.0.0.1".to_owned()),
+                port: Some(5353),
+            },
+            protocol: InboundProtocolDraft::Tunnel {
+                allowed_network: "udp".to_owned(),
+                rewrite_address: "1.1.1.1".to_owned(),
+                rewrite_port: Some(53),
+                port_map: Vec::new(),
+                follow_redirect: false,
+                user_level: 0,
+            },
+            stream,
+            sniffing: SniffingSettings::default(),
+            security: None,
+        },
+    )
+    .expect("tunnel finalmask shell save");
+    let stream_settings =
+        &config.file_roots()["/etc/xray/config.json"]["inbounds"][0]["streamSettings"];
+    assert_eq!(stream_settings["finalmask"]["udp"][0]["type"], "salamander");
+    assert_eq!(stream_settings["finalmask"]["udp"][0]["settings"]["password"], "secret-pw");
+    assert!(stream_settings["finalmask"].get("tcp").is_none());
+    assert_eq!(stream_settings["sockopt"]["tproxy"], "off");
     assert_eq!(stream_settings["network"], "tcp");
     assert_eq!(stream_settings["security"], "none");
     assert_eq!(stream_settings["futureStreamField"], "keep");

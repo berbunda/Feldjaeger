@@ -183,7 +183,7 @@ pub use routing::{
     routing_general_display, routing_rule_row_display, sort_routing_rule_summaries,
 };
 pub use share_material::InboundShareMaterial;
-pub use service::ApplicationService;
+pub use service::{ApplicationService, ClientShareFinalMask};
 pub use stats_console::{
     StatDirection, StatsPageModel, StatsQuerySnapshot, StatsSysSnapshot, SysStatsDisplay,
     TrafficCategory, TrafficSeriesDisplay, build_stats_page_model, missing_stats_service_warning,

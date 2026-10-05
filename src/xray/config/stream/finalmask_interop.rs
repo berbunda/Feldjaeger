@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::xray::local_xray::local_xray_bin;
-use super::{hy2_share_obfs, parse_finalmask_layers};
+use super::{FinalMaskChain, client_finalmask, hy2_share_obfs, parse_finalmask_layers};
 
 /// How long the client's `tunnel` inbound may take to start listening.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
@@ -187,13 +187,17 @@ fn assert_running(peer: &mut Peer, role: &str, label: &str) {
 /// through the client comes back from the echo server.
 fn echoes(xray: &Path, dir: &Path, tls: &Tls, echo_port: u16, label: &str, server_udp: &Value, client_udp: &Value) -> bool {
     let (server_port, tunnel_port) = (free_udp_port(), free_tcp_port());
+    let server = server_config(server_port, tls, server_udp);
+    let client = client_config(tunnel_port, echo_port, server_port, tls, client_udp);
+    run_echo(xray, dir, label, &server, &client, tunnel_port)
+}
+
+/// Starts both peers; true when a payload sent into the client's `tunnel` inbound on
+/// `tunnel_port` comes back from the echo server.
+fn run_echo(xray: &Path, dir: &Path, label: &str, server_config: &Value, client_config: &Value, tunnel_port: u16) -> bool {
     let slug: String = label.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    let mut server = start(xray, &dir.join(format!("{slug}-server.json")), &server_config(server_port, tls, server_udp));
-    let mut client = start(
-        xray,
-        &dir.join(format!("{slug}-client.json")),
-        &client_config(tunnel_port, echo_port, server_port, tls, client_udp),
-    );
+    let mut server = start(xray, &dir.join(format!("{slug}-server.json")), server_config);
+    let mut client = start(xray, &dir.join(format!("{slug}-client.json")), client_config);
 
     let started = Instant::now();
     let mut stream = loop {
@@ -301,4 +305,113 @@ fn hy2_share_obfs_matches_the_core() {
     });
     let _ = std::fs::remove_dir_all(&dir);
     assert!(failures.is_empty(), "hy2 obfs mapping disagrees with Xray-core:\n{}", failures.join("\n"));
+}
+
+const VLESS_ID: &str = "4a0b6a2c-7f61-4c2b-9d43-3c1c2f5e8a10";
+
+/// A VLESS inbound without security on `network`, with `finalmask` as the server's chains.
+fn vless_server_config(port: u16, network: &str, finalmask: &Value) -> Value {
+    json!({
+        "log": {"loglevel": "warning", "access": "none"},
+        "inbounds": [{
+            "listen": "127.0.0.1",
+            "port": port,
+            "protocol": "vless",
+            "settings": {"clients": [{"id": VLESS_ID}], "decryption": "none"},
+            "streamSettings": {"network": network, "security": "none", "finalmask": finalmask}
+        }],
+        "outbounds": [{"protocol": "freedom", "settings": {"finalRules": [{"action": "allow", "ip": ["127.0.0.1"]}]}}]
+    })
+}
+
+/// The client a `vless://` link builds: `fm` becomes the outbound's `streamSettings.finalmask`
+/// as it is (v2rayN `BaseFmt` / `V2rayOutboundService`); no `fm`, no finalmask.
+fn vless_client_config(tunnel_port: u16, echo_port: u16, server_port: u16, network: &str, fm: Option<&Value>) -> Value {
+    let mut stream = json!({"network": network, "security": "none"});
+    if let Some(fm) = fm {
+        stream["finalmask"] = fm.clone();
+    }
+    json!({
+        "log": {"loglevel": "warning", "access": "none"},
+        "inbounds": [{
+            "listen": "127.0.0.1",
+            "port": tunnel_port,
+            "protocol": "tunnel",
+            "settings": {"address": "127.0.0.1", "port": echo_port, "network": "tcp"}
+        }],
+        "outbounds": [{
+            "protocol": "vless",
+            "settings": {"address": "127.0.0.1", "port": server_port, "id": VLESS_ID, "encryption": "none"},
+            "streamSettings": stream
+        }]
+    })
+}
+
+/// Roadmap §2.6 stage 6.1: the `fm` of a `vless://` link ([`client_finalmask`] of the chain the
+/// transport uses) must connect to the server it was built from — with one-sided layers dropped
+/// and the unused chain left out. The control (a masked server, a client without `fm`) shows
+/// that the masks are really in play.
+#[test]
+fn vless_share_fm_matches_the_core() {
+    let Some(xray) = local_xray_bin() else {
+        eprintln!("no local Xray (XRAY_BIN / xray-bin) — skipping the VLESS fm interop check");
+        return;
+    };
+    let dir: PathBuf = std::env::temp_dir().join(format!("feldjaeger-fm-interop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("interop temp dir");
+    let echo_port = spawn_echo_server();
+
+    let fragment = json!({"type": "fragment", "settings": {"packets": "1-1", "length": "3-6", "delay": "0"}});
+    let sudoku = json!({"type": "sudoku", "settings": {"password": "interop-sudoku"}});
+    let header = json!({"type": "header-custom", "settings": {
+        "clients": [[{"rand": 8}]], "servers": [[{"rand": 8}]]
+    }});
+    let mkcp = json!({"type": "mkcp-legacy", "settings": {"value": "interop-seed"}});
+    let salamander = json!({"type": "salamander", "settings": {"password": "interop-obfs"}});
+
+    // (label, network, the client dials through, server finalmask, client gets `fm`)
+    let cases: Vec<(&str, &str, FinalMaskChain, Value, bool)> = vec![
+        ("raw: fragment then sudoku", "raw", FinalMaskChain::Tcp,
+            json!({"tcp": [fragment.clone(), sudoku.clone()], "udp": [salamander.clone()]}), true),
+        ("raw: header-custom", "raw", FinalMaskChain::Tcp, json!({"tcp": [header]}), true),
+        ("kcp: mkcp-legacy then noise", "kcp", FinalMaskChain::Udp,
+            json!({"udp": [mkcp.clone(), noise()], "tcp": [sudoku.clone()]}), true),
+        ("control: raw sudoku, client without fm", "raw", FinalMaskChain::Tcp, json!({"tcp": [sudoku]}), false),
+        ("control: kcp mkcp-legacy, client without fm", "kcp", FinalMaskChain::Udp, json!({"udp": [mkcp]}), false),
+    ];
+
+    let failures: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = cases
+            .iter()
+            .map(|(label, network, chain, server_fm, with_fm)| {
+                let (xray, dir) = (&xray, &dir);
+                scope.spawn(move || {
+                    let layers = server_fm
+                        .get(chain.key())
+                        .and_then(Value::as_array)
+                        .and_then(|array| parse_finalmask_layers(array))
+                        .expect("typed layers");
+                    let fm = with_fm
+                        .then(|| client_finalmask(&[(*chain, layers.as_slice())]))
+                        .flatten()
+                        .map(|client| client.value);
+                    let server_port = if *chain == FinalMaskChain::Udp { free_udp_port() } else { free_tcp_port() };
+                    let tunnel_port = free_tcp_port();
+                    let server = vless_server_config(server_port, network, server_fm);
+                    let client = vless_client_config(tunnel_port, echo_port, server_port, network, fm.as_ref());
+                    let echoed = run_echo(xray, dir, label, &server, &client, tunnel_port);
+                    (echoed != *with_fm).then(|| {
+                        format!(
+                            "{label}: expected {}, got {}\n  server finalmask: {server_fm}\n  client fm: {fm:?}",
+                            if *with_fm { "an echo" } else { "no echo" },
+                            if echoed { "an echo" } else { "none" },
+                        )
+                    })
+                })
+            })
+            .collect();
+        handles.into_iter().filter_map(|handle| handle.join().expect("interop run panicked")).collect()
+    });
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(failures.is_empty(), "client finalmask disagrees with Xray-core:\n{}", failures.join("\n"));
 }

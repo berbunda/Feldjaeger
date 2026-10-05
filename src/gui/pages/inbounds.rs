@@ -34,7 +34,8 @@ use crate::xray::{
     TlsSettingsDraft, XHTTP_DOWNLOAD_SECURITIES, XHTTP_MODES, XHTTP_MODE_DEFAULT, XHTTP_PADDING_METHODS,
     XHTTP_PATH_DEFAULT, XHTTP_PLACEMENTS, XHTTP_SESSION_ID_TABLES, XHTTP_UPLINK_METHODS,
     XhttpCoreSettings, XhttpDownloadDraft, XhttpRange, XhttpStreamSettings,
-    QuicTransport, alpn_selects_http3, fallbacks_transport_compatible, parse_inbound_protocol,
+    QuicTransport, alpn_selects_http3, fallbacks_transport_compatible, finalmask_tcp_layer_faces_probes,
+    parse_inbound_protocol,
     validate_port_map_target,
 };
 
@@ -643,9 +644,6 @@ fn show_add_pane(ui: &mut Ui, service: &mut ApplicationService) {
     ui.add_space(6.0);
 
     let busy = service.is_inbound_shell_mutation_busy();
-    let is_tunnel = service
-        .inbound_editor_session()
-        .is_some_and(|s| matches!(s.protocol, InboundProtocolDraft::Tunnel { .. }));
     let is_tun = service
         .inbound_editor_session()
         .is_some_and(|s| matches!(s.protocol, InboundProtocolDraft::Tun { .. }));
@@ -688,8 +686,9 @@ fn show_add_pane(ui: &mut Ui, service: &mut ApplicationService) {
         }
     }
 
-    // Stream (IB-L3) — not used for Tunnel or TUN (no streamSettings at all).
-    if !is_tunnel && !is_tun {
+    // Stream (IB-L3) — not used for TUN (no streamSettings at all); Tunnel gets only FinalMask
+    // (Roadmap §2.6 stage 4.2).
+    if !is_tun {
         ui.strong("Stream");
         show_stream_edit(ui, service);
         ui.add_space(6.0);
@@ -826,12 +825,10 @@ fn show_detail_pane(ui: &mut Ui, service: &mut ApplicationService, rows: &[Inbou
         ui.selectable_value(&mut tab, InboundDetailTab::General, "General");
         ui.selectable_value(&mut tab, InboundDetailTab::Protocol, "Protocol");
 
-        // Stream tab: shell-editable protocols except Tunnel (tcp/none fixed) and TUN (no
-        // streamSettings at all).
-        let stream_enabled = shell_ok && !is_tunnel && has_stream_settings;
-        let stream_disabled_hint = if is_tunnel {
-            "Stream is not used for Tunnel (tcp / none)"
-        } else if !has_stream_settings {
+        // Stream tab: shell-editable protocols with streamSettings — all but TUN. Tunnel's
+        // transport is locked (tcp / none); it gets FinalMask there (Roadmap §2.6 stage 4.2).
+        let stream_enabled = shell_ok && has_stream_settings;
+        let stream_disabled_hint = if !has_stream_settings {
             "Stream is not used for TUN (no streamSettings)"
         } else {
             "Stream editing requires a shell-editable inbound"
@@ -884,8 +881,8 @@ fn show_detail_pane(ui: &mut Ui, service: &mut ApplicationService, rows: &[Inbou
         } else if !users_ok && tab == InboundDetailTab::Users {
             tab = InboundDetailTab::General;
         }
-        if (is_tunnel || !has_stream_settings)
-            && matches!(tab, InboundDetailTab::Stream | InboundDetailTab::Security)
+        if (!has_stream_settings && tab == InboundDetailTab::Stream)
+            || ((is_tunnel || !has_stream_settings) && tab == InboundDetailTab::Security)
         {
             tab = InboundDetailTab::Protocol;
         }
@@ -2377,6 +2374,179 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
         InboundProtocolDraft::Tunnel { .. } => "tunnel",
         InboundProtocolDraft::Tun { .. } => "tun",
     };
+
+    // Tunnel's transport is locked (tcp / none) and Tunnel Shell Save writes only sockopt and the
+    // FinalMask chains (`apply_tunnel_stream`), so no transport fields are offered here.
+    if protocol == "tunnel" {
+        ui.label(
+            RichText::new(
+                "Tunnel transport: raw TCP / no security (locked). Only FinalMask is edited here; \
+                 sockopt.tproxy is on the Protocol tab.",
+            )
+            .size(13.0)
+            .color(Color32::from_rgb(140, 140, 140)),
+        );
+    } else if !show_stream_transport_edit(ui, session, protocol) {
+        return;
+    }
+
+    // mKCP legacy header/seed → `mkcp-legacy` layers (Roadmap §2.6 stage 5.2). Needs the
+    // service (core version, diff preview), so the session borrow ends here and is taken again.
+    if session.stream.method == Some(StreamMethod::Mkcp) && session.stream.kcp.has_legacy_obfuscation() {
+        show_kcp_legacy_migration(ui, service);
+    }
+    let Some(session) = service.inbound_editor_session_mut() else {
+        return;
+    };
+
+    // FinalMask applies wherever the protocol has `streamSettings` (Roadmap §2.6 stage 4.2):
+    // every listener Xray-core builds from them wraps its socket with the chains.
+    let has_stream_settings = InboundClientProtocol::from_wire(protocol)
+        .is_some_and(InboundClientProtocol::has_stream_settings);
+
+    // Hysteria is QUIC over UDP: its FinalMask editor offers only `udp[]` (Roadmap §2.6 stage
+    // 4.1). A foreign `finalmask` was already reported by the Hysteria branch above.
+    let udp_only = protocol != "tunnel" && session.stream.method == Some(StreamMethod::Hysteria);
+    if has_stream_settings && !(udp_only && session.stream.finalmask_foreign) {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+        // Reality + a tcp layer that faces probers composes in Xray-core but weakens REALITY's
+        // camouflage — a hint next to the chain, not a Save block (Roadmap §2.6 stage 5.1).
+        let reality_probe_notice = matches!(
+            session.security.as_ref().map(|s| s.mode),
+            Some(InboundSecurityMode::Reality)
+        ) && session
+            .stream
+            .finalmask_tcp
+            .iter()
+            .any(|layer| finalmask_tcp_layer_faces_probes(&layer.layer_type));
+        let edit = if session.stream.finalmask_foreign {
+            show_foreign_finalmask_notice(ui);
+            FinalMaskEdit::default()
+        } else {
+            show_finalmask_edit(
+                ui,
+                StreamDirection::Inbound,
+                &mut session.stream.finalmask_tcp,
+                &mut session.stream.finalmask_udp,
+                reality_probe_notice.then_some(
+                    "REALITY + header-custom / sudoku / xmc in tcp: a scanner probing the port meets \
+                     the mask instead of the REALITY target's real TLS site — camouflage is weakened \
+                     (fragment is fine). Save is allowed.",
+                ),
+                udp_only,
+            )
+        };
+        if edit.tcp {
+            session.stream.write_finalmask_tcp = true;
+            session.dirty = true;
+        }
+        if edit.udp {
+            session.stream.write_finalmask_udp = true;
+            session.dirty = true;
+        }
+    }
+
+    // A hy2 link carries only a plain salamander `obfs`; when this chain needs more, Share is
+    // disabled — say so next to the chain that causes it (Roadmap §2.6 stage 4.1). Asked after
+    // this frame's edits, so the session borrow ends here and is taken again below.
+    if udp_only && let Some(reason) = service.editor_hy2_share_blocked_reason() {
+        ui.add_space(4.0);
+        ui.label(
+            RichText::new(format!("Share links (hy2://) are disabled: {reason}"))
+                .color(Color32::from_rgb(220, 160, 60)),
+        );
+    }
+    let Some(session) = service.inbound_editor_session_mut() else {
+        return;
+    };
+
+    // Tunnel keeps its narrow tproxy editor on the Protocol tab (Roadmap §2.3:88).
+    if matches!(protocol, "vless" | "trojan" | "hysteria") {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.add_space(4.0);
+        egui::CollapsingHeader::new("Sockopt")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label(
+                    RichText::new(sockopt_scope_note(StreamDirection::Inbound))
+                        .size(12.0)
+                        .color(Color32::from_rgb(140, 140, 140)),
+                );
+                ui.add_space(4.0);
+                if show_sockopt_edit(ui, StreamDirection::Inbound, &mut session.stream.sockopt) {
+                    session.stream.write_sockopt = true;
+                    session.dirty = true;
+                }
+            });
+    }
+}
+
+/// Legacy mKCP `kcpSettings.header` / `seed` (Roadmap §2.6 stage 5.2): what is stored, what
+/// the core does with it, and the explicit migration into `finalmask.udp`. The migration only
+/// changes the draft and fills the JSON diff preview; Save writes it.
+fn show_kcp_legacy_migration(ui: &mut Ui, service: &mut ApplicationService) {
+    let Some(session) = service.inbound_editor_session() else {
+        return;
+    };
+    let header = session.stream.kcp.extras.get("header").map(ToString::to_string);
+    let has_seed = session.stream.kcp.extras.contains_key("seed");
+    let blocked = service.editor_kcp_legacy_migration_blocked_reason();
+
+    ui.add_space(6.0);
+    ui.group(|ui| {
+        ui.label(RichText::new("Legacy mKCP obfuscation").strong());
+        if let Some(header) = &header {
+            ui.label(RichText::new(format!("kcpSettings.header: {header}")).monospace().size(12.0));
+        }
+        if has_seed {
+            // A password: never echoed.
+            ui.label(RichText::new("kcpSettings.seed: (set, not shown)").monospace().size(12.0));
+        }
+        ui.label(
+            RichText::new(
+                "Xray-core v26.9.9+ ignores these keys, v26.1.31 – v26.9.8 refuses to load them. The \
+                 same packets now come from mkcp-legacy layers in finalmask.udp: the cipher (seed → \
+                 AES-128-GCM, no seed → the original obfuscation) and the header outside it. Clients \
+                 on Xray-core up to v26.1.23 keep working with header/seed; newer clients need the \
+                 same layers.",
+            )
+            .size(12.0)
+            .color(Color32::from_rgb(140, 140, 140)),
+        );
+        if let Some(reason) = &blocked {
+            ui.label(
+                RichText::new(format!("Migration unavailable: {reason}"))
+                    .color(Color32::from_rgb(220, 160, 60)),
+            );
+        }
+        let clicked = ui
+            .add_enabled(blocked.is_none(), egui::Button::new("Migrate header/seed to FinalMask"))
+            .on_hover_text(
+                "Removes kcpSettings.header/seed and adds the equivalent mkcp-legacy layers to \
+                 finalmask.udp, then shows the JSON diff. Nothing is written until Save.",
+            )
+            .clicked();
+        if clicked {
+            let message = match service.migrate_editor_kcp_legacy_obfuscation() {
+                Ok(message) => message,
+                Err(error) => format!("mKCP migration refused: {error}"),
+            };
+            service.show_status_message(message);
+        }
+    });
+}
+
+/// Transport part of the Stream tab: method selector and the chosen method's fields. Returns
+/// `false` for an exotic method on disk (read-only, preserved on save) — the rest of the tab is
+/// then skipped.
+fn show_stream_transport_edit(
+    ui: &mut Ui,
+    session: &mut InboundEditorSession,
+    protocol: &str,
+) -> bool {
     let vision_active = session.vision_active;
     let allowed = selectable_stream_methods(protocol, vision_active);
 
@@ -2388,7 +2558,7 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
             .size(14.0)
             .color(Color32::from_rgb(140, 140, 140)),
         );
-        return;
+        return false;
     }
 
     let draft_method = session.stream.method;
@@ -2802,75 +2972,7 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
             }
         }
     }
-
-    // Hysteria is QUIC over UDP: its FinalMask editor offers only `udp[]` (Roadmap §2.6 stage
-    // 4.1). A foreign `finalmask` was already reported by the Hysteria branch above.
-    let udp_only = session.stream.method == Some(StreamMethod::Hysteria);
-    if matches!(protocol, "vless" | "trojan" | "hysteria") && !(udp_only && session.stream.finalmask_foreign) {
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(4.0);
-        let reality_conflict = matches!(
-            session.security.as_ref().map(|s| s.mode),
-            Some(InboundSecurityMode::Reality)
-        ) && !session.stream.finalmask_tcp.is_empty();
-        let edit = if session.stream.finalmask_foreign {
-            show_foreign_finalmask_notice(ui);
-            FinalMaskEdit::default()
-        } else {
-            show_finalmask_edit(
-                ui,
-                StreamDirection::Inbound,
-                &mut session.stream.finalmask_tcp,
-                &mut session.stream.finalmask_udp,
-                reality_conflict
-                    .then_some("Reality is incompatible with FinalMask tcp layers; Save will be blocked (G4)."),
-                udp_only,
-            )
-        };
-        if edit.tcp {
-            session.stream.write_finalmask_tcp = true;
-            session.dirty = true;
-        }
-        if edit.udp {
-            session.stream.write_finalmask_udp = true;
-            session.dirty = true;
-        }
-    }
-
-    // A hy2 link carries only a plain salamander `obfs`; when this chain needs more, Share is
-    // disabled — say so next to the chain that causes it (Roadmap §2.6 stage 4.1). Asked after
-    // this frame's edits, so the session borrow ends here and is taken again below.
-    if udp_only && let Some(reason) = service.editor_hy2_share_blocked_reason() {
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new(format!("Share links (hy2://) are disabled: {reason}"))
-                .color(Color32::from_rgb(220, 160, 60)),
-        );
-    }
-    let Some(session) = service.inbound_editor_session_mut() else {
-        return;
-    };
-
-    if matches!(protocol, "vless" | "trojan" | "hysteria") {
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(4.0);
-        egui::CollapsingHeader::new("Sockopt")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.label(
-                    RichText::new(sockopt_scope_note(StreamDirection::Inbound))
-                        .size(12.0)
-                        .color(Color32::from_rgb(140, 140, 140)),
-                );
-                ui.add_space(4.0);
-                if show_sockopt_edit(ui, StreamDirection::Inbound, &mut session.stream.sockopt) {
-                    session.stream.write_sockopt = true;
-                    session.dirty = true;
-                }
-            });
-    }
+    true
 }
 
 // ─── Security tab (VLESS + Trojan; Reality keygen) ───────────────────────────
