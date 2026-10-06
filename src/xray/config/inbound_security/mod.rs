@@ -559,7 +559,7 @@ pub(crate) fn string_list(value: Option<&Value>) -> Vec<String> {
 /// Writes a `StringList` field: when `values` equal what the previous on-disk value reads as
 /// ([`string_list`]), that value is written back verbatim — its string / array shape and exact
 /// spelling survive a Save that did not touch the list; otherwise as [`insert_string_array`].
-fn insert_string_list(
+pub(crate) fn insert_string_list(
     object: &mut Map<String, Value>,
     key: &str,
     values: &[String],

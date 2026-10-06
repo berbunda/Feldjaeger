@@ -1,22 +1,31 @@
-//! CompatibilityGate for inbound Shell Save / Add / client mutate.
+//! CompatibilityGate for inbound Shell Save / Add / client mutate, and for outbound Shell Save /
+//! Add.
 //!
 //! Wave A Save order: **G9→G10→G6→G5→G1→G2→G8→G12→G3→G13** (G7 retired; G4 retired in Roadmap
-//! §2.6 stage 5.1 — now a warning; G11 predicate+tests only until Wave B).
+//! §2.6 stage 5.1 — now a warning; G11 predicate+tests only — the Shadowsocks editor
+//! it was meant for is retired, Roadmap §4.1).
+//!
+//! Outbound gates ([`first_failing_outbound_gate`]): **G14**. Unlike the inbound ones they depend
+//! on the installed Xray-core version — a rule the core introduced in a release only blocks Save
+//! from that release on (unknown version = current core).
 
 mod core_version;
 mod matrix;
+mod open_proxy;
+mod plaintext_outbound;
 mod warnings;
 
 pub use core_version::{CORE_FEATURES, CoreFeature, XrayCoreVersion};
 pub use warnings::{
-    CompatibilityWarning, CompatibilityWarningId, inbound_warnings, outbound_warnings,
-    with_warning_suffix,
+    CompatibilityWarning, CompatibilityWarningId, WarningSeverity, inbound_warnings,
+    outbound_warnings, with_warning_suffix,
 };
 pub use matrix::{
     allowed_security_modes, allowed_stream_methods, coerce_display_stream_method,
     coerce_security_mode_for_transport, g10_hysteria_requires_tls,
     g11_shadowsocks_tcp_only, g9_hysteria_protocol_transport_ok, inbound_finalmask_chain_use,
-    matrix_transport, selectable_stream_methods, transport_security_allowed,
+    matrix_transport, outbound_finalmask_chain_use, selectable_stream_methods,
+    transport_security_allowed,
     vision_active_from_inbound,
 };
 
@@ -24,7 +33,8 @@ use serde_json::Value;
 
 use super::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 
-/// Stable gate identifiers (design G1–G12; G13 added for Roadmap §2.5:105).
+/// Stable gate identifiers (design G1–G12; G13 added for Roadmap §2.5:105; G14 — the first
+/// outbound gate, Roadmap §4.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompatibilityGateId {
     /// Reality + method not in {raw,tcp,xhttp,grpc}.
@@ -48,12 +58,16 @@ pub enum CompatibilityGateId {
     G9,
     /// Hysteria protocol/transport ⇒ security tls (wired Wave A).
     G10,
-    /// Shadowsocks ⇒ editable transport raw/tcp only (gate kept; SS editor deferred to Tier 4).
+    /// Shadowsocks ⇒ editable transport raw/tcp only (gate kept; the SS editor is retired — Roadmap
+    /// §4.1, 2026-10-06).
     G11,
     /// TLS mode ⇒ every certificates[] entry has file paths or PEM (verify: key optional).
     G12,
     /// Vision flow ⇒ security tls or reality (Roadmap §2.5:105).
     G13,
+    /// Freedom ⇒ no `streamSettings.sockopt.addressPortStrategy` other than `none` (outbound,
+    /// Xray-core v26.9.8+, [`CoreFeature::FreedomAddressPortStrategyForbidden`]; Roadmap §4.2).
+    G14,
 }
 
 impl CompatibilityGateId {
@@ -75,6 +89,10 @@ impl CompatibilityGateId {
                 "TLS requires each certificate entry to have file paths or PEM (key optional for usage verify)"
             }
             Self::G13 => "xtls-rprx-vision requires security tls or reality (not none)",
+            Self::G14 => {
+                "Freedom does not support sockopt.addressPortStrategy (Xray-core v26.9.8+ refuses to \
+                 load it); remove it or set none"
+            }
         }
     }
 }
@@ -112,7 +130,7 @@ pub fn first_failing_gate(inbound: &Value) -> Option<CompatibilityGateId> {
         return Some(CompatibilityGateId::G10);
     }
 
-    // G11: Shadowsocks ⇒ transport raw/tcp only (product UI deferred to Tier 4).
+    // G11: Shadowsocks ⇒ transport raw/tcp only (SS editor retired, Roadmap §4.1).
     if !matrix::g11_shadowsocks_tcp_only(protocol_str, &method) {
         return Some(CompatibilityGateId::G11);
     }
@@ -154,6 +172,47 @@ pub fn first_failing_gate(inbound: &Value) -> Option<CompatibilityGateId> {
     }
 
     None
+}
+
+/// Runs all applicable outbound gates against one outbound JSON object. `core` is the installed
+/// Xray-core version from Discovery; `None` = unknown, treated as the current core.
+pub fn check_outbound_compatibility(outbound: &Value, core: Option<XrayCoreVersion>) -> ConfigModifyResult<()> {
+    if let Some(id) = first_failing_outbound_gate(outbound, core) {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            id.message().to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Returns the first failing outbound gate id, if any (see the module docs).
+pub fn first_failing_outbound_gate(outbound: &Value, core: Option<XrayCoreVersion>) -> Option<CompatibilityGateId> {
+    if CoreFeature::FreedomAddressPortStrategyForbidden.available_in(core)
+        && freedom_address_port_strategy_set(outbound)
+    {
+        return Some(CompatibilityGateId::G14);
+    }
+    None
+}
+
+/// G14 predicate: a Freedom outbound whose `streamSettings.sockopt.addressPortStrategy` the core
+/// builds to anything but `AddressPortStrategy_None`. `SocketConfig.Build()` lowercases without
+/// trimming: `""` / `"none"` (any case) are `None`, every other string is either a strategy
+/// Freedom refuses or an unsupported value — both fail the load. A non-string is a decode error
+/// outside this gate.
+fn freedom_address_port_strategy_set(outbound: &Value) -> bool {
+    let is_freedom = outbound
+        .get("protocol")
+        .and_then(Value::as_str)
+        .is_some_and(|protocol| protocol.trim().eq_ignore_ascii_case("freedom"));
+    is_freedom
+        && outbound
+            .get("streamSettings")
+            .and_then(|stream| stream.get("sockopt"))
+            .and_then(|sockopt| sockopt.get("addressPortStrategy"))
+            .and_then(Value::as_str)
+            .is_some_and(|strategy| !strategy.is_empty() && !strategy.eq_ignore_ascii_case("none"))
 }
 
 fn tls_certificates_ok(inbound: &Value) -> bool {
@@ -507,6 +566,37 @@ mod tests {
             }
         });
         assert_eq!(first_failing_gate(&inbound), None);
+    }
+
+    /// Values as `SocketConfig.Build()` reads them, checked with `xray run -test` (v26.9.30).
+    #[test]
+    fn g14_rejects_freedom_address_port_strategy_except_none() {
+        let freedom = |strategy: Value| {
+            json!({"protocol": "Freedom", "streamSettings": {"sockopt": {"addressPortStrategy": strategy}}})
+        };
+        for strategy in ["SrvPortOnly", "txtportandaddress", " none", "bogus"] {
+            assert_eq!(
+                first_failing_outbound_gate(&freedom(json!(strategy)), None),
+                Some(CompatibilityGateId::G14),
+                "{strategy:?}"
+            );
+        }
+        for strategy in [json!("none"), json!("NONE"), json!(""), Value::Null] {
+            assert_eq!(first_failing_outbound_gate(&freedom(strategy.clone()), None), None, "{strategy}");
+        }
+        assert_eq!(first_failing_outbound_gate(&json!({"protocol": "freedom"}), None), None);
+        // Other outbounds may use it.
+        let vless = json!({"protocol": "vless", "streamSettings": {"sockopt": {"addressPortStrategy": "SrvPortOnly"}}});
+        assert_eq!(first_failing_outbound_gate(&vless, None), None);
+    }
+
+    #[test]
+    fn g14_applies_from_v26_9_8() {
+        let outbound = json!({"protocol": "freedom", "streamSettings": {"sockopt": {"addressPortStrategy": "SrvPortOnly"}}});
+        assert!(check_outbound_compatibility(&outbound, Some(XrayCoreVersion::new(26, 7, 28))).is_ok());
+        let error = check_outbound_compatibility(&outbound, Some(XrayCoreVersion::new(26, 9, 8))).unwrap_err();
+        assert_eq!(error.kind(), ConfigModifyErrorKind::ValidationFailed);
+        assert_eq!(error.detail(), CompatibilityGateId::G14.message());
     }
 
     #[test]

@@ -11,7 +11,8 @@ use crate::storage::StoredConnectionProfile;
 use crate::xray::{
     AddOutboundShellRequest, ConfigModifyError, ConfigModifyErrorKind, DeleteOutboundRequest,
     DuplicateOutboundRequest, EditableXrayConfig, ModifyConfigOutcome, OutboundGeneral,
-    OutboundRef, OutboundSettingsDraft, RenameOutboundTagRequest, UpdateOutboundShellRequest,
+    OutboundRef, OutboundSettingsDraft, OutboundStreamDraft, RenameOutboundTagRequest,
+    UpdateOutboundShellRequest,
     add_outbound_shell, delete_outbound, duplicate_outbound, rename_outbound_tag,
     update_outbound_shell,
 };
@@ -29,8 +30,11 @@ pub struct OutboundEditorSession {
     pub outbound_ref: Option<OutboundRef>,
     /// General tab draft.
     pub general: OutboundGeneral,
-    /// Protocol tab draft (Freedom or Blackhole).
+    /// Protocol tab draft (Freedom, Blackhole, DNS, VLESS, Loopback).
     pub settings: OutboundSettingsDraft,
+    /// Stream / Security draft (Roadmap §4.2) — edited only for protocols with transports
+    /// ([`crate::xray::outbound_protocol_has_transport`]); written only when changed.
+    pub stream: OutboundStreamDraft,
     /// `true` when this is an Add Outbound flow (not editing existing).
     pub is_add: bool,
     /// Last redacted structural diff preview (Roadmap §3:126); cleared when drafts change.
@@ -46,7 +50,7 @@ pub enum OutboundMutationKind {
     Update,
     /// Delete outbound from remote config.
     Delete,
-    /// Duplicate a shell-editable outbound (Freedom/Blackhole/DNS).
+    /// Duplicate a shell-editable outbound (Freedom/Blackhole/DNS/VLESS/Loopback).
     Duplicate,
     /// Rename an outbound's tag (any protocol).
     Rename,

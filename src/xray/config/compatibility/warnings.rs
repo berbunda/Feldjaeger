@@ -3,7 +3,8 @@
 //!
 //! Gates ([`super::CompatibilityGateId`]) *block* Save. Warnings never do: they flag a config that
 //! Xray-core accepts but that does not do what it looks like it does — typically a key the current
-//! core silently ignores. Each warning carries the JSON location it refers to, so the GUI can show
+//! core silently ignores — or, at [`WarningSeverity::Danger`], a config that works but endangers
+//! the server ([`CompatibilityWarningId::OpenProxyInbound`]). Each warning carries the JSON location it refers to, so the GUI can show
 //! where in the original Xray configuration the problem lives (`docs/rules.md`: abstractions must
 //! not hide the relationship to the original configuration location).
 //!
@@ -23,7 +24,9 @@ use std::borrow::Cow;
 use serde_json::Value;
 
 use super::core_version::{CoreFeature, XrayCoreVersion};
-use super::{effective_security, inbound_finalmask_chain_use};
+use super::open_proxy::open_proxy_location;
+use super::plaintext_outbound::forbidden_plaintext_address;
+use super::{effective_security, inbound_finalmask_chain_use, outbound_finalmask_chain_use};
 use crate::xray::config::inbound_security::REALITY_IGNORED_ALPN_KEY;
 
 use crate::xray::config::stream::{
@@ -101,9 +104,57 @@ pub enum CompatibilityWarningId {
     /// still validates it, but the Freedom handler resolves only with
     /// `streamSettings.sockopt.domainStrategy` (XTLS/Xray-core#6058); the key is not documented.
     FreedomSettingsDomainStrategyIgnored,
+    /// `tlsSettings.allowInsecure: true` — a removed feature since Xray-core v26.1.31 (2c92339):
+    /// `TLSConfig.Build()` fails, so the config does not load. `pinnedPeerCertSha256` /
+    /// `verifyPeerCertByName` replace it (Roadmap §4.2).
+    TlsAllowInsecureRemoved,
+    /// A `Host` entry in `wsSettings.headers` — deprecated by `WebSocketConfig.Build()`: it is
+    /// moved into `host` when that is empty and dropped otherwise (Roadmap §4.2).
+    WsHostHeaderDeprecated,
+    /// A non-empty `finalmask.tcp[]` / `finalmask.udp[]` the outbound's dialer never applies —
+    /// e.g. `udp[]` on RAW, `tcp[]` on mKCP / Hysteria / XHTTP/3 (Roadmap §2.6 stage 7.1,
+    /// [`super::outbound_finalmask_chain_use`]).
+    OutboundFinalMaskChainUnused,
+    /// A VLESS / Trojan outbound without TLS / REALITY (VLESS: and without `encryption`) to a
+    /// public server address — refused at load since Xray-core v26.7.11
+    /// ([`CoreFeature::PlaintextOutboundForbidden`], `validateOutboundTransportSecurity`).
+    PlaintextOutboundForbidden,
+    /// Outbound `proxySettings` (any non-`null` value, any protocol) — refused at load since
+    /// Xray-core v26.9.8 ([`CoreFeature::OutboundProxySettingsRemoved`]); the editor migrates it
+    /// into `streamSettings.sockopt.dialerProxy`.
+    OutboundProxySettingsRemoved,
+    /// Freedom with `streamSettings.sockopt.addressPortStrategy` other than `none` on disk —
+    /// refused at load since Xray-core v26.9.8; Shell Save is blocked by gate
+    /// [`super::CompatibilityGateId::G14`] until the editor removes it.
+    FreedomAddressPortStrategyRejected,
+    /// A VLESS outbound in the legacy `vnext[]` form with other than one server holding one user —
+    /// `VLessOutboundConfig.Build()` refuses it, so the config does not load. Not version-gated:
+    /// Feldjäger targets current cores (Roadmap §4.2).
+    VlessVnextNotSingle,
+    /// A Socks / `mixed` / HTTP inbound without authentication on an outside-facing `listen` —
+    /// an open proxy ([`super::open_proxy`]); [`WarningSeverity::Danger`].
+    OpenProxyInbound,
+}
+
+/// How a warning is shown: [`Self::Danger`] gets the red road-sign style in the GUI and
+/// `!!!` markers in plain-text status lines ([`with_warning_suffix`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WarningSeverity {
+    /// The config does not do what it looks like it does (the default).
+    Caution,
+    /// The config endangers the server itself, e.g. an open proxy.
+    Danger,
 }
 
 impl CompatibilityWarningId {
+    /// Display severity (see [`WarningSeverity`]).
+    pub fn severity(self) -> WarningSeverity {
+        match self {
+            Self::OpenProxyInbound => WarningSeverity::Danger,
+            _ => WarningSeverity::Caution,
+        }
+    }
+
     /// Short user-facing explanation (no secrets).
     pub fn message(self) -> Cow<'static, str> {
         let text = match self {
@@ -188,6 +239,50 @@ impl CompatibilityWarningId {
                  `streamSettings.sockopt.domainStrategy` (XTLS/Xray-core#6058); use \
                  \"Migrate to sockopt\" in the editor"
             }
+            Self::TlsAllowInsecureRemoved => {
+                "rejected by Xray-core v26.1.31+: `allowInsecure` is a removed feature and the \
+                 config does not load; pin the server certificate with `pinnedPeerCertSha256` or \
+                 accept its names with `verifyPeerCertByName` — use \"Remove allowInsecure\" in \
+                 the editor"
+            }
+            Self::PlaintextOutboundForbidden => {
+                "rejected by Xray-core v26.7.11+: a VLESS / Trojan outbound to a public address \
+                 needs security tls or reality (VLESS: or encryption); only private IPs and \
+                 local names (localhost, *.lan, *.local, dotless names, …) may go unencrypted \
+                 (XTLS/Xray-core#6303)"
+            }
+            Self::OutboundProxySettingsRemoved => {
+                "rejected by Xray-core v26.9.8+: outbound `proxySettings` is a removed feature for \
+                 every protocol and the config does not load (XTLS/Xray-core#6058); chain through \
+                 another outbound with `streamSettings.sockopt.dialerProxy` — use \"Migrate to \
+                 sockopt.dialerProxy\" in the editor"
+            }
+            Self::VlessVnextNotSingle => {
+                "rejected by Xray-core: a VLESS outbound takes exactly one vnext[] server with \
+                 exactly one user, and the config does not load; split it into one outbound per \
+                 server/user and pick between them with a routing balancer"
+            }
+            Self::OutboundFinalMaskChainUnused => {
+                "no effect: this outbound's transport never dials through this chain, so its \
+                 layers are never applied — tcp[] wraps TCP dials (RAW, WebSocket, gRPC, \
+                 HTTPUpgrade, XHTTP over TCP), udp[] wraps UDP dials (mKCP, Hysteria, XHTTP/3)"
+            }
+            Self::OpenProxyInbound => {
+                "open proxy: no authentication and `listen` is reachable from outside (default \
+                 0.0.0.0, or a public address) — anyone can relay traffic through this server, \
+                 and hosting providers suspend servers for that. Bind `listen` to 127.0.0.1 / a \
+                 private address, or require a password (Socks: `auth: \"password\"` + \
+                 `accounts`; HTTP: `accounts`)"
+            }
+            Self::FreedomAddressPortStrategyRejected => {
+                "rejected by Xray-core v26.9.8+: Freedom does not support \
+                 `sockopt.addressPortStrategy` and the config does not load \
+                 (XTLS/Xray-core#6058); use \"Remove addressPortStrategy\" in the editor"
+            }
+            Self::WsHostHeaderDeprecated => {
+                "deprecated by Xray-core: a `Host` header is moved into `host` (and dropped when \
+                 `host` is set); use the host field"
+            }
         };
         Cow::Borrowed(text)
     }
@@ -210,11 +305,18 @@ impl CompatibilityWarning {
     }
 }
 
-/// All non-blocking warnings for one inbound JSON object, in a stable order (config order:
-/// `streamSettings.finalmask`, then `streamSettings.kcpSettings`). `core` is the installed
+/// All non-blocking warnings for one inbound JSON object, in a stable order (an open proxy first,
+/// then config order: `streamSettings.finalmask`, then `streamSettings.kcpSettings`). `core` is the installed
 /// Xray-core version from Discovery; `None` = unknown, treated as the current core.
 pub fn inbound_warnings(inbound: &Value, core: Option<XrayCoreVersion>) -> Vec<CompatibilityWarning> {
     let mut warnings = Vec::new();
+    // Before the stream checks: a Socks / HTTP inbound usually has no `streamSettings`.
+    if let Some(location) = open_proxy_location(inbound) {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::OpenProxyInbound,
+            location,
+        });
+    }
     let Some(stream) = inbound.get("streamSettings") else {
         return warnings;
     };
@@ -318,9 +420,33 @@ pub fn inbound_warnings(inbound: &Value, core: Option<XrayCoreVersion>) -> Vec<C
     warnings
 }
 
-/// All non-blocking warnings for one outbound JSON object, in config order.
-pub fn outbound_warnings(outbound: &Value) -> Vec<CompatibilityWarning> {
+/// All non-blocking warnings for one outbound JSON object, in config order. `core` is the
+/// installed Xray-core version from Discovery; `None` = unknown, treated as the current core.
+pub fn outbound_warnings(outbound: &Value, core: Option<XrayCoreVersion>) -> Vec<CompatibilityWarning> {
     let mut warnings = Vec::new();
+    // `null` decodes to a nil pointer in the core; every other value fails the load.
+    if CoreFeature::OutboundProxySettingsRemoved.available_in(core)
+        && outbound.get("proxySettings").is_some_and(|value| !value.is_null())
+    {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::OutboundProxySettingsRemoved,
+            location: "proxySettings".to_owned(),
+        });
+    }
+    if CoreFeature::PlaintextOutboundForbidden.available_in(core)
+        && let Some(location) = forbidden_plaintext_address(outbound)
+    {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::PlaintextOutboundForbidden,
+            location,
+        });
+    }
+    if let Some(location) = vless_vnext_not_single(outbound) {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::VlessVnextNotSingle,
+            location,
+        });
+    }
     let is_freedom = outbound
         .get("protocol")
         .and_then(Value::as_str)
@@ -335,12 +461,110 @@ pub fn outbound_warnings(outbound: &Value) -> Vec<CompatibilityWarning> {
             }
         }
     }
+    // Same predicate and version boundary as gate G14, which blocks writing it.
+    if CoreFeature::FreedomAddressPortStrategyForbidden.available_in(core)
+        && super::freedom_address_port_strategy_set(outbound)
+    {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::FreedomAddressPortStrategyRejected,
+            location: "streamSettings.sockopt.addressPortStrategy".to_owned(),
+        });
+    }
+    if let Some(stream) = outbound.get("streamSettings") {
+        if let Some(finalmask) = stream.get("finalmask") {
+            outbound_finalmask_warnings(outbound, stream, finalmask, core, &mut warnings);
+        }
+        outbound_stream_warnings(stream, &mut warnings);
+    }
     warnings
 }
 
-/// FinalMask warnings for one side of a connection. Only inbounds call it today; the outbound
-/// side (the `udphop.sockopt` warning) is used once outbounds get a FinalMask editor (Roadmap
-/// §2.6 stage 7).
+/// Location of the `vnext[]` / `users[]` array a VLESS outbound has other than one entry in, when
+/// the core reads it — a non-null flat `settings.address` makes the core ignore `vnext`.
+fn vless_vnext_not_single(outbound: &Value) -> Option<String> {
+    let is_vless = outbound
+        .get("protocol")
+        .and_then(Value::as_str)
+        .is_some_and(|protocol| protocol.trim().eq_ignore_ascii_case("vless"));
+    let settings = outbound.get("settings").filter(|_| is_vless)?;
+    if settings.get("address").is_some_and(|address| !address.is_null()) {
+        return None;
+    }
+    let servers = settings.get("vnext")?.as_array()?;
+    if servers.len() != 1 {
+        return Some("settings.vnext".to_owned());
+    }
+    let users = servers[0].get("users").and_then(Value::as_array);
+    (users.map_or(0, Vec::len) != 1).then(|| "settings.vnext[0].users".to_owned())
+}
+
+/// `streamSettings.finalmask` of an outbound (Roadmap §2.6 stage 7.1): chains the dialer never
+/// applies, the shared layer / version checks for the client side, and `quicParams` off QUIC.
+fn outbound_finalmask_warnings(
+    outbound: &Value,
+    stream: &Value,
+    finalmask: &Value,
+    core: Option<XrayCoreVersion>,
+    warnings: &mut Vec<CompatibilityWarning>,
+) {
+    if let Some(used) = outbound_finalmask_chain_use(outbound) {
+        for chain in [FinalMaskChain::Tcp, FinalMaskChain::Udp] {
+            let has_layers = finalmask
+                .get(chain.key())
+                .and_then(Value::as_array)
+                .is_some_and(|layers| !layers.is_empty());
+            if has_layers && !used.uses(chain) {
+                warnings.push(CompatibilityWarning {
+                    id: CompatibilityWarningId::OutboundFinalMaskChainUnused,
+                    location: format!("streamSettings.finalmask.{}", chain.key()),
+                });
+            }
+        }
+    }
+    finalmask_warnings(finalmask, StreamDirection::Outbound, core, warnings);
+    let has_quic_params = finalmask.get("quicParams").is_some_and(|value| !value.is_null());
+    if has_quic_params && quic_transport_of(stream).is_none() {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::QuicParamsUnusedTransport,
+            location: "streamSettings.finalmask.quicParams".to_owned(),
+        });
+    }
+}
+
+/// Client-side `streamSettings` warnings (Roadmap §4.2), in config order.
+fn outbound_stream_warnings(stream: &Value, warnings: &mut Vec<CompatibilityWarning>) {
+    // The core builds `wsSettings` whenever it is present, whatever the transport.
+    if let Some(headers) = stream
+        .get("wsSettings")
+        .and_then(|ws| ws.get("headers"))
+        .and_then(Value::as_object)
+    {
+        for key in headers.keys().filter(|key| key.eq_ignore_ascii_case("host")) {
+            warnings.push(CompatibilityWarning {
+                id: CompatibilityWarningId::WsHostHeaderDeprecated,
+                location: format!("streamSettings.wsSettings.headers.{key}"),
+            });
+        }
+    }
+    let tls = stream
+        .get("security")
+        .and_then(Value::as_str)
+        .is_some_and(|security| security.trim().eq_ignore_ascii_case("tls"));
+    let allow_insecure = stream
+        .get("tlsSettings")
+        .and_then(|tls| tls.get("allowInsecure"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if tls && allow_insecure {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::TlsAllowInsecureRemoved,
+            location: "streamSettings.tlsSettings.allowInsecure".to_owned(),
+        });
+    }
+}
+
+/// FinalMask warnings for one side of a connection: [`inbound_warnings`] and, for the client
+/// side, [`outbound_warnings`] (Roadmap §2.6 stage 7.1).
 fn finalmask_warnings(
     finalmask: &Value,
     direction: StreamDirection,
@@ -517,12 +741,17 @@ fn push_if_core_too_old(
 }
 
 /// Appends `" Warnings: a; b"` to a status message when there are warnings; unchanged otherwise.
+/// A [`WarningSeverity::Danger`] warning is wrapped in `!!! … !!!` (the status bar is plain text).
 pub fn with_warning_suffix(message: impl Into<String>, warnings: &[CompatibilityWarning]) -> String {
     let mut message = message.into();
     if !warnings.is_empty() {
         let joined = warnings
             .iter()
-            .map(CompatibilityWarning::text)
+            .map(|warning| match warning.id.severity() {
+                // Plain text has no road sign; three exclamation marks stand in for it.
+                WarningSeverity::Danger => format!("!!! {} !!!", warning.text()),
+                WarningSeverity::Caution => warning.text(),
+            })
             .collect::<Vec<_>>()
             .join("; ");
         message.push_str(" Warnings: ");
@@ -535,6 +764,40 @@ pub fn with_warning_suffix(message: impl Into<String>, warnings: &[Compatibility
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn open_proxy_inbound_is_a_danger_warning_without_stream_settings() {
+        let inbound = json!({"protocol": "socks", "port": 1080, "settings": {"udp": true}});
+        let warnings = inbound_warnings(&inbound, None);
+        assert_eq!(
+            warnings,
+            vec![CompatibilityWarning {
+                id: CompatibilityWarningId::OpenProxyInbound,
+                location: "settings.auth".to_owned(),
+            }]
+        );
+        assert_eq!(warnings[0].id.severity(), WarningSeverity::Danger);
+        let local = json!({"protocol": "socks", "listen": "127.0.0.1", "port": 1080});
+        assert!(inbound_warnings(&local, None).is_empty());
+    }
+
+    #[test]
+    fn status_suffix_marks_danger_warnings_with_exclamation_marks() {
+        let danger = CompatibilityWarning {
+            id: CompatibilityWarningId::OpenProxyInbound,
+            location: "settings.auth".to_owned(),
+        };
+        let caution = CompatibilityWarning {
+            id: CompatibilityWarningId::RealityAlpnIgnored,
+            location: "streamSettings.realitySettings.alpn".to_owned(),
+        };
+        assert_eq!(caution.id.severity(), WarningSeverity::Caution);
+        let message = with_warning_suffix("Saved.", &[danger.clone(), caution.clone()]);
+        assert_eq!(
+            message,
+            format!("Saved. Warnings: !!! {} !!!; {}", danger.text(), caution.text())
+        );
+    }
 
     #[test]
     fn clean_inbound_has_no_warnings() {
@@ -674,7 +937,7 @@ mod tests {
         assert!(unused(vmess).is_empty());
     }
 
-    /// FinalMask warnings of an *outbound* `finalmask` (Roadmap §2.6 stage 7 wires the caller).
+    /// FinalMask warnings of an *outbound* `finalmask` (the layer part of [`outbound_warnings`]).
     fn outbound_finalmask_warnings(finalmask: &Value, core: Option<XrayCoreVersion>) -> Vec<CompatibilityWarning> {
         let mut warnings = Vec::new();
         finalmask_warnings(finalmask, StreamDirection::Outbound, core, &mut warnings);
@@ -823,7 +1086,7 @@ mod tests {
         let outbound = json!({"protocol": "Freedom", "settings": {
             "domainStrategy": "UseIP", "targetStrategy": "UseIPv4", "redirect": ":443"
         }});
-        let locations: Vec<_> = outbound_warnings(&outbound)
+        let locations: Vec<_> = outbound_warnings(&outbound, None)
             .into_iter()
             .inspect(|w| assert_eq!(w.id, CompatibilityWarningId::FreedomSettingsDomainStrategyIgnored))
             .map(|w| w.location)
@@ -832,9 +1095,130 @@ mod tests {
 
         let migrated = json!({"protocol": "freedom", "settings": {},
                               "streamSettings": {"sockopt": {"domainStrategy": "UseIP"}}});
-        assert!(outbound_warnings(&migrated).is_empty());
+        assert!(outbound_warnings(&migrated, None).is_empty());
         let other = json!({"protocol": "vless", "settings": {"domainStrategy": "UseIP"}});
-        assert!(outbound_warnings(&other).is_empty());
+        assert!(outbound_warnings(&other, None).is_empty());
+    }
+
+    /// Roadmap §4.2: client `streamSettings` the core refuses or rewrites.
+    #[test]
+    fn flags_allow_insecure_and_ws_host_header_on_outbounds() {
+        let outbound = json!({"protocol": "vless", "streamSettings": {
+            "network": "ws", "wsSettings": {"headers": {"HOST": "a", "User-Agent": "b"}},
+            "security": "tls", "tlsSettings": {"allowInsecure": true}
+        }});
+        let found: Vec<_> = outbound_warnings(&outbound, None).into_iter().map(|w| (w.id, w.location)).collect();
+        assert_eq!(
+            found,
+            vec![
+                (CompatibilityWarningId::WsHostHeaderDeprecated, "streamSettings.wsSettings.headers.HOST".to_owned()),
+                (CompatibilityWarningId::TlsAllowInsecureRemoved, "streamSettings.tlsSettings.allowInsecure".to_owned()),
+            ]
+        );
+        // TLS settings are built only for `security: tls`; `false` is harmless.
+        let reality = json!({"streamSettings": {"security": "reality", "tlsSettings": {"allowInsecure": true}}});
+        assert!(outbound_warnings(&reality, None).is_empty());
+        let off = json!({"streamSettings": {"security": "tls", "tlsSettings": {"allowInsecure": false}}});
+        assert!(outbound_warnings(&off, None).is_empty());
+    }
+
+    /// Roadmap §4.2: `VLessOutboundConfig.Build()` takes one `vnext[]` server with one user.
+    #[test]
+    fn flags_vless_vnext_other_than_one_server_and_user() {
+        let found = |settings: Value| -> Vec<_> {
+            let outbound = json!({"protocol": "vless", "settings": settings, "streamSettings": {"security": "tls"}});
+            outbound_warnings(&outbound, None).into_iter().map(|w| (w.id, w.location)).collect()
+        };
+        let user = json!({"id": "u"});
+        let server = json!({"address": "a", "port": 1, "users": [user]});
+        let id = CompatibilityWarningId::VlessVnextNotSingle;
+        assert_eq!(found(json!({"vnext": []})), vec![(id, "settings.vnext".to_owned())]);
+        assert_eq!(found(json!({"vnext": [server, server]})), vec![(id, "settings.vnext".to_owned())]);
+        assert_eq!(
+            found(json!({"vnext": [{"address": "a", "users": [user, user]}]})),
+            vec![(id, "settings.vnext[0].users".to_owned())]
+        );
+        assert!(found(json!({"vnext": [server]})).is_empty());
+        // A flat `address` wins; the core never reads `vnext` then.
+        assert!(found(json!({"address": "a", "vnext": []})).is_empty());
+        let vmess = json!({"protocol": "vmess", "settings": {"vnext": []}});
+        assert!(outbound_warnings(&vmess, None).is_empty());
+    }
+
+    /// Roadmap §4.2: `proxySettings` fails the load on any outbound from v26.9.8 (#6058).
+    #[test]
+    fn flags_removed_proxy_settings_on_every_protocol_from_v26_9_8() {
+        let found = |outbound: &Value, core| -> Vec<_> {
+            outbound_warnings(outbound, core).into_iter().map(|w| (w.id, w.location)).collect()
+        };
+        let expected = vec![(CompatibilityWarningId::OutboundProxySettingsRemoved, "proxySettings".to_owned())];
+        for protocol in ["freedom", "vless", "vmess", "blackhole"] {
+            let outbound = json!({"protocol": protocol, "proxySettings": {"tag": "chain"}});
+            assert_eq!(found(&outbound, None), expected, "{protocol}");
+        }
+        // Any non-null shape is refused, `null` is a nil pointer.
+        assert_eq!(found(&json!({"protocol": "freedom", "proxySettings": {}}), None), expected);
+        assert!(found(&json!({"protocol": "freedom", "proxySettings": null}), None).is_empty());
+
+        // Older cores still build it.
+        let outbound = json!({"protocol": "freedom", "proxySettings": {"tag": "chain"}});
+        assert!(found(&outbound, Some(XrayCoreVersion::new(26, 7, 28))).is_empty());
+        assert_eq!(found(&outbound, Some(XrayCoreVersion::new(26, 9, 8))), expected);
+    }
+
+    /// Roadmap §4.2: the on-disk side of gate G14, after the Freedom `settings` keys (config order).
+    #[test]
+    fn flags_freedom_address_port_strategy_from_v26_9_8() {
+        let outbound = json!({"protocol": "freedom", "settings": {"domainStrategy": "UseIP"},
+            "streamSettings": {"sockopt": {"addressPortStrategy": "SrvPortOnly"}}});
+        let found: Vec<_> = outbound_warnings(&outbound, None).into_iter().map(|w| (w.id, w.location)).collect();
+        assert_eq!(
+            found,
+            vec![
+                (CompatibilityWarningId::FreedomSettingsDomainStrategyIgnored, "settings.domainStrategy".to_owned()),
+                (
+                    CompatibilityWarningId::FreedomAddressPortStrategyRejected,
+                    "streamSettings.sockopt.addressPortStrategy".to_owned()
+                ),
+            ]
+        );
+        let old_core = Some(XrayCoreVersion::new(26, 7, 28));
+        assert!(
+            outbound_warnings(&outbound, old_core)
+                .iter()
+                .all(|w| w.id != CompatibilityWarningId::FreedomAddressPortStrategyRejected)
+        );
+        let none = json!({"protocol": "freedom", "streamSettings": {"sockopt": {"addressPortStrategy": "None"}}});
+        assert!(outbound_warnings(&none, None).is_empty());
+    }
+
+    /// Roadmap §2.6 stage 7.1: the dialer's chain, the client-side layer checks, quicParams off QUIC.
+    #[test]
+    fn flags_outbound_finalmask_by_dial_chain() {
+        let ids = |outbound: Value| -> Vec<_> {
+            outbound_warnings(&outbound, None).into_iter().map(|w| (w.id, w.location)).collect()
+        };
+        let both = json!({"tcp": [{"type": "fragment", "settings": {}}],
+                          "udp": [{"type": "udphop", "settings": {"mode": "intervalRemote", "sockopt": {}}}],
+                          "quicParams": {"congestion": "bbr"}});
+        let raw = json!({"protocol": "vless", "streamSettings": {"network": "raw", "finalmask": both}});
+        assert_eq!(
+            ids(raw),
+            vec![
+                (CompatibilityWarningId::OutboundFinalMaskChainUnused, "streamSettings.finalmask.udp".to_owned()),
+                (CompatibilityWarningId::UdpHopSockoptIgnored, "streamSettings.finalmask.udp[0].settings.sockopt".to_owned()),
+                (CompatibilityWarningId::QuicParamsUnusedTransport, "streamSettings.finalmask.quicParams".to_owned()),
+            ]
+        );
+        // udphop is a client mask: no "client only" warning on an outbound.
+        let hysteria = json!({"protocol": "hysteria", "streamSettings": {"network": "hysteria",
+            "finalmask": {"udp": [{"type": "udphop", "settings": {"mode": "intervalRemote"}}],
+                          "quicParams": {"congestion": "bbr"}}}});
+        assert!(ids(hysteria).is_empty());
+        // Freedom may dial UDP directly: no claim about its chains.
+        let freedom = json!({"protocol": "freedom", "streamSettings": {"finalmask": {
+            "tcp": [{"type": "fragment", "settings": {}}], "udp": [{"type": "noise", "settings": {}}]}}});
+        assert!(ids(freedom).is_empty());
     }
 
     fn finalmask_inbound() -> Value {

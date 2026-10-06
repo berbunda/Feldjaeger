@@ -2,8 +2,10 @@
 //!
 //! The editor offers exactly the fields of the official documentation
 //! (<https://xtls.github.io/en/config/outbounds/freedom.html>): `redirect`, `userLevel`,
-//! `fragment`, `noises[]`, `proxyProtocol`, `finalRules[]` — plus the documented way to choose the
-//! resolve strategy, `streamSettings.sockopt.domainStrategy`.
+//! `fragment`, `noises[]`, `proxyProtocol`, `finalRules[]`. The documented way to choose the
+//! resolve strategy, `streamSettings.sockopt.domainStrategy`, is edited by the shared socket
+//! options editor of the Outbound Shell (Roadmap §4.2, [`crate::xray::config::outbound_stream`]),
+//! which replaced the narrow field of this tab.
 //!
 //! `settings.domainStrategy` (and its alias `settings.targetStrategy`) is not documented any more.
 //! Verified against `XTLS/Xray-core@main`: `FreedomConfig.Build()` (`infra/conf/freedom.go`) still
@@ -11,12 +13,13 @@
 //! XTLS/Xray-core#6058) resolves domains only with `sockopt.domainStrategy`. The legacy keys are
 //! therefore never written, kept untouched on Save (unknown-key preservation), flagged by
 //! [`crate::xray::config::compatibility::outbound_warnings`], and moved into `sockopt` only by an
-//! explicit migration ([`FreedomSettingsDraft::migrate_legacy_domain_strategy`]).
+//! explicit migration ([`FreedomSettingsDraft::migrate_legacy_domain_strategy`]) that fills the
+//! socket options draft.
 
 use serde_json::{Map, Value};
 
 use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
-use crate::xray::config::stream::{PortListValue, RangeValue, parse_sockopt};
+use crate::xray::config::stream::{PortListValue, RangeValue, SockoptDraft};
 
 use super::{FragmentDraft, NoiseDraft, apply_optional_string, ensure_settings_object};
 
@@ -85,8 +88,6 @@ impl FreedomFinalRuleDraft {
 /// Freedom Protocol-tab draft.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FreedomSettingsDraft {
-    /// `streamSettings.sockopt.domainStrategy`; empty = key absent (Xray default `AsIs`).
-    pub sockopt_domain_strategy: String,
     /// Read-only: the legacy strategy found in `settings` (`targetStrategy` before
     /// `domainStrategy`, as the core reads them); `None` when neither is a non-empty string.
     pub legacy_domain_strategy: Option<String>,
@@ -130,9 +131,9 @@ pub enum LegacyDomainStrategyMigration {
 }
 
 impl FreedomSettingsDraft {
-    /// Moves the legacy `settings` strategy into `sockopt.domainStrategy` (draft only; Save
-    /// writes it). An existing `sockopt` value takes precedence.
-    pub fn migrate_legacy_domain_strategy(&mut self) -> LegacyDomainStrategyMigration {
+    /// Moves the legacy `settings` strategy into `sockopt.domainStrategy` of the socket options
+    /// draft (drafts only; Save writes both). An existing `sockopt` value takes precedence.
+    pub fn migrate_legacy_domain_strategy(&mut self, sockopt: &mut SockoptDraft) -> LegacyDomainStrategyMigration {
         let Some(legacy) = self.legacy_domain_strategy.clone() else {
             return LegacyDomainStrategyMigration::NothingToMigrate;
         };
@@ -140,9 +141,9 @@ impl FreedomSettingsDraft {
             return LegacyDomainStrategyMigration::NothingToMigrate;
         }
         self.remove_legacy_domain_strategy = true;
-        let current = self.sockopt_domain_strategy.trim();
+        let current = sockopt.domain_strategy.trim();
         if current.is_empty() {
-            self.sockopt_domain_strategy = legacy.clone();
+            sockopt.domain_strategy = legacy.clone();
             LegacyDomainStrategyMigration::Moved { value: legacy }
         } else {
             LegacyDomainStrategyMigration::SockoptWins {
@@ -151,6 +152,7 @@ impl FreedomSettingsDraft {
             }
         }
     }
+
 }
 
 /// Reads the Freedom draft from an outbound object.
@@ -178,9 +180,6 @@ pub(super) fn parse_freedom_settings(outbound: &Value) -> FreedomSettingsDraft {
     });
 
     FreedomSettingsDraft {
-        sockopt_domain_strategy: sockopt_object(outbound)
-            .map(|sockopt| parse_sockopt(sockopt).domain_strategy)
-            .unwrap_or_default(),
         legacy_domain_strategy,
         remove_legacy_domain_strategy: false,
         redirect: super::string_field(field("redirect")),
@@ -191,13 +190,6 @@ pub(super) fn parse_freedom_settings(outbound: &Value) -> FreedomSettingsDraft {
         final_rules,
         final_rules_foreign,
     }
-}
-
-fn sockopt_object(outbound: &Value) -> Option<&Map<String, Value>> {
-    outbound
-        .get("streamSettings")
-        .and_then(|stream| stream.get("sockopt"))
-        .and_then(Value::as_object)
 }
 
 /// `None` when `finalRules` (or one of its rules) has a shape the typed editor cannot write back
@@ -299,9 +291,9 @@ fn final_rule_to_value(rule: &FreedomFinalRuleDraft) -> Value {
     Value::Object(object)
 }
 
-/// Writes the Freedom draft into `outbound`: the documented `settings` keys plus
-/// `streamSettings.sockopt.domainStrategy`. Every other key — in `settings`, `streamSettings`,
-/// `sockopt` and the outbound itself — is left as it was.
+/// Writes the Freedom draft into `outbound`: the documented `settings` keys (and the removal of the
+/// legacy strategy keys after the migration). Every other key — in `settings` and the outbound
+/// itself — is left as it was; `streamSettings` belongs to the stream draft.
 pub(super) fn apply_freedom_settings(
     outbound: &mut Value,
     draft: &FreedomSettingsDraft,
@@ -343,8 +335,7 @@ pub(super) fn apply_freedom_settings(
             settings.remove(*key);
         }
     }
-
-    apply_sockopt_domain_strategy(outbound, &draft.sockopt_domain_strategy)
+    Ok(())
 }
 
 /// Writes a `u64` whose default `0` means "key absent". A present value of another JSON shape is
@@ -355,63 +346,6 @@ fn apply_untouched_zero_u64(settings: &mut Map<String, Value>, key: &str, value:
     } else if settings.get(key).is_some_and(|current| current.as_u64().is_some()) {
         settings.remove(key);
     }
-}
-
-/// Sets / removes only `streamSettings.sockopt.domainStrategy`. Containers are created when a
-/// value is set and dropped again only if this removal left them empty; a non-string value on
-/// disk (which the widget cannot show) is not removed by an empty draft.
-fn apply_sockopt_domain_strategy(outbound: &mut Value, value: &str) -> ConfigModifyResult<()> {
-    let value = value.trim();
-    let root = outbound.as_object_mut().ok_or_else(|| {
-        ConfigModifyError::new(
-            ConfigModifyErrorKind::ValidationFailed,
-            "outbound must be a JSON object".to_owned(),
-        )
-    })?;
-
-    if value.is_empty() {
-        let Some(stream) = root.get_mut("streamSettings").and_then(Value::as_object_mut) else {
-            return Ok(());
-        };
-        let Some(sockopt) = stream.get_mut("sockopt").and_then(Value::as_object_mut) else {
-            return Ok(());
-        };
-        if !sockopt.get("domainStrategy").is_some_and(Value::is_string) {
-            return Ok(());
-        }
-        sockopt.remove("domainStrategy");
-        if sockopt.is_empty() {
-            stream.remove("sockopt");
-            if stream.is_empty() {
-                root.remove("streamSettings");
-            }
-        }
-        return Ok(());
-    }
-
-    let stream = object_entry(root, "streamSettings", "streamSettings")?;
-    let sockopt = object_entry(stream, "sockopt", "streamSettings.sockopt")?;
-    sockopt.insert("domainStrategy".to_owned(), Value::String(value.to_owned()));
-    Ok(())
-}
-
-fn object_entry<'a>(
-    parent: &'a mut Map<String, Value>,
-    key: &str,
-    path: &str,
-) -> ConfigModifyResult<&'a mut Map<String, Value>> {
-    if parent.get(key).is_none_or(Value::is_null) {
-        parent.insert(key.to_owned(), Value::Object(Map::new()));
-    }
-    parent
-        .get_mut(key)
-        .and_then(Value::as_object_mut)
-        .ok_or_else(|| {
-            ConfigModifyError::new(
-                ConfigModifyErrorKind::ValidationFailed,
-                format!("{path} is not a JSON object; fix or remove it on the Raw JSON tab"),
-            )
-        })
 }
 
 fn validation_error(message: String) -> ConfigModifyError {
@@ -500,70 +434,11 @@ mod tests {
     }
 
     #[test]
-    fn sockopt_domain_strategy_round_trips_and_keeps_other_sockopt_keys() {
-        let mut outbound = json!({
-            "protocol": "freedom",
-            "settings": {},
-            "streamSettings": {"sockopt": {"domainStrategy": "UseIPv4", "mark": 255, "V6Only": false},
-                               "futureStream": 1}
-        });
-        let mut draft = parse(&outbound);
-        assert_eq!(draft.sockopt_domain_strategy, "UseIPv4");
-        draft.sockopt_domain_strategy = "ForceIPv6".to_owned();
-        apply_freedom_settings(&mut outbound, &draft).expect("apply");
-        assert_eq!(
-            outbound["streamSettings"],
-            json!({"sockopt": {"domainStrategy": "ForceIPv6", "mark": 255, "V6Only": false},
-                   "futureStream": 1})
-        );
-    }
-
-    #[test]
-    fn empty_sockopt_strategy_removes_only_what_it_emptied() {
-        let mut created = json!({"protocol": "freedom", "settings": {},
-                                 "streamSettings": {"sockopt": {"domainStrategy": "UseIP"}}});
-        let mut draft = parse(&created);
-        draft.sockopt_domain_strategy.clear();
-        apply_freedom_settings(&mut created, &draft).expect("apply");
-        assert!(created.get("streamSettings").is_none());
-
-        let mut shared = json!({"protocol": "freedom", "settings": {},
-                                "streamSettings": {"sockopt": {"domainStrategy": "UseIP", "mark": 1}}});
-        let mut draft = parse(&shared);
-        draft.sockopt_domain_strategy.clear();
-        apply_freedom_settings(&mut shared, &draft).expect("apply");
-        assert_eq!(shared["streamSettings"], json!({"sockopt": {"mark": 1}}));
-
-        // An empty pre-existing sockopt is not ours to remove; a non-string value is kept.
-        let mut untouched = json!({"protocol": "freedom", "settings": {},
-                                   "streamSettings": {"sockopt": {}, "network": "raw"}});
-        let draft = parse(&untouched);
-        apply_freedom_settings(&mut untouched, &draft).expect("apply");
-        assert_eq!(untouched["streamSettings"], json!({"sockopt": {}, "network": "raw"}));
-        let mut foreign = json!({"protocol": "freedom", "settings": {},
-                                 "streamSettings": {"sockopt": {"domainStrategy": 5}}});
-        let draft = parse(&foreign);
-        apply_freedom_settings(&mut foreign, &draft).expect("apply");
-        assert_eq!(foreign["streamSettings"]["sockopt"]["domainStrategy"], 5);
-    }
-
-    #[test]
-    fn non_object_stream_settings_rejects_setting_a_strategy() {
-        let mut outbound = json!({"protocol": "freedom", "streamSettings": "bad"});
-        let mut draft = parse(&outbound);
-        draft.sockopt_domain_strategy = "UseIP".to_owned();
-        let error = apply_freedom_settings(&mut outbound, &draft).unwrap_err();
-        assert_eq!(error.kind(), ConfigModifyErrorKind::ValidationFailed);
-        assert!(error.to_string().contains("streamSettings"));
-    }
-
-    #[test]
     fn legacy_strategy_is_read_but_never_written_or_dropped_without_migration() {
         let mut outbound = json!({"protocol": "freedom",
                                   "settings": {"domainStrategy": "UseIP", "redirect": ":443"}});
         let draft = parse(&outbound);
         assert_eq!(draft.legacy_domain_strategy.as_deref(), Some("UseIP"));
-        assert!(draft.sockopt_domain_strategy.is_empty());
         apply_freedom_settings(&mut outbound, &draft).expect("apply");
         assert_eq!(outbound["settings"]["domainStrategy"], "UseIP");
         assert!(outbound.get("streamSettings").is_none());
@@ -574,40 +449,42 @@ mod tests {
     }
 
     #[test]
-    fn migration_moves_legacy_strategy_into_sockopt() {
+    fn migration_moves_legacy_strategy_into_the_sockopt_draft() {
         let mut outbound = json!({"protocol": "freedom",
-                                  "settings": {"domainStrategy": "UseIPv6v4", "futureField": 1},
-                                  "streamSettings": {"sockopt": {"mark": 7}}});
+                                  "settings": {"domainStrategy": "UseIPv6v4", "futureField": 1}});
         let mut draft = parse(&outbound);
+        let mut sockopt = SockoptDraft { mark: Some(7), ..SockoptDraft::default() };
         assert_eq!(
-            draft.migrate_legacy_domain_strategy(),
+            draft.migrate_legacy_domain_strategy(&mut sockopt),
             LegacyDomainStrategyMigration::Moved { value: "UseIPv6v4".to_owned() }
         );
-        assert_eq!(draft.migrate_legacy_domain_strategy(), LegacyDomainStrategyMigration::NothingToMigrate);
+        assert_eq!(sockopt.domain_strategy, "UseIPv6v4");
+        assert_eq!(sockopt.mark, Some(7));
+        assert_eq!(
+            draft.migrate_legacy_domain_strategy(&mut sockopt),
+            LegacyDomainStrategyMigration::NothingToMigrate
+        );
         apply_freedom_settings(&mut outbound, &draft).expect("apply");
         assert_eq!(outbound["settings"], json!({"futureField": 1}));
-        assert_eq!(
-            outbound["streamSettings"]["sockopt"],
-            json!({"mark": 7, "domainStrategy": "UseIPv6v4"})
-        );
+        assert!(outbound.get("streamSettings").is_none(), "sockopt is the stream draft's job");
     }
 
     #[test]
     fn migration_conflict_keeps_sockopt_and_drops_both_legacy_keys() {
         let mut outbound = json!({"protocol": "freedom",
-                                  "settings": {"domainStrategy": "UseIP", "targetStrategy": "UseIPv4"},
-                                  "streamSettings": {"sockopt": {"domainStrategy": "ForceIP"}}});
+                                  "settings": {"domainStrategy": "UseIP", "targetStrategy": "UseIPv4"}});
         let mut draft = parse(&outbound);
+        let mut sockopt = SockoptDraft { domain_strategy: "ForceIP".to_owned(), ..SockoptDraft::default() };
         assert_eq!(
-            draft.migrate_legacy_domain_strategy(),
+            draft.migrate_legacy_domain_strategy(&mut sockopt),
             LegacyDomainStrategyMigration::SockoptWins {
                 legacy: "UseIPv4".to_owned(),
                 sockopt: "ForceIP".to_owned(),
             }
         );
+        assert_eq!(sockopt.domain_strategy, "ForceIP");
         apply_freedom_settings(&mut outbound, &draft).expect("apply");
         assert_eq!(outbound["settings"], json!({}));
-        assert_eq!(outbound["streamSettings"]["sockopt"]["domainStrategy"], "ForceIP");
     }
 
     #[test]
@@ -715,4 +592,5 @@ mod tests {
             assert!(!is_valid_ip_rule(invalid), "{invalid}");
         }
     }
+
 }

@@ -6,7 +6,7 @@
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use super::compatibility::check_inbound_compatibility;
+use super::compatibility::{XrayCoreVersion, check_inbound_compatibility, check_outbound_compatibility};
 use super::stream::validate_stream_quic_params;
 use super::editable::EditableXrayConfig;
 use super::inbound_clients::{
@@ -57,6 +57,7 @@ use super::routing_settings::{
 };
 use super::outbound_edit::{OutboundGeneral, OutboundRef, apply_outbound_general};
 use super::outbound_protocol::{OutboundSettingsDraft, apply_outbound_settings, is_shell_editable_protocol};
+use super::outbound_stream::{OutboundStreamDraft, apply_outbound_stream};
 use super::reverse_proxy::{ReverseTagDraft, validate_reverse};
 use super::serialize::validate_serialized_json;
 use crate::xray::secret::SecretString;
@@ -337,6 +338,11 @@ pub struct AddOutboundShellRequest {
     pub general: OutboundGeneral,
     /// Protocol-tab draft.
     pub settings: OutboundSettingsDraft,
+    /// Stream / Security draft (Roadmap §4.2); written only when changed.
+    pub stream: OutboundStreamDraft,
+    /// Installed Xray-core version from Discovery for the version-dependent outbound gates
+    /// ([`check_outbound_compatibility`]); `None` = unknown, treated as the current core.
+    pub core_version: Option<XrayCoreVersion>,
     /// Preferred primary config path.
     pub preferred_source_file: Option<String>,
 }
@@ -353,6 +359,10 @@ pub struct UpdateOutboundShellRequest {
     pub general: OutboundGeneral,
     /// Protocol-tab draft.
     pub settings: OutboundSettingsDraft,
+    /// Stream / Security draft (Roadmap §4.2); written only when changed.
+    pub stream: OutboundStreamDraft,
+    /// Installed Xray-core version, as in [`AddOutboundShellRequest::core_version`].
+    pub core_version: Option<XrayCoreVersion>,
 }
 
 /// Request to update inbound General fields (tag / listen / port).
@@ -1736,7 +1746,7 @@ pub fn duplicate_outbound(
     if !protocol.as_deref().is_some_and(is_shell_editable_protocol) {
         return Err(ConfigModifyError::new(
             ConfigModifyErrorKind::ValidationFailed,
-            "Duplicate is available for Freedom, Blackhole, and DNS outbounds only".to_owned(),
+            "Duplicate is available for Freedom, Blackhole, DNS, Loopback, and VLESS outbounds only".to_owned(),
         ));
     }
 
@@ -1967,6 +1977,8 @@ pub fn add_outbound_shell(
     let mut outbound = json!({ "protocol": protocol, "settings": {} });
     apply_outbound_general(&mut outbound, &request.general)?;
     apply_outbound_settings(&mut outbound, &request.settings)?;
+    apply_outbound_stream(&mut outbound, &request.stream)?;
+    check_outbound_compatibility(&outbound, request.core_version)?;
     add_outbound(
         config,
         AddOutboundRequest {
@@ -2013,6 +2025,10 @@ pub fn update_outbound_shell(
     let mut outbound = config.sections().outbounds()[index].value().clone();
     apply_outbound_general(&mut outbound, &request.general)?;
     apply_outbound_settings(&mut outbound, &request.settings)?;
+    apply_outbound_stream(&mut outbound, &request.stream)?;
+    // On the composed outbound: a value kept from disk blocks Save as well (the core would refuse
+    // the whole config), until the editor's explicit removal.
+    check_outbound_compatibility(&outbound, request.core_version)?;
 
     replace_outbound(
         config,
@@ -2495,7 +2511,8 @@ fn validate_outbound_object(outbound: &Value) -> ConfigModifyResult<()> {
     if !protocol.eq_ignore_ascii_case("wireguard") && !is_shell_editable_protocol(protocol) {
         return Err(ConfigModifyError::new(
             ConfigModifyErrorKind::ValidationFailed,
-            "only wireguard, freedom, blackhole, or dns outbounds may be written by this path".to_owned(),
+            "only wireguard, freedom, blackhole, dns, vless, or loopback outbounds may be written by this path"
+                .to_owned(),
         ));
     }
     let tag = object

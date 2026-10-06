@@ -23,7 +23,8 @@ use crate::gui::pages::stream_sockopt::{
     tproxy_combo_field,
 };
 use crate::gui::pages::{
-    lines_to_vec, optional_string_combo, persistent_multiline_list_row, resizable_multiline,
+    danger_sign, danger_warning, lines_to_vec, optional_string_combo, persistent_multiline_list_row,
+    resizable_multiline,
 };
 use crate::xray::{
     ALPN_PRESETS, CERT_USAGE_PRESETS, CURVE_PRESETS, CompatibilityWarning, FINGERPRINT_PRESETS, FallbackDest,
@@ -34,7 +35,7 @@ use crate::xray::{
     TlsSettingsDraft, XHTTP_DOWNLOAD_SECURITIES, XHTTP_MODES, XHTTP_MODE_DEFAULT, XHTTP_PADDING_METHODS,
     XHTTP_PATH_DEFAULT, XHTTP_PLACEMENTS, XHTTP_SESSION_ID_TABLES, XHTTP_UPLINK_METHODS,
     XhttpCoreSettings, XhttpDownloadDraft, XhttpRange, XhttpStreamSettings,
-    QuicTransport, alpn_selects_http3, fallbacks_transport_compatible, finalmask_tcp_layer_faces_probes,
+    QuicTransport, WarningSeverity, alpn_selects_http3, fallbacks_transport_compatible, finalmask_tcp_layer_faces_probes,
     parse_inbound_protocol,
     validate_port_map_target,
 };
@@ -548,7 +549,20 @@ fn show_table(ui: &mut Ui, service: &mut ApplicationService, rows: &[InboundSumm
                 } else {
                     display.tag.clone()
                 };
-                if cell_with_menu(ui, service, row, &tag_text) {
+                // Danger warnings (an open proxy) are flagged in the list, not only on selection.
+                let danger = service
+                    .inbound_warnings_at(row.index)
+                    .into_iter()
+                    .find(|warning| warning.id.severity() == WarningSeverity::Danger);
+                let tag_clicked = ui
+                    .horizontal(|ui| {
+                        if let Some(warning) = danger {
+                            danger_sign(ui, 14.0).on_hover_text(warning.text());
+                        }
+                        cell_with_menu(ui, service, row, &tag_text)
+                    })
+                    .inner;
+                if tag_clicked {
                     service.set_selected_users_inbound(row.index);
                 }
                 cell_with_menu(ui, service, row, &display.protocol);
@@ -806,6 +820,15 @@ fn show_detail_pane(ui: &mut Ui, service: &mut ApplicationService, rows: &[Inbou
     if take_focus_general(ui) {
         set_detail_tab(ui, InboundDetailTab::General);
     }
+
+    // Danger warnings sit above the tabs: visible on every tab and for every protocol (Socks /
+    // HTTP inbounds have no Stream tab, where the other warnings live).
+    let danger: Vec<_> = service
+        .inbound_warnings_at(row.index)
+        .into_iter()
+        .filter(|warning| warning.id.severity() == WarningSeverity::Danger)
+        .collect();
+    show_compatibility_warnings(ui, &danger);
 
     let mut tab = detail_tab(ui);
     let shell_ok = service.inbound_shell_edit_enabled(row.index);
@@ -2148,11 +2171,13 @@ fn show_stream_tab(ui: &mut Ui, service: &mut ApplicationService, row: &InboundS
     ui.add_space(8.0);
 
     // Non-blocking warnings: for the draft while editing, for the saved inbound otherwise.
-    let warnings = if editing {
+    // Danger ones are already shown above the tabs.
+    let mut warnings = if editing {
         service.inbound_editor_warnings()
     } else {
         service.inbound_warnings_at(row.index)
     };
+    warnings.retain(|warning| warning.id.severity() != WarningSeverity::Danger);
     show_compatibility_warnings(ui, &warnings);
 
     if editing {
@@ -2163,16 +2188,21 @@ fn show_stream_tab(ui: &mut Ui, service: &mut ApplicationService, row: &InboundS
 }
 
 /// Non-blocking compatibility warnings (Roadmap §2.6 stage 0.3) — shown in yellow with their
-/// JSON location; unlike gates they never block Save.
+/// JSON location, danger ones in red behind road sign 1.33; unlike gates they never block Save.
 fn show_compatibility_warnings(ui: &mut Ui, warnings: &[CompatibilityWarning]) {
     if warnings.is_empty() {
         return;
     }
     for warning in warnings {
-        ui.label(
-            RichText::new(format!("Warning: {}", warning.text()))
-                .color(Color32::from_rgb(220, 160, 60)),
-        );
+        match warning.id.severity() {
+            WarningSeverity::Danger => danger_warning(ui, &warning.text()),
+            WarningSeverity::Caution => {
+                ui.label(
+                    RichText::new(format!("Warning: {}", warning.text()))
+                        .color(Color32::from_rgb(220, 160, 60)),
+                );
+            }
+        }
     }
     ui.add_space(6.0);
 }
@@ -2476,7 +2506,7 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
                         .color(Color32::from_rgb(140, 140, 140)),
                 );
                 ui.add_space(4.0);
-                if show_sockopt_edit(ui, StreamDirection::Inbound, &mut session.stream.sockopt) {
+                if show_sockopt_edit(ui, StreamDirection::Inbound, &mut session.stream.sockopt, &[]) {
                     session.stream.write_sockopt = true;
                     session.dirty = true;
                 }
@@ -2627,122 +2657,7 @@ fn show_stream_transport_edit(
             });
         }
         StreamMethod::Xhttp => {
-            let mut dirty = false;
-            egui::ScrollArea::vertical()
-                .id_salt("stream_xhttp_scroll")
-                .show(ui, |ui| {
-                    ui.heading("Basic");
-                    egui::Grid::new("stream_xhttp_basic_grid")
-                        .num_columns(2)
-                        .spacing([16.0, 6.0])
-                        .show(ui, |ui| {
-                            dirty |= xhttp_edit_core_basic(ui, &mut session.stream.xhttp.core, "main");
-                        });
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        super::help_button(ui, "Headers", HELP_XHTTP_HEADERS_SECTION);
-                        ui.heading("Headers");
-                    });
-                    dirty |= xhttp_edit_headers(ui, &mut session.stream.xhttp.core.headers, "main");
-                    ui.add_space(8.0);
-                    if xhttp_spoiler_header(
-                        ui,
-                        "padding",
-                        "Padding / SSE / gRPC",
-                        HELP_XHTTP_PADDING_SECTION,
-                        false,
-                    ) {
-                        egui::Grid::new("stream_xhttp_padding_grid")
-                            .num_columns(2)
-                            .spacing([16.0, 6.0])
-                            .show(ui, |ui| {
-                                dirty |= xhttp_edit_core_padding(ui, &mut session.stream.xhttp.core, "main");
-                            });
-                    }
-                    ui.add_space(8.0);
-                    if xhttp_spoiler_header(
-                        ui,
-                        "sc",
-                        "Packet / stream knobs",
-                        HELP_XHTTP_SC_SECTION,
-                        false,
-                    ) {
-                        egui::Grid::new("stream_xhttp_sc_grid")
-                            .num_columns(2)
-                            .spacing([16.0, 6.0])
-                            .show(ui, |ui| {
-                                dirty |= xhttp_edit_core_sc(ui, &mut session.stream.xhttp.core, "main");
-                            });
-                    }
-                    ui.add_space(8.0);
-                    if xhttp_spoiler_header(
-                        ui,
-                        "placement",
-                        "Placement / obfuscation",
-                        HELP_XHTTP_PLACEMENT_SECTION,
-                        false,
-                    ) {
-                        egui::Grid::new("stream_xhttp_place_grid")
-                            .num_columns(2)
-                            .spacing([16.0, 6.0])
-                            .show(ui, |ui| {
-                                dirty |= xhttp_edit_core_placement(ui, &mut session.stream.xhttp.core, "main");
-                            });
-                    }
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        super::help_button(ui, "xmux", HELP_XHTTP_XMUX_SECTION);
-                        ui.heading("XMUX");
-                    });
-                    let mut xmux_enabled = session.stream.xhttp.core.xmux.is_some();
-                    if ui.checkbox(&mut xmux_enabled, "Enable XMUX").changed() {
-                        dirty = true;
-                        session.stream.xhttp.core.xmux =
-                            xmux_enabled.then(crate::xray::XmuxDraft::default);
-                    }
-                    if let Some(xmux) = session.stream.xhttp.core.xmux.as_mut() {
-                        egui::Grid::new("stream_xhttp_xmux_grid")
-                            .num_columns(2)
-                            .spacing([16.0, 6.0])
-                            .show(ui, |ui| {
-                                dirty |= xhttp_edit_xmux(ui, xmux, "main");
-                            });
-                    }
-                    ui.add_space(8.0);
-                    ui.horizontal(|ui| {
-                        super::help_button(ui, "downloadSettings", HELP_XHTTP_DOWNLOAD_SECTION);
-                        ui.heading("downloadSettings");
-                    });
-                    let mut enabled = session.stream.xhttp.download.is_some();
-                    if ui.checkbox(&mut enabled, "Enable downloadSettings").changed() {
-                        dirty = true;
-                        if enabled {
-                            let mut dl = XhttpDownloadDraft::default();
-                            dl.xhttp.path = session.stream.xhttp.core.path.clone();
-                            session.stream.xhttp.download = Some(dl);
-                        } else {
-                            session.stream.xhttp.download = None;
-                        }
-                    }
-                    if let Some(download) = session.stream.xhttp.download.as_mut() {
-                        egui::Grid::new("stream_xhttp_download_grid")
-                            .num_columns(2)
-                            .spacing([16.0, 6.0])
-                            .show(ui, |ui| {
-                                dirty |= xhttp_edit_download(ui, download);
-                            });
-                        ui.add_space(4.0);
-                        ui.label(RichText::new("Nested xhttp (download leg)").strong());
-                        egui::Grid::new("stream_xhttp_download_xhttp_grid")
-                            .num_columns(2)
-                            .spacing([16.0, 6.0])
-                            .show(ui, |ui| {
-                                dirty |= xhttp_edit_core_basic(ui, &mut download.xhttp, "dl");
-                                dirty |= xhttp_edit_core_padding(ui, &mut download.xhttp, "dl");
-                                dirty |= xhttp_edit_core_sc(ui, &mut download.xhttp, "dl");
-                            });
-                    }
-                });
+            let dirty = show_xhttp_settings_edit(ui, &mut session.stream.xhttp, "stream");
             if dirty {
                 session.dirty = true;
             }
@@ -2850,99 +2765,9 @@ fn show_stream_transport_edit(
                 .color(Color32::from_rgb(140, 140, 140)),
             );
             ui.add_space(4.0);
-            let mut mtu = session.stream.kcp.mtu.to_string();
-            let mut tti = session.stream.kcp.tti.to_string();
-            let mut uplink = session.stream.kcp.uplink_capacity.to_string();
-            let mut downlink = session.stream.kcp.downlink_capacity.to_string();
-            let mut cwnd = session
-                .stream
-                .kcp
-                .cwnd_multiplier
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-            let mut window = session
-                .stream
-                .kcp
-                .max_sending_window
-                .map(|v| v.to_string())
-                .unwrap_or_default();
-            egui::Grid::new("stream_mkcp_edit_grid")
-                .num_columns(2)
-                .spacing([16.0, 6.0])
-                .show(ui, |ui| {
-                    super::field_label(ui, "mtu", HELP_MKCP_MTU);
-                    if ui.text_edit_singleline(&mut mtu).changed() {
-                        if let Ok(v) = mtu.trim().parse::<u64>() {
-                            session.stream.kcp.mtu = v;
-                            session.dirty = true;
-                        }
-                    }
-                    ui.end_row();
-                    super::field_label(ui, "tti (ms)", HELP_MKCP_TTI);
-                    if ui.text_edit_singleline(&mut tti).changed() {
-                        if let Ok(v) = tti.trim().parse::<u64>() {
-                            session.stream.kcp.tti = v;
-                            session.dirty = true;
-                        }
-                    }
-                    ui.end_row();
-                    super::field_label(ui, "uplinkCapacity (MB/s)", HELP_MKCP_UPLINK);
-                    if ui.text_edit_singleline(&mut uplink).changed() {
-                        if let Ok(v) = uplink.trim().parse::<u64>() {
-                            session.stream.kcp.uplink_capacity = v;
-                            session.dirty = true;
-                        }
-                    }
-                    ui.end_row();
-                    super::field_label(ui, "downlinkCapacity (MB/s)", HELP_MKCP_DOWNLINK);
-                    if ui.text_edit_singleline(&mut downlink).changed() {
-                        if let Ok(v) = downlink.trim().parse::<u64>() {
-                            session.stream.kcp.downlink_capacity = v;
-                            session.dirty = true;
-                        }
-                    }
-                    ui.end_row();
-                    super::field_label(ui, "cwndMultiplier", HELP_MKCP_CWND_MULTIPLIER);
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut cwnd)
-                                .hint_text(format!("default {KCP_DEFAULT_CWND_MULTIPLIER}")),
-                        )
-                        .changed()
-                    {
-                        let trimmed = cwnd.trim();
-                        if trimmed.is_empty() {
-                            session.stream.kcp.cwnd_multiplier = None;
-                            session.dirty = true;
-                        } else if let Ok(v) = trimmed.parse::<u64>() {
-                            session.stream.kcp.cwnd_multiplier = Some(v);
-                            session.dirty = true;
-                        }
-                    }
-                    ui.end_row();
-                    super::field_label(
-                        ui,
-                        "maxSendingWindow (bytes)",
-                        HELP_MKCP_MAX_SENDING_WINDOW,
-                    );
-                    if ui
-                        .add(
-                            egui::TextEdit::singleline(&mut window)
-                                .hint_text(format!("default {KCP_DEFAULT_MAX_SENDING_WINDOW}")),
-                        )
-                        .changed()
-                    {
-                        let trimmed = window.trim();
-                        if trimmed.is_empty() {
-                            session.stream.kcp.max_sending_window = None;
-                            session.dirty = true;
-                        } else if let Ok(v) = trimmed.parse::<u64>() {
-                            session.stream.kcp.max_sending_window = Some(v);
-                            session.dirty = true;
-                        }
-                    }
-                    ui.end_row();
-                });
+            if show_kcp_settings_edit(ui, &mut session.stream.kcp, "stream") {
+                session.dirty = true;
+            }
             // Keys the core ignores stay on disk until removed explicitly (Roadmap §2.6 0.6);
             // the Stream-tab warnings above name each one. Legacy header/seed are kept for the
             // FinalMask migration (stage 5.2).
@@ -4091,7 +3916,7 @@ fn show_reality_limit_fallback_edit(
 }
 
 /// Multi-select from presets; selected values shown as removable tags.
-fn string_tag_multi_select(
+pub(super) fn string_tag_multi_select(
     ui: &mut Ui,
     id: &str,
     selected: &mut Vec<String>,
@@ -4410,8 +4235,15 @@ fn show_sniffing_edit_session(ui: &mut Ui, service: &mut ApplicationService) {
     let Some(session) = service.inbound_editor_session_mut() else {
         return;
     };
-    let settings = &mut session.sniffing;
+    if show_sniffing_fields(ui, &mut session.sniffing) {
+        session.dirty = true;
+    }
+}
 
+/// Editor for a `SniffingConfig` — the inbound `sniffing` and the Loopback outbound's
+/// `settings.sniffing` (Roadmap §4.2) share it. Returns true when a field changed.
+pub(crate) fn show_sniffing_fields(ui: &mut Ui, settings: &mut SniffingSettings) -> bool {
+    let mut dirty = false;
     let mut enabled = settings.enabled.unwrap_or(false);
     let mut metadata_only = settings.metadata_only.unwrap_or(false);
     let mut route_only = settings.route_only.unwrap_or(false);
@@ -4420,7 +4252,7 @@ fn show_sniffing_edit_session(ui: &mut Ui, service: &mut ApplicationService) {
         super::help_button(ui, "enabled", HELP_SNIFFING_ENABLED);
         if ui.checkbox(&mut enabled, "enabled").changed() {
             settings.enabled = Some(enabled);
-            session.dirty = true;
+            dirty = true;
         }
     });
 
@@ -4436,7 +4268,7 @@ fn show_sniffing_edit_session(ui: &mut Ui, service: &mut ApplicationService) {
                 } else {
                     settings.dest_override.retain(|t| t != *token);
                 }
-                session.dirty = true;
+                dirty = true;
             }
         }
     });
@@ -4455,16 +4287,17 @@ fn show_sniffing_edit_session(ui: &mut Ui, service: &mut ApplicationService) {
         super::help_button(ui, "metadataOnly", HELP_SNIFFING_METADATA_ONLY);
         if ui.checkbox(&mut metadata_only, "metadataOnly").changed() {
             settings.metadata_only = Some(metadata_only);
-            session.dirty = true;
+            dirty = true;
         }
     });
     ui.horizontal(|ui| {
         super::help_button(ui, "routeOnly", HELP_SNIFFING_ROUTE_ONLY);
         if ui.checkbox(&mut route_only, "routeOnly").changed() {
             settings.route_only = Some(route_only);
-            session.dirty = true;
+            dirty = true;
         }
     });
+    dirty
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -5200,7 +5033,227 @@ fn show_delete_inbound_dialog(ui: &mut Ui, service: &mut ApplicationService) {
     }
 }
 
+/// mKCP `kcpSettings` grid (the same `KCPConfig` fields on both sides) — shared by the inbound
+/// and outbound (Roadmap §4.2) Stream editors. Returns whether anything changed.
+pub(super) fn show_kcp_settings_edit(ui: &mut Ui, kcp: &mut KcpStreamSettings, id_prefix: &str) -> bool {
+    let mut dirty = false;
+    let mut mtu = kcp.mtu.to_string();
+    let mut tti = kcp.tti.to_string();
+    let mut uplink = kcp.uplink_capacity.to_string();
+    let mut downlink = kcp.downlink_capacity.to_string();
+    let mut cwnd = kcp
+        .cwnd_multiplier
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    let mut window = kcp
+        .max_sending_window
+        .map(|v| v.to_string())
+        .unwrap_or_default();
+    egui::Grid::new(format!("{id_prefix}_mkcp_edit_grid"))
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            super::field_label(ui, "mtu", HELP_MKCP_MTU);
+            if ui.text_edit_singleline(&mut mtu).changed() {
+                if let Ok(v) = mtu.trim().parse::<u64>() {
+                    kcp.mtu = v;
+                    dirty = true;
+                }
+            }
+            ui.end_row();
+            super::field_label(ui, "tti (ms)", HELP_MKCP_TTI);
+            if ui.text_edit_singleline(&mut tti).changed() {
+                if let Ok(v) = tti.trim().parse::<u64>() {
+                    kcp.tti = v;
+                    dirty = true;
+                }
+            }
+            ui.end_row();
+            super::field_label(ui, "uplinkCapacity (MB/s)", HELP_MKCP_UPLINK);
+            if ui.text_edit_singleline(&mut uplink).changed() {
+                if let Ok(v) = uplink.trim().parse::<u64>() {
+                    kcp.uplink_capacity = v;
+                    dirty = true;
+                }
+            }
+            ui.end_row();
+            super::field_label(ui, "downlinkCapacity (MB/s)", HELP_MKCP_DOWNLINK);
+            if ui.text_edit_singleline(&mut downlink).changed() {
+                if let Ok(v) = downlink.trim().parse::<u64>() {
+                    kcp.downlink_capacity = v;
+                    dirty = true;
+                }
+            }
+            ui.end_row();
+            super::field_label(ui, "cwndMultiplier", HELP_MKCP_CWND_MULTIPLIER);
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut cwnd)
+                        .hint_text(format!("default {KCP_DEFAULT_CWND_MULTIPLIER}")),
+                )
+                .changed()
+            {
+                let trimmed = cwnd.trim();
+                if trimmed.is_empty() {
+                    kcp.cwnd_multiplier = None;
+                    dirty = true;
+                } else if let Ok(v) = trimmed.parse::<u64>() {
+                    kcp.cwnd_multiplier = Some(v);
+                    dirty = true;
+                }
+            }
+            ui.end_row();
+            super::field_label(
+                ui,
+                "maxSendingWindow (bytes)",
+                HELP_MKCP_MAX_SENDING_WINDOW,
+            );
+            if ui
+                .add(
+                    egui::TextEdit::singleline(&mut window)
+                        .hint_text(format!("default {KCP_DEFAULT_MAX_SENDING_WINDOW}")),
+                )
+                .changed()
+            {
+                let trimmed = window.trim();
+                if trimmed.is_empty() {
+                    kcp.max_sending_window = None;
+                    dirty = true;
+                } else if let Ok(v) = trimmed.parse::<u64>() {
+                    kcp.max_sending_window = Some(v);
+                    dirty = true;
+                }
+            }
+            ui.end_row();
+        });
+    dirty
+}
+
 // ─── XHTTP Stream helpers (Wave C3) ──────────────────────────────────────────
+
+/// XHTTP fields (Basic, Headers, Padding, Packet knobs, Placement, XMUX, downloadSettings) —
+/// one model for both sides, shared by the inbound and outbound (Roadmap §4.2) Stream editors.
+/// `id_prefix` keeps the widget ids of the two editors apart. Returns whether anything changed.
+pub(super) fn show_xhttp_settings_edit(ui: &mut Ui, xhttp: &mut XhttpStreamSettings, id_prefix: &str) -> bool {
+    let mut dirty = false;
+    egui::ScrollArea::vertical()
+        .id_salt(format!("{id_prefix}_xhttp_scroll"))
+        .show(ui, |ui| {
+            ui.heading("Basic");
+            egui::Grid::new(format!("{id_prefix}_xhttp_basic_grid"))
+                .num_columns(2)
+                .spacing([16.0, 6.0])
+                .show(ui, |ui| {
+                    dirty |= xhttp_edit_core_basic(ui, &mut xhttp.core, "main");
+                });
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                super::help_button(ui, "Headers", HELP_XHTTP_HEADERS_SECTION);
+                ui.heading("Headers");
+            });
+            dirty |= xhttp_edit_headers(ui, &mut xhttp.core.headers, "main");
+            ui.add_space(8.0);
+            if xhttp_spoiler_header(
+                ui,
+                "padding",
+                "Padding / SSE / gRPC",
+                HELP_XHTTP_PADDING_SECTION,
+                false,
+            ) {
+                egui::Grid::new(format!("{id_prefix}_xhttp_padding_grid"))
+                    .num_columns(2)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        dirty |= xhttp_edit_core_padding(ui, &mut xhttp.core, "main");
+                    });
+            }
+            ui.add_space(8.0);
+            if xhttp_spoiler_header(
+                ui,
+                "sc",
+                "Packet / stream knobs",
+                HELP_XHTTP_SC_SECTION,
+                false,
+            ) {
+                egui::Grid::new(format!("{id_prefix}_xhttp_sc_grid"))
+                    .num_columns(2)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        dirty |= xhttp_edit_core_sc(ui, &mut xhttp.core, "main");
+                    });
+            }
+            ui.add_space(8.0);
+            if xhttp_spoiler_header(
+                ui,
+                "placement",
+                "Placement / obfuscation",
+                HELP_XHTTP_PLACEMENT_SECTION,
+                false,
+            ) {
+                egui::Grid::new(format!("{id_prefix}_xhttp_place_grid"))
+                    .num_columns(2)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        dirty |= xhttp_edit_core_placement(ui, &mut xhttp.core, "main");
+                    });
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                super::help_button(ui, "xmux", HELP_XHTTP_XMUX_SECTION);
+                ui.heading("XMUX");
+            });
+            let mut xmux_enabled = xhttp.core.xmux.is_some();
+            if ui.checkbox(&mut xmux_enabled, "Enable XMUX").changed() {
+                dirty = true;
+                xhttp.core.xmux =
+                    xmux_enabled.then(crate::xray::XmuxDraft::default);
+            }
+            if let Some(xmux) = xhttp.core.xmux.as_mut() {
+                egui::Grid::new(format!("{id_prefix}_xhttp_xmux_grid"))
+                    .num_columns(2)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        dirty |= xhttp_edit_xmux(ui, xmux, "main");
+                    });
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                super::help_button(ui, "downloadSettings", HELP_XHTTP_DOWNLOAD_SECTION);
+                ui.heading("downloadSettings");
+            });
+            let mut enabled = xhttp.download.is_some();
+            if ui.checkbox(&mut enabled, "Enable downloadSettings").changed() {
+                dirty = true;
+                if enabled {
+                    let mut dl = XhttpDownloadDraft::default();
+                    dl.xhttp.path = xhttp.core.path.clone();
+                    xhttp.download = Some(dl);
+                } else {
+                    xhttp.download = None;
+                }
+            }
+            if let Some(download) = xhttp.download.as_mut() {
+                egui::Grid::new(format!("{id_prefix}_xhttp_download_grid"))
+                    .num_columns(2)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        dirty |= xhttp_edit_download(ui, download);
+                    });
+                ui.add_space(4.0);
+                ui.label(RichText::new("Nested xhttp (download leg)").strong());
+                egui::Grid::new(format!("{id_prefix}_xhttp_download_xhttp_grid"))
+                    .num_columns(2)
+                    .spacing([16.0, 6.0])
+                    .show(ui, |ui| {
+                        dirty |= xhttp_edit_core_basic(ui, &mut download.xhttp, "dl");
+                        dirty |= xhttp_edit_core_padding(ui, &mut download.xhttp, "dl");
+                        dirty |= xhttp_edit_core_sc(ui, &mut download.xhttp, "dl");
+                    });
+            }
+        });
+    dirty
+}
+
 
 /// Section heading with a spoiler-style disclosure arrow to the left of the title,
 /// so long key/value content on following rows cannot push it out of view.

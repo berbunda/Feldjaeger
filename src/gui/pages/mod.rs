@@ -34,6 +34,7 @@ pub mod warp;
 pub mod xray_management;
 
 // Shared `streamSettings` editors (Roadmap §2.6 stage 0.4).
+mod outbound_stream;
 mod stream_finalmask;
 mod stream_sockopt;
 
@@ -267,6 +268,54 @@ pub(crate) fn sparkline(ui: &mut Ui, points: &[i64], width: f32, height: f32) {
         plot_points,
         egui::Stroke::new(1.5, Color32::from_rgb(90, 170, 230)),
     ));
+}
+
+// ─── Danger warnings ─────────────────────────────────────────────────────────
+
+/// Text colour of a danger warning ([`danger_warning`]).
+const DANGER_RED: Color32 = Color32::from_rgb(230, 50, 50);
+
+/// Road sign 1.33 "Other dangers" (Russian road rules; Vienna Convention A,32), drawn with the
+/// painter like [`qr_code`]: a white point-up triangle with a red border and a black exclamation
+/// mark. `side` is the triangle's side length in points.
+pub(crate) fn danger_sign(ui: &mut Ui, side: f32) -> egui::Response {
+    let height = side * 3f32.sqrt() / 2.0;
+    let (rect, response) = ui.allocate_exact_size(vec2(side, height), Sense::hover());
+    let painter = ui.painter();
+    let top = egui::pos2(rect.center().x, rect.min.y);
+    let corners = [top, rect.right_bottom(), rect.left_bottom()];
+    painter.add(egui::Shape::convex_polygon(
+        corners.to_vec(),
+        Color32::from_rgb(210, 20, 20),
+        egui::Stroke::NONE,
+    ));
+    // The white field is the same triangle shrunk toward the centroid: scaling the inradius
+    // (height / 3) down by `border` leaves a border of equal width on all three sides.
+    let border = (side * 0.12).max(1.5);
+    let centroid = egui::pos2(rect.center().x, rect.min.y + height * 2.0 / 3.0);
+    let scale = ((height / 3.0 - border) / (height / 3.0)).max(0.0);
+    let field = corners.map(|corner| centroid + (corner - centroid) * scale);
+    painter.add(egui::Shape::convex_polygon(field.to_vec(), Color32::WHITE, egui::Stroke::NONE));
+    // Exclamation mark on the axis, low enough to clear the narrow apex of the white field.
+    let stroke = side * 0.09;
+    let x = rect.center().x;
+    painter.line_segment(
+        [
+            egui::pos2(x, rect.min.y + height * 0.42),
+            egui::pos2(x, rect.min.y + height * 0.66),
+        ],
+        egui::Stroke::new(stroke, Color32::BLACK),
+    );
+    painter.circle_filled(egui::pos2(x, rect.min.y + height * 0.75), stroke * 0.55, Color32::BLACK);
+    response
+}
+
+/// A danger-level warning line: [`danger_sign`] followed by `text` in bold red.
+pub(crate) fn danger_warning(ui: &mut Ui, text: &str) {
+    ui.horizontal_wrapped(|ui| {
+        danger_sign(ui, 20.0);
+        ui.label(RichText::new(text).color(DANGER_RED).strong());
+    });
 }
 
 // ─── Field help overlays (Roadmap §3:124) ────────────────────────────────────

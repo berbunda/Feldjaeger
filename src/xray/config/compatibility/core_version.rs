@@ -62,8 +62,18 @@ pub enum CoreFeature {
     KcpConfigSlimmed,
     /// `xmc` (Minecraft) layer in `finalmask.tcp[]` — XTLS/Xray-core#6210.
     XmcTcpMask,
+    /// VLESS / Trojan outbounds without TLS / REALITY (VLESS: or `encryption`) are refused at load
+    /// unless the server address is private — XTLS/Xray-core#6303 (Roadmap §4.2).
+    PlaintextOutboundForbidden,
     /// `xmc` `profiles[]` (signed Minecraft profiles) replacing `usernames` — XTLS/Xray-core#6487.
     XmcProfilesSchema,
+    /// Outbound `proxySettings` is a removed feature: `OutboundDetourConfig.Build()` refuses any
+    /// outbound that has it, `streamSettings.sockopt.dialerProxy` replaces it —
+    /// XTLS/Xray-core#6058 (Roadmap §4.2).
+    OutboundProxySettingsRemoved,
+    /// Freedom refuses `streamSettings.sockopt.addressPortStrategy` other than `none` (gate G14);
+    /// v26.7.28 still loads it — XTLS/Xray-core#6058.
+    FreedomAddressPortStrategyForbidden,
     /// `udphop` layer in `finalmask.udp[]`; from this release `finalmask.quicParams.udpHop` is
     /// ignored — XTLS/Xray-core#6327.
     UdpHopUdpMask,
@@ -82,7 +92,10 @@ pub const CORE_FEATURES: &[CoreFeature] = &[
     CoreFeature::KcpHeaderSeedRemoved,
     CoreFeature::MkcpLegacyMask,
     CoreFeature::XmcTcpMask,
+    CoreFeature::PlaintextOutboundForbidden,
     CoreFeature::XmcProfilesSchema,
+    CoreFeature::OutboundProxySettingsRemoved,
+    CoreFeature::FreedomAddressPortStrategyForbidden,
     CoreFeature::UdpHopUdpMask,
     CoreFeature::KcpConfigSlimmed,
     CoreFeature::UdpHopSockoptRemoved,
@@ -98,7 +111,10 @@ impl CoreFeature {
             Self::MkcpLegacyMask => XrayCoreVersion::new(26, 6, 1),
             Self::KcpConfigSlimmed => XrayCoreVersion::new(26, 9, 9),
             Self::XmcTcpMask => XrayCoreVersion::new(26, 7, 11),
+            Self::PlaintextOutboundForbidden => XrayCoreVersion::new(26, 7, 11),
             Self::XmcProfilesSchema => XrayCoreVersion::new(26, 7, 28),
+            Self::OutboundProxySettingsRemoved => XrayCoreVersion::new(26, 9, 8),
+            Self::FreedomAddressPortStrategyForbidden => XrayCoreVersion::new(26, 9, 8),
             Self::UdpHopUdpMask => XrayCoreVersion::new(26, 9, 9),
             Self::UdpHopSockoptRemoved => XrayCoreVersion::new(26, 9, 30),
             Self::NoiseExpPacket => XrayCoreVersion::new(26, 9, 30),
@@ -113,7 +129,10 @@ impl CoreFeature {
             Self::MkcpLegacyMask => 6201,
             Self::KcpConfigSlimmed => 6327,
             Self::XmcTcpMask => 6210,
+            Self::PlaintextOutboundForbidden => 6303,
             Self::XmcProfilesSchema => 6487,
+            Self::OutboundProxySettingsRemoved => 6058,
+            Self::FreedomAddressPortStrategyForbidden => 6058,
             Self::UdpHopUdpMask => 6327,
             Self::UdpHopSockoptRemoved => 6754,
             Self::NoiseExpPacket => 6862,
@@ -128,7 +147,10 @@ impl CoreFeature {
             Self::MkcpLegacyMask => "`mkcp-legacy` UDP mask",
             Self::KcpConfigSlimmed => "slimmed kcpSettings (legacy keys ignored)",
             Self::XmcTcpMask => "`xmc` TCP mask",
+            Self::PlaintextOutboundForbidden => "unencrypted VLESS / Trojan outbounds only to private addresses",
             Self::XmcProfilesSchema => "`xmc` profiles[] (signed Minecraft profiles)",
+            Self::OutboundProxySettingsRemoved => "outbound chaining via `sockopt.dialerProxy` only (`proxySettings` removed)",
+            Self::FreedomAddressPortStrategyForbidden => "Freedom without `sockopt.addressPortStrategy`",
             Self::UdpHopUdpMask => "`udphop` UDP mask",
             Self::UdpHopSockoptRemoved => "`udphop` without `sockopt`",
             Self::NoiseExpPacket => "`noise` item `type: \"exp\"`",

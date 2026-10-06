@@ -1170,16 +1170,20 @@ fn add_freedom_outbound_shell_writes_settings() {
     };
 
     let mut config = single_file_editable(r#"{"outbounds":[]}"#);
+    let mut stream = super::outbound_stream::OutboundStreamDraft::default();
+    stream.sockopt.domain_strategy = "UseIP".to_owned();
     let outcome = add_outbound_shell(
         &mut config,
         AddOutboundShellRequest {
+            stream,
+            core_version: None,
             general: OutboundGeneral {
                 tag: Some("direct".to_owned()),
                 send_through: Some("0.0.0.0".to_owned()),
-                proxy_settings: None,
+                legacy_proxy_settings: None,
+                migrate_proxy_settings: false,
             },
             settings: OutboundSettingsDraft::Freedom(FreedomSettingsDraft {
-                sockopt_domain_strategy: "UseIP".to_owned(),
                 redirect: "127.0.0.1:3366".to_owned(),
                 user_level: 1,
                 fragment: Some(FragmentDraft {
@@ -1239,16 +1243,17 @@ fn update_freedom_outbound_shell_edits_settings_and_preserves_unrelated_fields()
     let expected_fingerprint = config
         .outbound_object_fingerprint(index)
         .expect("fingerprint");
-    let mut settings =
+    let settings =
         parse_outbound_settings(config.sections().outbounds()[index].value()).expect("freedom draft");
-    let OutboundSettingsDraft::Freedom(draft) = &mut settings else {
-        panic!("freedom draft expected");
-    };
-    draft.sockopt_domain_strategy = "UseIPv4".to_owned();
+    assert!(matches!(settings, OutboundSettingsDraft::Freedom(_)));
+    let mut stream = super::outbound_stream::parse_outbound_stream(config.sections().outbounds()[index].value());
+    stream.sockopt.domain_strategy = "UseIPv4".to_owned();
 
     update_outbound_shell(
         &mut config,
         UpdateOutboundShellRequest {
+            stream,
+            core_version: None,
             outbound_ref: OutboundRef {
                 outbound_index: index,
                 expected_fingerprint,
@@ -1256,7 +1261,8 @@ fn update_freedom_outbound_shell_edits_settings_and_preserves_unrelated_fields()
             general: OutboundGeneral {
                 tag: Some("direct".to_owned()),
                 send_through: None,
-                proxy_settings: None,
+                legacy_proxy_settings: None,
+                migrate_proxy_settings: false,
             },
             settings,
         },
@@ -1291,11 +1297,14 @@ fn freedom_legacy_domain_strategy_is_preserved_then_migrated() {
         let OutboundSettingsDraft::Freedom(draft) = &mut settings else {
             panic!("freedom draft expected");
         };
-        let migration = migrate.then(|| draft.migrate_legacy_domain_strategy());
+        let mut stream = super::outbound_stream::parse_outbound_stream(&original);
+        let migration = migrate.then(|| draft.migrate_legacy_domain_strategy(&mut stream.sockopt));
         let expected_fingerprint = config.outbound_object_fingerprint(0).expect("fingerprint");
         update_outbound_shell(
             &mut config,
             UpdateOutboundShellRequest {
+                stream,
+                core_version: None,
                 outbound_ref: OutboundRef {
                     outbound_index: 0,
                     expected_fingerprint,
@@ -1313,8 +1322,8 @@ fn freedom_legacy_domain_strategy_is_preserved_then_migrated() {
         "streamSettings":{"sockopt":{"mark":255}}}]}"#;
     let (original, untouched, _) = save(legacy, false);
     assert_eq!(untouched, original, "no migration → nothing changes");
-    assert_eq!(outbound_warnings(&untouched).len(), 1);
-    assert_eq!(outbound_warnings(&untouched)[0].location, "settings.domainStrategy");
+    assert_eq!(outbound_warnings(&untouched, None).len(), 1);
+    assert_eq!(outbound_warnings(&untouched, None)[0].location, "settings.domainStrategy");
 
     let (_, migrated, migration) = save(legacy, true);
     assert_eq!(migration, Some(LegacyDomainStrategyMigration::Moved { value: "UseIPv4".to_owned() }));
@@ -1323,7 +1332,7 @@ fn freedom_legacy_domain_strategy_is_preserved_then_migrated() {
         migrated["streamSettings"]["sockopt"],
         serde_json::json!({"mark": 255, "domainStrategy": "UseIPv4"})
     );
-    assert!(outbound_warnings(&migrated).is_empty());
+    assert!(outbound_warnings(&migrated, None).is_empty());
 
     let conflict = r#"{"outbounds":[{"tag":"direct","protocol":"freedom",
         "settings":{"domainStrategy":"UseIPv4"},
@@ -1332,6 +1341,112 @@ fn freedom_legacy_domain_strategy_is_preserved_then_migrated() {
     assert!(matches!(migration, Some(LegacyDomainStrategyMigration::SockoptWins { .. })));
     assert_eq!(resolved["settings"], serde_json::json!({}));
     assert_eq!(resolved["streamSettings"]["sockopt"]["domainStrategy"], "ForceIPv6");
+}
+
+/// Gate G14 (Roadmap §4.2): Shell Save of a Freedom outbound that keeps
+/// `sockopt.addressPortStrategy` from disk is blocked on v26.9.8+ (the core would refuse the
+/// whole config), passes on older cores, and passes after the explicit removal.
+#[test]
+fn freedom_address_port_strategy_blocks_save_until_removed() {
+    use super::compatibility::{CompatibilityGateId, XrayCoreVersion};
+    use super::outbound_edit::{OutboundRef, parse_outbound_general};
+    use super::outbound_protocol::{OutboundSettingsDraft, parse_outbound_settings};
+
+    let raw = r#"{"outbounds":[{"tag":"direct","protocol":"freedom","settings":{},
+        "streamSettings":{"sockopt":{"addressPortStrategy":"SrvPortOnly","mark":255}}}]}"#;
+    let save = |core_version: Option<XrayCoreVersion>, remove: bool| {
+        let mut config = single_file_editable(raw);
+        let original = config.sections().outbounds()[0].value().clone();
+        let settings = parse_outbound_settings(&original).expect("freedom draft");
+        assert!(matches!(settings, OutboundSettingsDraft::Freedom(_)));
+        let mut stream = super::outbound_stream::parse_outbound_stream(&original);
+        if remove {
+            assert_eq!(stream.remove_address_port_strategy().as_deref(), Some("SrvPortOnly"));
+        }
+        let expected_fingerprint = config.outbound_object_fingerprint(0).expect("fingerprint");
+        update_outbound_shell(
+            &mut config,
+            UpdateOutboundShellRequest {
+                outbound_ref: OutboundRef { outbound_index: 0, expected_fingerprint },
+                general: parse_outbound_general(&original),
+                settings,
+                stream,
+                core_version,
+            },
+        )
+        .map(|_| config.sections().outbounds()[0].value().clone())
+    };
+
+    let blocked = save(None, false).unwrap_err();
+    assert_eq!(blocked.kind(), ConfigModifyErrorKind::ValidationFailed);
+    assert_eq!(blocked.detail(), CompatibilityGateId::G14.message());
+    assert!(save(Some(XrayCoreVersion::new(26, 9, 30)), false).is_err());
+
+    let old_core = save(Some(XrayCoreVersion::new(26, 7, 28)), false).expect("older core loads it");
+    assert_eq!(old_core["streamSettings"]["sockopt"]["addressPortStrategy"], "SrvPortOnly");
+
+    let saved = save(None, true).expect("save after removal");
+    assert_eq!(saved["streamSettings"], serde_json::json!({"sockopt": {"mark": 255}}));
+}
+
+/// Outbound `sockopt` editor (Roadmap §4.2): in one Save, the General tab's `proxySettings` →
+/// `dialerProxy` migration and socket option edits both land — the editor merges only the keys
+/// it changed. Setting `addressPortStrategy` on Freedom through the editor hits gate G14.
+#[test]
+fn outbound_sockopt_edit_merges_with_the_proxy_settings_migration() {
+    use super::compatibility::{CompatibilityGateId, XrayCoreVersion};
+    use super::outbound_edit::{OutboundRef, parse_outbound_general};
+    use super::outbound_protocol::parse_outbound_settings;
+    use super::outbound_stream::parse_outbound_stream;
+
+    let raw = r#"{"outbounds":[
+        {"tag":"direct","protocol":"freedom","settings":{},"proxySettings":{"tag":"tor"},
+         "streamSettings":{"sockopt":{"tcpFastOpen":true}}},
+        {"tag":"tor","protocol":"socks","settings":{"address":"127.0.0.1","port":9050}}]}"#;
+    let save = |edit: fn(&mut super::outbound_stream::OutboundStreamDraft), core: Option<XrayCoreVersion>| {
+        let mut config = single_file_editable(raw);
+        let original = config.sections().outbounds()[0].value().clone();
+        let mut general = parse_outbound_general(&original);
+        general.migrate_proxy_settings();
+        let mut stream = parse_outbound_stream(&original);
+        edit(&mut stream);
+        let expected_fingerprint = config.outbound_object_fingerprint(0).expect("fingerprint");
+        update_outbound_shell(
+            &mut config,
+            UpdateOutboundShellRequest {
+                outbound_ref: OutboundRef { outbound_index: 0, expected_fingerprint },
+                general,
+                settings: parse_outbound_settings(&original).expect("freedom draft"),
+                stream,
+                core_version: core,
+            },
+        )
+        .map(|_| config.sections().outbounds()[0].value().clone())
+    };
+
+    let saved = save(
+        |stream| {
+            stream.sockopt.mark = Some(5);
+            stream.sockopt.interface = "eth1".to_owned();
+        },
+        None,
+    )
+    .expect("save");
+    assert!(saved.get("proxySettings").is_none());
+    assert_eq!(
+        saved["streamSettings"],
+        serde_json::json!({"sockopt": {"tcpFastOpen": true, "dialerProxy": "tor", "mark": 5, "interface": "eth1"}})
+    );
+
+    // A dialerProxy typed in the editor wins over the migrated tag.
+    let chosen = save(|stream| stream.sockopt.dialer_proxy = "other".to_owned(), None).expect("save");
+    assert_eq!(chosen["streamSettings"]["sockopt"]["dialerProxy"], "other");
+
+    let set_strategy: fn(&mut super::outbound_stream::OutboundStreamDraft) =
+        |stream| stream.sockopt.address_port_strategy = "SrvPortOnly".to_owned();
+    let blocked = save(set_strategy, None).unwrap_err();
+    assert_eq!(blocked.detail(), CompatibilityGateId::G14.message());
+    save(set_strategy, Some(XrayCoreVersion::new(26, 7, 28))).expect("older core accepts it");
 }
 
 #[test]
@@ -1345,6 +1460,8 @@ fn update_freedom_outbound_shell_fingerprint_mismatch_rejected() {
     let error = update_outbound_shell(
         &mut config,
         UpdateOutboundShellRequest {
+            stream: Default::default(),
+            core_version: None,
             outbound_ref: OutboundRef {
                 outbound_index: 0,
                 expected_fingerprint: "stale".to_owned(),
@@ -1352,7 +1469,8 @@ fn update_freedom_outbound_shell_fingerprint_mismatch_rejected() {
             general: OutboundGeneral {
                 tag: Some("direct".to_owned()),
                 send_through: None,
-                proxy_settings: None,
+                legacy_proxy_settings: None,
+                migrate_proxy_settings: false,
             },
             settings: OutboundSettingsDraft::freedom_default(),
         },
@@ -1373,6 +1491,8 @@ fn update_freedom_outbound_shell_rejects_tag_rename() {
     let error = update_outbound_shell(
         &mut config,
         UpdateOutboundShellRequest {
+            stream: Default::default(),
+            core_version: None,
             outbound_ref: OutboundRef {
                 outbound_index: 0,
                 expected_fingerprint,
@@ -1380,7 +1500,8 @@ fn update_freedom_outbound_shell_rejects_tag_rename() {
             general: OutboundGeneral {
                 tag: Some("direct-renamed".to_owned()),
                 send_through: None,
-                proxy_settings: None,
+                legacy_proxy_settings: None,
+                migrate_proxy_settings: false,
             },
             settings: OutboundSettingsDraft::freedom_default(),
         },
@@ -1398,10 +1519,13 @@ fn add_blackhole_outbound_shell_writes_settings() {
     let outcome = add_outbound_shell(
         &mut config,
         AddOutboundShellRequest {
+            stream: Default::default(),
+            core_version: None,
             general: OutboundGeneral {
                 tag: Some("block".to_owned()),
                 send_through: None,
-                proxy_settings: None,
+                legacy_proxy_settings: None,
+                migrate_proxy_settings: false,
             },
             settings: OutboundSettingsDraft::Blackhole {
                 response_type: "http".to_owned(),
@@ -1442,6 +1566,8 @@ fn update_blackhole_outbound_shell_edits_settings_and_preserves_unrelated_fields
     update_outbound_shell(
         &mut config,
         UpdateOutboundShellRequest {
+            stream: Default::default(),
+            core_version: None,
             outbound_ref: OutboundRef {
                 outbound_index: index,
                 expected_fingerprint,
@@ -1449,7 +1575,8 @@ fn update_blackhole_outbound_shell_edits_settings_and_preserves_unrelated_fields
             general: OutboundGeneral {
                 tag: Some("block".to_owned()),
                 send_through: None,
-                proxy_settings: None,
+                legacy_proxy_settings: None,
+                migrate_proxy_settings: false,
             },
             settings: OutboundSettingsDraft::Blackhole {
                 response_type: "http".to_owned(),
@@ -1475,10 +1602,13 @@ fn add_dns_outbound_shell_writes_settings() {
     let outcome = add_outbound_shell(
         &mut config,
         AddOutboundShellRequest {
+            stream: Default::default(),
+            core_version: None,
             general: OutboundGeneral {
                 tag: Some("dns-out".to_owned()),
                 send_through: None,
-                proxy_settings: None,
+                legacy_proxy_settings: None,
+                migrate_proxy_settings: false,
             },
             settings: OutboundSettingsDraft::Dns {
                 rewrite_network: "udp".to_owned(),
@@ -1534,6 +1664,8 @@ fn update_dns_outbound_shell_edits_settings_and_preserves_unrelated_fields() {
     update_outbound_shell(
         &mut config,
         UpdateOutboundShellRequest {
+            stream: Default::default(),
+            core_version: None,
             outbound_ref: OutboundRef {
                 outbound_index: index,
                 expected_fingerprint,
@@ -1541,7 +1673,8 @@ fn update_dns_outbound_shell_edits_settings_and_preserves_unrelated_fields() {
             general: OutboundGeneral {
                 tag: Some("dns-out".to_owned()),
                 send_through: None,
-                proxy_settings: None,
+                legacy_proxy_settings: None,
+                migrate_proxy_settings: false,
             },
             settings: OutboundSettingsDraft::Dns {
                 rewrite_network: "udp".to_owned(),
@@ -1570,6 +1703,8 @@ fn update_dns_outbound_shell_fingerprint_mismatch_rejected() {
     let error = update_outbound_shell(
         &mut config,
         UpdateOutboundShellRequest {
+            stream: Default::default(),
+            core_version: None,
             outbound_ref: OutboundRef {
                 outbound_index: 0,
                 expected_fingerprint: "stale".to_owned(),
@@ -1577,7 +1712,8 @@ fn update_dns_outbound_shell_fingerprint_mismatch_rejected() {
             general: OutboundGeneral {
                 tag: Some("dns-out".to_owned()),
                 send_through: None,
-                proxy_settings: None,
+                legacy_proxy_settings: None,
+                migrate_proxy_settings: false,
             },
             settings: OutboundSettingsDraft::dns_default(),
         },
@@ -1597,6 +1733,8 @@ fn update_dns_outbound_shell_rejects_tag_rename() {
     let error = update_outbound_shell(
         &mut config,
         UpdateOutboundShellRequest {
+            stream: Default::default(),
+            core_version: None,
             outbound_ref: OutboundRef {
                 outbound_index: 0,
                 expected_fingerprint,
@@ -1604,7 +1742,8 @@ fn update_dns_outbound_shell_rejects_tag_rename() {
             general: OutboundGeneral {
                 tag: Some("dns-out-renamed".to_owned()),
                 send_through: None,
-                proxy_settings: None,
+                legacy_proxy_settings: None,
+                migrate_proxy_settings: false,
             },
             settings: OutboundSettingsDraft::dns_default(),
         },
@@ -3607,6 +3746,72 @@ fn duplicate_outbound_rejects_non_shell_protocol() {
     assert_eq!(config.sections().outbounds().len(), 1);
 }
 
+/// Roadmap §4.2 "Outbounds Shell: Loopback": Add writes only what was set, Edit keeps unknown
+/// `settings` / `sniffing` keys, Duplicate accepts the protocol.
+#[test]
+fn loopback_outbound_shell_add_edit_duplicate() {
+    use super::modify::{DuplicateOutboundRequest, duplicate_outbound};
+    use super::outbound_edit::{OutboundGeneral, OutboundRef, parse_outbound_general};
+    use super::outbound_protocol::{OutboundSettingsDraft, parse_outbound_settings};
+    use super::outbound_stream::parse_outbound_stream;
+
+    let mut config = single_file_editable(r#"{"outbounds":[]}"#);
+    let OutboundSettingsDraft::Loopback(mut draft) = OutboundSettingsDraft::loopback_default() else {
+        panic!("loopback draft expected");
+    };
+    draft.inbound_tag = "repeat".to_owned();
+    draft.sniffing.enabled = Some(true);
+    draft.sniffing.dest_override = vec!["tls".to_owned()];
+    add_outbound_shell(
+        &mut config,
+        AddOutboundShellRequest {
+            general: OutboundGeneral { tag: Some("lb".to_owned()), ..OutboundGeneral::default() },
+            settings: OutboundSettingsDraft::Loopback(draft),
+            stream: Default::default(),
+            core_version: None,
+            preferred_source_file: None,
+        },
+    )
+    .expect("add loopback");
+    let added = config.sections().outbounds()[0].value().clone();
+    assert_eq!(
+        added,
+        serde_json::json!({"protocol": "loopback", "tag": "lb",
+            "settings": {"inboundTag": "repeat", "sniffing": {"enabled": true, "destOverride": ["tls"]}}})
+    );
+
+    // Edit: change the tag only — sniffing (with a key the editor does not own) stays as it is.
+    let mut config = single_file_editable(
+        r#"{"outbounds":[{"tag":"lb","protocol":"loopback","settings":{"inboundTag":"repeat",
+            "sniffing":{"enabled":true,"domainsExcluded":["courier.push.apple.com"]},"future":1}}]}"#,
+    );
+    let original = config.sections().outbounds()[0].value().clone();
+    let mut settings = parse_outbound_settings(&original).expect("loopback is shell-editable");
+    let OutboundSettingsDraft::Loopback(draft) = &mut settings else {
+        panic!("loopback draft expected");
+    };
+    draft.inbound_tag = "again".to_owned();
+    let expected_fingerprint = config.outbound_object_fingerprint(0).expect("fingerprint");
+    update_outbound_shell(
+        &mut config,
+        UpdateOutboundShellRequest {
+            outbound_ref: OutboundRef { outbound_index: 0, expected_fingerprint },
+            general: parse_outbound_general(&original),
+            settings,
+            stream: parse_outbound_stream(&original),
+            core_version: None,
+        },
+    )
+    .expect("edit loopback");
+    let edited = config.sections().outbounds()[0].value();
+    assert_eq!(edited["settings"]["inboundTag"], "again");
+    assert_eq!(edited["settings"]["sniffing"], original["settings"]["sniffing"]);
+    assert_eq!(edited["settings"]["future"], 1);
+
+    duplicate_outbound(&mut config, DuplicateOutboundRequest { outbound_index: 0 }).expect("duplicate loopback");
+    assert_eq!(config.sections().outbounds().len(), 2);
+}
+
 #[test]
 fn duplicate_outbound_allows_vless_legacy_vnext_form() {
     use super::modify::{DuplicateOutboundRequest, duplicate_outbound};
@@ -4320,4 +4525,52 @@ fn remove_confdir_file_errors_when_missing() {
     )
     .expect_err("missing");
     assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
+}
+
+/// Roadmap §4.2: Shell Save writes the outbound `streamSettings` only when the Stream / Security
+/// draft changed, and then keeps the keys it does not own.
+#[test]
+fn update_vless_outbound_shell_writes_stream_only_when_changed() {
+    use super::outbound_edit::{OutboundRef, parse_outbound_general};
+    use super::outbound_protocol::parse_outbound_settings;
+    use super::outbound_stream::{OutboundTransport, parse_outbound_stream};
+
+    let raw = r#"{"outbounds":[{"tag":"up","protocol":"vless",
+        "settings":{"address":"a.example","port":443,"id":"27848739-7e62-4138-9fd3-098a63964b6b"},
+        "streamSettings":{"network":"raw","security":"none","sockopt":{"mark":2}}}]}"#;
+    let save = |stream_edit: &dyn Fn(&mut super::outbound_stream::OutboundStreamDraft)| {
+        let mut config = single_file_editable(raw);
+        let original = config.sections().outbounds()[0].value().clone();
+        let mut stream = parse_outbound_stream(&original);
+        stream_edit(&mut stream);
+        let expected_fingerprint = config.outbound_object_fingerprint(0).expect("fingerprint");
+        update_outbound_shell(
+            &mut config,
+            UpdateOutboundShellRequest {
+                outbound_ref: OutboundRef { outbound_index: 0, expected_fingerprint },
+                general: parse_outbound_general(&original),
+                settings: parse_outbound_settings(&original).expect("vless"),
+                stream,
+                core_version: None,
+            },
+        )
+        .expect("save");
+        (original, config.sections().outbounds()[0].value().clone())
+    };
+
+    let (original, saved) = save(&|_| {});
+    assert_eq!(saved["streamSettings"], original["streamSettings"]);
+
+    let (_, saved) = save(&|stream| {
+        stream.select_transport(OutboundTransport::WebSocket);
+        stream.ws.path = "/ws".to_owned();
+        stream.security.mode = super::inbound_security::InboundSecurityMode::Tls;
+        stream.security.tls.server_name = "a.example".to_owned();
+    });
+    let stream = &saved["streamSettings"];
+    assert_eq!(stream["network"], "websocket");
+    assert_eq!(stream["wsSettings"]["path"], "/ws");
+    assert_eq!(stream["security"], "tls");
+    assert_eq!(stream["tlsSettings"]["serverName"], "a.example");
+    assert_eq!(stream["sockopt"]["mark"], 2);
 }

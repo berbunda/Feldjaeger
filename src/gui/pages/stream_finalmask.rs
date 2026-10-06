@@ -561,8 +561,8 @@ pub(crate) fn show_quic_params_edit(
 /// The removed `quicParams.udpHop` (Roadmap §2.6 stage 3.2), shown as stored. On an inbound the
 /// key never had an effect, so the action is "Remove udpHop" (`migrate_legacy_udp_hop` with
 /// `Inbound`); on an outbound the action converts it to a `udphop` layer, which needs the
-/// `finalmask.udp` chain — wired with the Outbound FinalMask editor (stage 7). Returns true when
-/// the draft changed.
+/// `finalmask.udp` chain and the installed core — the Outbound Stream editor shows that button
+/// right below (stage 7.1). Returns true when the draft changed.
 fn show_legacy_udp_hop(ui: &mut Ui, direction: StreamDirection, quic_params: &mut QuicParamsDraft) -> bool {
     let Some(legacy) = quic_params.extras.get(QUIC_PARAMS_LEGACY_UDP_HOP_KEY) else {
         return false;

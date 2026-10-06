@@ -5,15 +5,20 @@
 
 use egui::{Color32, RichText, Sense, Ui};
 
+use super::optional_string_combo;
+
 use crate::app::{
     ApplicationService, BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS,
-    DOMAIN_STRATEGIES, DnsRuleDraft, FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS,
+    DnsRuleDraft, FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS,
     FREEDOM_FINAL_RULE_NETWORKS, FREEDOM_NOISE_TYPES, FREEDOM_PROXY_PROTOCOL_VERSIONS,
     FragmentDraft, FreedomFinalRuleDraft, MISSING_FIELD, NoiseDraft,
     OutboundKind, OutboundSettingsDraft, OutboundsPageState, OutboundsSortColumn,
     outbound_row_display,
 };
-use crate::xray::OutboundSummary;
+use crate::xray::{
+    CompatibilityWarning, CompatibilityWarningId, OutboundSummary, outbound_protocol_has_transport,
+    LoopbackRouting, outbound_protocol_uses_sockopt, validate_send_through,
+};
 
 /// Renders the Outbounds page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
@@ -83,6 +88,19 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
                 }
                 if ui.button("DNS").clicked() {
                     if let Err(e) = service.begin_add_outbound_dns() {
+                        service.show_status_message(e);
+                    }
+                    ui.close();
+                }
+                if ui
+                    .button("Loopback")
+                    .on_hover_text(
+                        "Sends traffic back into routing as if it came from an inbound with the \
+                         chosen tag — https://xtls.github.io/en/config/outbounds/loopback.html",
+                    )
+                    .clicked()
+                {
+                    if let Err(e) = service.begin_add_outbound_loopback() {
                         service.show_status_message(e);
                     }
                     ui.close();
@@ -212,13 +230,18 @@ fn show_outbound_context_menu(
         let busy = service.is_outbound_mutation_busy();
         let edit_ok = matches!(
             row.kind(),
-            OutboundKind::Freedom | OutboundKind::Blackhole | OutboundKind::Dns | OutboundKind::Vless
+            OutboundKind::Freedom
+                | OutboundKind::Blackhole
+                | OutboundKind::Dns
+                | OutboundKind::Vless
+                | OutboundKind::Loopback
         );
         if ui
             .add_enabled(edit_ok && !busy, egui::Button::new("Edit"))
             .on_disabled_hover_text(
-                "Shell editing is available for Freedom, Blackhole, DNS, and VLESS (flat settings \
-                 form) outbounds only — a VLESS outbound using the legacy vnext[] array must be \
+                "Shell editing is available for Freedom, Blackhole, DNS, Loopback, and VLESS \
+                 outbounds only — a legacy VLESS vnext[] outbound opens only when it has one \
+                 server with one user (Save converts it to the flat form); any other must be \
                  edited via Raw JSON",
             )
             .clicked()
@@ -251,12 +274,16 @@ fn show_outbound_context_menu(
 
         let duplicate_ok = matches!(
             row.kind(),
-            OutboundKind::Freedom | OutboundKind::Blackhole | OutboundKind::Dns | OutboundKind::Vless
+            OutboundKind::Freedom
+                | OutboundKind::Blackhole
+                | OutboundKind::Dns
+                | OutboundKind::Vless
+                | OutboundKind::Loopback
         );
         if ui
             .add_enabled(duplicate_ok && !busy, egui::Button::new("Duplicate"))
             .on_disabled_hover_text(
-                "Duplicate is available for Freedom, Blackhole, DNS, and VLESS outbounds only",
+                "Duplicate is available for Freedom, Blackhole, DNS, Loopback, and VLESS outbounds only",
             )
             .clicked()
         {
@@ -748,6 +775,7 @@ fn outbound_protocol_label(settings: &OutboundSettingsDraft) -> &'static str {
         OutboundSettingsDraft::Blackhole { .. } => "Blackhole",
         OutboundSettingsDraft::Dns { .. } => "DNS",
         OutboundSettingsDraft::Vless(_) => "VLESS",
+        OutboundSettingsDraft::Loopback(_) => "Loopback",
     }
 }
 
@@ -774,7 +802,24 @@ fn show_outbound_editor_pane(ui: &mut Ui, service: &mut ApplicationService) {
         Some(OutboundSettingsDraft::Blackhole { .. }) => show_blackhole_settings_edit(ui, service),
         Some(OutboundSettingsDraft::Dns { .. }) => show_dns_settings_edit(ui, service),
         Some(OutboundSettingsDraft::Vless(_)) => show_vless_settings_edit(ui, service),
+        Some(OutboundSettingsDraft::Loopback(_)) => show_loopback_settings_edit(ui, service),
         None => {}
+    }
+    // Stream / Security for protocols that dial through a transport (Roadmap §4.2).
+    let protocol = service
+        .outbound_editor_session()
+        .map(|s| s.settings.protocol_name())
+        .unwrap_or_default();
+    if outbound_protocol_has_transport(protocol) {
+        ui.add_space(8.0);
+        ui.separator();
+        super::outbound_stream::show_outbound_stream_edit(ui, service, protocol);
+    }
+    // Socket options for every protocol that dials (Roadmap §4.2).
+    if outbound_protocol_uses_sockopt(protocol) {
+        ui.add_space(8.0);
+        ui.separator();
+        super::outbound_stream::show_outbound_sockopt_edit(ui, service);
     }
     ui.add_space(8.0);
 
@@ -820,10 +865,15 @@ fn show_outbound_diff_preview(ui: &mut Ui, service: &ApplicationService) {
 }
 
 fn show_outbound_general_edit(ui: &mut Ui, service: &mut ApplicationService, is_add: bool) {
+    // Computing warnings borrows the service immutably, so before the mutable session borrow.
+    let proxy_settings_warnings: Vec<_> = service
+        .outbound_editor_warnings()
+        .into_iter()
+        .filter(|warning| warning.id == CompatibilityWarningId::OutboundProxySettingsRemoved)
+        .collect();
     let Some(session) = service.outbound_editor_session_mut() else {
         return;
     };
-    let is_freedom = matches!(session.settings, OutboundSettingsDraft::Freedom(_));
     let general = &mut session.general;
     let mut tag = general.tag.clone().unwrap_or_default();
     let mut send_through = general.send_through.clone().unwrap_or_default();
@@ -842,61 +892,66 @@ fn show_outbound_general_edit(ui: &mut Ui, service: &mut ApplicationService, is_
             ui.end_row();
 
             ui.label("sendThrough");
-            ui.text_edit_singleline(&mut send_through)
-                .on_hover_text("Bind address; empty = system default");
+            ui.text_edit_singleline(&mut send_through).on_hover_text(
+                "Local address outgoing connections are sent from: an IP; IP/prefix — a random \
+                 address of that range per connection; origin — the local address the client \
+                 reached the inbound on; srcip — the client's own address. Empty = system default.",
+            );
             ui.end_row();
         });
+    // Checked live with the same rule as Save (Roadmap §4.2), plus the core's precedence:
+    // `SetOutboundGateway` skips sendThrough while sockopt.dialerProxy is set.
+    if let Err(message) = validate_send_through(&send_through) {
+        ui.label(RichText::new(message).size(12.0).color(Color32::from_rgb(220, 80, 80)));
+    } else if !send_through.trim().is_empty() && !session.stream.sockopt.dialer_proxy.trim().is_empty() {
+        ui.label(
+            RichText::new("sendThrough is not used while Socket options → dialerProxy is set.")
+                .size(12.0)
+                .color(Color32::from_rgb(140, 140, 140)),
+        );
+    }
 
     general.tag = Some(tag);
     general.send_through = Some(send_through);
 
+    // `proxySettings` is never written: it is a removed feature (XTLS/Xray-core#6058). An
+    // existing one is shown read-only with an explicit migration (Roadmap §4.2).
+    let Some(legacy) = general.legacy_proxy_settings.clone() else {
+        return;
+    };
+    let pending = general.migrate_proxy_settings;
     ui.add_space(6.0);
-    let mut chain_enabled = general.proxy_settings.is_some();
-    if ui
-        .checkbox(&mut chain_enabled, "proxySettings (chain through another outbound)")
-        .on_hover_text(
-            "Dials this outbound's connection through another outbound's dialer first — any \
-             protocol, not VLESS-specific",
-        )
-        .changed()
-    {
-        general.proxy_settings = if chain_enabled {
-            Some(crate::app::ProxySettingsDraft::default())
-        } else {
-            None
-        };
-    }
-    if is_freedom && chain_enabled {
+    let tag = if legacy.tag.is_empty() { MISSING_FIELD } else { legacy.tag.as_str() };
+    ui.label(format!(
+        "proxySettings (on disk): tag {tag}{}",
+        if legacy.transport_layer { ", transportLayer" } else { "" }
+    ));
+    show_outbound_compatibility_warnings(ui, &proxy_settings_warnings);
+    if pending {
         ui.label(
-            RichText::new(
-                "Freedom no longer honors proxySettings as of Xray-core v26.9.x (XTLS/Xray-core#6058) \
-                 — use sockopt.dialerProxy instead.",
-            )
-            .size(12.0)
-            .color(Color32::from_rgb(200, 140, 40)),
+            RichText::new("Migration pending — proxySettings is removed on Save (see the preview).")
+                .size(12.0)
+                .color(Color32::from_rgb(140, 140, 140)),
         );
+        return;
     }
-    if let Some(proxy_settings) = &mut general.proxy_settings {
-        egui::Grid::new("outbound_proxy_settings_edit_grid")
-            .num_columns(2)
-            .spacing([16.0, 6.0])
-            .show(ui, |ui| {
-                ui.label("proxySettings.tag");
-                ui.text_edit_singleline(&mut proxy_settings.tag)
-                    .on_hover_text("Outbound tag to chain through");
-                ui.end_row();
-
-                ui.label("transportLayer");
-                ui.checkbox(&mut proxy_settings.transport_layer, "")
-                    .on_hover_text("Reuse only the transport connection from the target outbound");
-                ui.end_row();
-            });
+    if ui
+        .button("Migrate to sockopt.dialerProxy")
+        .on_hover_text(
+            "Removes proxySettings and moves its tag into streamSettings.sockopt.dialerProxy (an \
+             existing dialerProxy wins) and shows the diff; nothing is written until Save",
+        )
+        .clicked()
+    {
+        match service.migrate_outbound_proxy_settings() {
+            Ok(message) | Err(message) => service.show_status_message(message),
+        }
     }
 }
 
 fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
     // Warnings first: computing them borrows the service immutably.
-    let warnings = service.outbound_editor_warnings();
+    let warnings = outbound_editor_warnings_below_general(service);
     let can_migrate = matches!(
         service.outbound_editor_session().map(|s| &s.settings),
         Some(OutboundSettingsDraft::Freedom(draft))
@@ -918,6 +973,26 @@ fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
         }
         ui.add_space(6.0);
     }
+    // The warning is computed on the draft and only for cores that refuse the key (gate G14), so
+    // the button disappears once the removal is scheduled.
+    let address_port_strategy_rejected = warnings
+        .iter()
+        .any(|warning| warning.id == CompatibilityWarningId::FreedomAddressPortStrategyRejected);
+    if address_port_strategy_rejected {
+        if ui
+            .button("Remove addressPortStrategy")
+            .on_hover_text(
+                "Removes streamSettings.sockopt.addressPortStrategy (Freedom cannot use it; Save is \
+                 blocked while it is there) and shows the diff; nothing is written until Save",
+            )
+            .clicked()
+        {
+            match service.remove_outbound_freedom_address_port_strategy() {
+                Ok(message) | Err(message) => service.show_status_message(message),
+            }
+        }
+        ui.add_space(6.0);
+    }
 
     let Some(session) = service.outbound_editor_session_mut() else {
         return;
@@ -926,7 +1001,6 @@ fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
         return;
     };
 
-    let mut strategy = draft.sockopt_domain_strategy.clone();
     let mut redirect_text = draft.redirect.clone();
     let mut level = draft.user_level as i64;
     let mut proxy_protocol = draft.proxy_protocol;
@@ -935,27 +1009,6 @@ fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            ui.label("sockopt.domainStrategy").on_hover_text(
-                "streamSettings.sockopt.domainStrategy — how Freedom resolves domain targets \
-                 (also before finalRules are matched)",
-            );
-            ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("freedom_sockopt_domain_strategy")
-                    .selected_text(if strategy.is_empty() {
-                        "(unset — AsIs)"
-                    } else {
-                        strategy.as_str()
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut strategy, String::new(), "(unset — AsIs)");
-                        for &preset in DOMAIN_STRATEGIES {
-                            ui.selectable_value(&mut strategy, preset.to_owned(), preset);
-                        }
-                    });
-                ui.text_edit_singleline(&mut strategy);
-            });
-            ui.end_row();
-
             ui.label("redirect");
             ui.text_edit_singleline(&mut redirect_text)
                 .on_hover_text("host:port or :port; empty = disabled");
@@ -979,7 +1032,6 @@ fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
             ui.end_row();
         });
 
-    draft.sockopt_domain_strategy = strategy;
     draft.redirect = redirect_text;
     draft.user_level = level.max(0) as u64;
     draft.proxy_protocol = proxy_protocol;
@@ -1049,10 +1101,22 @@ fn proxy_protocol_label(version: u64) -> String {
     }
 }
 
-/// Yellow `"<location>: <message>"` lines for non-blocking outbound warnings (mirrors the
-/// inbound Stream tab).
-fn show_outbound_compatibility_warnings(ui: &mut Ui, warnings: &[crate::xray::CompatibilityWarning]) {
+/// The editor's warnings without the ones the General section shows next to its fix
+/// (`proxySettings`).
+pub(super) fn outbound_editor_warnings_below_general(service: &ApplicationService) -> Vec<CompatibilityWarning> {
+    let mut warnings = service.outbound_editor_warnings();
+    warnings.retain(|warning| warning.id != CompatibilityWarningId::OutboundProxySettingsRemoved);
+    warnings
+}
+
+/// Yellow `"<location>: <message>"` lines for non-blocking outbound warnings, danger ones in red
+/// behind road sign 1.33 (mirrors the inbound Stream tab).
+pub(super) fn show_outbound_compatibility_warnings(ui: &mut Ui, warnings: &[CompatibilityWarning]) {
     for warning in warnings {
+        if warning.id.severity() == crate::xray::WarningSeverity::Danger {
+            super::danger_warning(ui, &warning.text());
+            continue;
+        }
         ui.label(
             RichText::new(warning.text())
                 .size(12.0)
@@ -1321,6 +1385,103 @@ fn show_dns_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
     show_dns_rules_edit(ui, rules);
 }
 
+/// Loopback Protocol section (Roadmap §4.2): `inboundTag` (routing's `inboundTag` names + free
+/// text) with a hint on where routing sends the traffic, and `sniffing` (shared editor).
+fn show_loopback_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
+    // Computed before the mutable session borrow (a frame behind the typing, which is fine).
+    let candidates = service.routing_inbound_tag_candidates();
+    let routing = service.outbound_loopback_routing();
+    let Some(session) = service.outbound_editor_session_mut() else {
+        return;
+    };
+    let OutboundSettingsDraft::Loopback(draft) = &mut session.settings else {
+        return;
+    };
+    let grey = Color32::from_rgb(140, 140, 140);
+    let amber = Color32::from_rgb(210, 170, 40);
+
+    let presets: Vec<&str> = candidates.iter().map(String::as_str).collect();
+    egui::Grid::new("loopback_settings_edit_grid")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("inboundTag").on_hover_text(
+                "The inbound tag the traffic re-enters routing with: rules whose inboundTag \
+                 lists it decide where it goes next. Matched exactly (case and spaces count); \
+                 it does not have to be the tag of a real inbound.",
+            );
+            ui.horizontal(|ui| {
+                optional_string_combo(ui, "loopback_inbound_tag", &mut draft.inbound_tag, &presets);
+            });
+            ui.end_row();
+        });
+    if draft.inbound_tag_foreign && draft.inbound_tag.is_empty() {
+        ui.label(
+            RichText::new("inboundTag on disk is not a string (Xray-core refuses it); it is kept until a tag is typed here.")
+                .size(12.0)
+                .color(amber),
+        );
+    }
+    let hint = match routing {
+        Some(LoopbackRouting::NoTag) => Some((
+            "No inboundTag: routing rules with an inboundTag condition never match this traffic; \
+             the other rules decide."
+                .to_owned(),
+            amber,
+        )),
+        Some(LoopbackRouting::NoRule) => Some((
+            "No routing rule lists this inboundTag — the other rules decide, and may send the \
+             traffic back into this outbound."
+                .to_owned(),
+            amber,
+        )),
+        Some(LoopbackRouting::Rules(rules)) => Some((
+            format!(
+                "Routing rules for this tag: {}.",
+                rules.iter().map(|index| format!("#{}", index + 1)).collect::<Vec<_>>().join(", ")
+            ),
+            grey,
+        )),
+        Some(LoopbackRouting::LoopsBack { rule }) => Some((
+            format!(
+                "Routing rule #{} sends this inboundTag back into this outbound — the traffic \
+                 would loop.",
+                rule + 1
+            ),
+            Color32::from_rgb(220, 80, 80),
+        )),
+        None => None,
+    };
+    if let Some((text, color)) = hint {
+        ui.label(RichText::new(text).size(12.0).color(color));
+    }
+
+    ui.add_space(8.0);
+    ui.strong("sniffing").on_hover_text(
+        "settings.sniffing — sniff the re-injected traffic again (e.g. TLS SNI after a \
+         decrypting outbound); runs only when enabled.",
+    );
+    if draft.sniffing_foreign {
+        ui.label(
+            RichText::new("settings.sniffing is not a JSON object; it is preserved — fix it on the Raw JSON tab to edit.")
+                .size(12.0)
+                .color(grey),
+        );
+        return;
+    }
+    super::inbounds::show_sniffing_fields(ui, &mut draft.sniffing);
+    if !draft.sniffing.extras.is_empty() {
+        ui.label(
+            RichText::new(format!(
+                "Preserved sniffing keys: {}",
+                draft.sniffing.extras.keys().cloned().collect::<Vec<_>>().join(", ")
+            ))
+            .size(12.0)
+            .color(grey),
+        );
+    }
+}
+
 /// Ordered `settings.rules[]` editor (Add/Remove/Move up/down; order is meaningful — mirrors the
 /// FinalMask layer-list editor convention).
 fn show_dns_rules_edit(ui: &mut Ui, rules: &mut Vec<DnsRuleDraft>) {
@@ -1416,9 +1577,9 @@ fn show_dns_rules_edit(ui: &mut Ui, rules: &mut Vec<DnsRuleDraft>) {
 }
 
 /// VLESS outbound Protocol tab — bridge side of VLESS-native reverse proxy, or a plain forward
-/// outbound (Roadmap §2.1:58). Flat `settings` form only (`address`/`port`/`id`/`encryption`/
-/// `flow`/`reverse`) — no transport/security tab here, deliberately narrower than the eventual
-/// full "Outbounds Shell: VLESS (+ stream/security matrix)" backlog item (Roadmap §4.2).
+/// outbound (Roadmap §2.1:58). Writes the flat `settings` form (`address`/`port`/`id`/
+/// `encryption`/`flow`/`level`/`email`/`reverse`); a draft read from a single-server legacy
+/// `vnext[]` gets a notice that Save converts it (Roadmap §4.2).
 fn show_vless_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
     let Some(session) = service.outbound_editor_session_mut() else {
         return;
@@ -1427,6 +1588,18 @@ fn show_vless_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
         return;
     };
     let mut reverse = super::ReverseDraftFields::from_reverse(settings.reverse.as_ref());
+
+    if settings.legacy_vnext {
+        ui.label(
+            egui::RichText::new(
+                "This outbound uses the legacy vnext[] form. Save rewrites it into the flat \
+                 settings form — same server and user for Xray-core. \"Preview changes\" shows \
+                 the rewrite.",
+            )
+            .italics(),
+        );
+        ui.add_space(6.0);
+    }
 
     egui::Grid::new("vless_outbound_settings_edit_grid")
         .num_columns(2)
@@ -1463,6 +1636,18 @@ fn show_vless_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
                     "VLESS post-quantum encryption string (matches the inbound's decryption); \
                      empty = key absent",
                 );
+            ui.end_row();
+
+            ui.label("level");
+            ui.text_edit_singleline(&mut settings.level).on_hover_text(
+                "User level: index into policy.levels (timeouts, buffer size); empty = key absent \
+                 (level 0)",
+            );
+            ui.end_row();
+
+            ui.label("email");
+            ui.text_edit_singleline(&mut settings.email)
+                .on_hover_text("User label in logs and statistics; empty = key absent");
             ui.end_row();
         });
 

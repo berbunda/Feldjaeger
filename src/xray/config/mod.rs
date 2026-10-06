@@ -24,6 +24,7 @@ mod modify;
 mod modify_error;
 mod outbound_edit;
 mod outbound_protocol;
+mod outbound_stream;
 mod burst_observatory_settings;
 mod metrics_settings;
 mod observatory_settings;
@@ -52,11 +53,11 @@ pub use burst_observatory_settings::{
     burst_observatory_settings_to_new_value, validate_burst_observatory_settings,
 };
 pub use compatibility::{
-    CompatibilityWarning, CompatibilityWarningId, inbound_warnings, outbound_warnings,
+    CompatibilityWarning, CompatibilityWarningId, WarningSeverity, inbound_warnings, outbound_warnings,
     with_warning_suffix, CORE_FEATURES, CoreFeature, XrayCoreVersion,
     CompatibilityGateId, allowed_security_modes, allowed_stream_methods, check_inbound_compatibility,
-    coerce_display_stream_method, coerce_security_mode_for_transport, effective_security,
-    first_failing_gate, g10_hysteria_requires_tls, g11_shadowsocks_tcp_only,
+    check_outbound_compatibility, coerce_display_stream_method, coerce_security_mode_for_transport,
+    effective_security, first_failing_gate, first_failing_outbound_gate, g10_hysteria_requires_tls, g11_shadowsocks_tcp_only,
     g9_hysteria_protocol_transport_ok, inbound_has_vision_flow, matrix_transport, normalized_method,
     selectable_stream_methods, transport_security_allowed, vision_active_from_inbound,
 };
@@ -228,15 +229,24 @@ pub use observatory_settings::{
     validate_observatory_settings,
 };
 pub use outbound_edit::{
-    OutboundGeneral, OutboundRef, ProxySettingsDraft, apply_outbound_general, parse_outbound_general,
+    LegacyProxySettings, OutboundGeneral, OutboundRef, ProxySettingsMigration, apply_outbound_general,
+    parse_outbound_general, validate_send_through,
 };
 pub use outbound_protocol::{
     BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS, DnsRuleDraft,
     FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS, FREEDOM_FINAL_RULE_NETWORKS,
     FREEDOM_LEGACY_STRATEGY_KEYS, FREEDOM_NOISE_TYPES, FREEDOM_PROXY_PROTOCOL_VERSIONS,
-    FragmentDraft, FreedomFinalRuleDraft, FreedomSettingsDraft, LegacyDomainStrategyMigration,
+    FragmentDraft, FreedomFinalRuleDraft, FreedomSettingsDraft, LegacyDomainStrategyMigration, LoopbackRouting, LoopbackSettingsDraft, loopback_routing,
     NoiseDraft, OutboundSettingsDraft,
-    apply_outbound_settings, is_shell_editable_protocol, parse_outbound_settings,
+    apply_outbound_settings, is_shell_editable_protocol, legacy_vnext_blocker, parse_outbound_settings,
+};
+pub use outbound_stream::{
+    DialerProxyProblem, GrpcClientSettings, HYSTERIA_TRANSPORT_VERSION, HttpUpgradeClientSettings,
+    HysteriaClientSettings, OutboundSecurityDraft, OutboundStreamDraft, OutboundTransport,
+    REALITY_REFUSED_FINGERPRINTS, RawClientSettings, RealityClientDraft, RealityPublicKeyField,
+    TLS_KNOWN_FINGERPRINTS, TlsClientDraft, WsClientSettings, apply_outbound_stream, dialer_proxy_problem,
+    outbound_protocol_has_transport, outbound_protocol_uses_sockopt, outbound_transports_for_protocol, parse_outbound_stream,
+    validate_outbound_stream,
 };
 pub use parser::{ConfigParseOutcome, XrayConfigParser};
 pub use stats_settings::{

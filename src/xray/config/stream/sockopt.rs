@@ -4,15 +4,20 @@
 //! `finalmask` — not transport-specific, applies regardless of the chosen transport method.
 //! Documented fields split into inbound-only, outbound-only, and shared
 //! ([`INBOUND_ONLY_SOCKOPT_FIELDS`], [`OUTBOUND_ONLY_SOCKOPT_FIELDS`], [`sockopt_field_applies`]);
-//! Feldjäger models every documented field as typed data regardless of direction (so the draft
-//! is outbound-ready and never drops a field that doesn't apply), but only the inbound Stream tab
-//! exposes editable widgets today — outbound-only fields still round-trip losslessly, just
-//! without a dedicated widget yet. See <https://xtls.github.io/en/config/transports/sockopt.html>.
+//! Feldjäger models every documented field as typed data regardless of direction, so a draft never
+//! drops a field that doesn't apply; each editor shows the fields of its side (the inbound Stream
+//! tab, the Outbound Shell "Socket options" section — Roadmap §4.2).
+//! See <https://xtls.github.io/en/config/transports/sockopt.html>.
+//!
+//! Verified against `XTLS/Xray-core@main` (`infra/conf/transport_sockopt.go`): `SocketConfig` is
+//! decoded by Go's `encoding/json` (key match is case-insensitive, integers are `int32` /
+//! `uint32`) and `Build()` refuses an unknown `domainStrategy` / `addressPortStrategy`;
+//! [`validate_sockopt`] mirrors that.
 
 use serde_json::{Map, Value};
 
 use super::StreamDirection;
-use crate::xray::config::modify_error::ConfigModifyResult;
+use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 
 /// `sockopt` keys that only configure a listening socket (meaningless on an outbound).
 pub const INBOUND_ONLY_SOCKOPT_FIELDS: &[&str] =
@@ -23,12 +28,17 @@ pub const OUTBOUND_ONLY_SOCKOPT_FIELDS: &[&str] = &[
     "mark",
     "domainStrategy",
     "dialerProxy",
-    "tcpcongestion",
+    TCP_CONGESTION_KEY,
     "interface",
     "tcpMptcp",
     "addressPortStrategy",
     "happyEyeballs",
 ];
+
+/// Canonical spelling of the congestion-control key (`json:"tcpCongestion"` in the core). The
+/// documentation long spelled it `tcpcongestion`; Go matches keys case-insensitively, so every
+/// spelling is read, an existing one is kept, and a new key is written canonically.
+pub const TCP_CONGESTION_KEY: &str = "tcpCongestion";
 
 /// Whether the `sockopt` key `field` has an effect on a socket of the given direction.
 /// Keys in neither list (e.g. `tcpFastOpen`, `tproxy`, keep-alive/timeout fields,
@@ -69,7 +79,7 @@ pub const ADDRESS_PORT_STRATEGIES: &[&str] = &[
     "TxtPortAndAddress",
 ];
 
-/// Common `tcpcongestion` presets (outbound-only, Linux); free text also accepted since kernel
+/// Common `tcpCongestion` presets (outbound-only, Linux); free text also accepted since kernel
 /// congestion-control modules vary by system.
 pub const TCP_CONGESTION_PRESETS: &[&str] = &["bbr", "cubic", "reno"];
 
@@ -130,8 +140,11 @@ pub struct SockoptDraft {
     pub tcp_keep_alive_interval: Option<i64>,
     /// `tcpUserTimeout` in milliseconds.
     pub tcp_user_timeout: Option<u64>,
-    /// `tcpcongestion` (outbound-only, Linux); empty = key absent.
-    pub tcpcongestion: String,
+    /// `tcpCongestion` (outbound-only, Linux); empty = key absent.
+    pub tcp_congestion: String,
+    /// Spelling of the congestion key found on disk (e.g. the documented `tcpcongestion`);
+    /// `None` = write [`TCP_CONGESTION_KEY`].
+    pub tcp_congestion_key: Option<String>,
     /// `interface` (outbound-only, bind to network interface); empty = key absent.
     pub interface: String,
     /// `V6Only` (inbound-only, Linux).
@@ -165,7 +178,8 @@ impl Default for SockoptDraft {
             tcp_keep_alive_idle: None,
             tcp_keep_alive_interval: None,
             tcp_user_timeout: None,
-            tcpcongestion: String::new(),
+            tcp_congestion: String::new(),
+            tcp_congestion_key: None,
             interface: String::new(),
             v6_only: false,
             tcp_window_clamp: None,
@@ -190,7 +204,7 @@ const KNOWN_SOCKOPT_KEYS: &[&str] = &[
     "tcpKeepAliveIdle",
     "tcpKeepAliveInterval",
     "tcpUserTimeout",
-    "tcpcongestion",
+    TCP_CONGESTION_KEY,
     "interface",
     "V6Only",
     "tcpWindowClamp",
@@ -202,6 +216,10 @@ const KNOWN_SOCKOPT_KEYS: &[&str] = &[
 
 const KNOWN_HAPPY_EYEBALLS_KEYS: &[&str] =
     &["tryDelayMs", "prioritizeIPv6", "interleave", "maxConcurrentTry"];
+
+fn is_tcp_congestion_key(key: &str) -> bool {
+    key.eq_ignore_ascii_case(TCP_CONGESTION_KEY)
+}
 
 fn string_field(value: Option<&Value>) -> String {
     value
@@ -263,8 +281,19 @@ fn happy_eyeballs_to_value(draft: &HappyEyeballsDraft) -> Value {
 pub fn parse_sockopt(object: &Map<String, Value>) -> SockoptDraft {
     let mut extras = Map::new();
     for (key, value) in object {
-        if !KNOWN_SOCKOPT_KEYS.contains(&key.as_str()) {
+        if !KNOWN_SOCKOPT_KEYS.contains(&key.as_str()) && !is_tcp_congestion_key(key) {
             extras.insert(key.clone(), value.clone());
+        }
+    }
+    // The canonical spelling wins when several are present; the others are not read.
+    let tcp_congestion_key = object
+        .keys()
+        .filter(|key| is_tcp_congestion_key(key))
+        .min_by_key(|key| key.as_str() != TCP_CONGESTION_KEY)
+        .cloned();
+    for key in object.keys().filter(|key| is_tcp_congestion_key(key)) {
+        if Some(key) != tcp_congestion_key.as_ref() {
+            extras.insert(key.clone(), object[key.as_str()].clone());
         }
     }
 
@@ -322,7 +351,8 @@ pub fn parse_sockopt(object: &Map<String, Value>) -> SockoptDraft {
         tcp_keep_alive_idle: object.get("tcpKeepAliveIdle").and_then(Value::as_i64),
         tcp_keep_alive_interval: object.get("tcpKeepAliveInterval").and_then(Value::as_i64),
         tcp_user_timeout: object.get("tcpUserTimeout").and_then(Value::as_u64),
-        tcpcongestion: string_field(object.get("tcpcongestion")),
+        tcp_congestion: string_field(tcp_congestion_key.as_deref().and_then(|key| object.get(key))),
+        tcp_congestion_key: tcp_congestion_key.filter(|key| key != TCP_CONGESTION_KEY),
         interface: string_field(object.get("interface")),
         v6_only: object.get("V6Only").and_then(Value::as_bool).unwrap_or(false),
         tcp_window_clamp: object.get("tcpWindowClamp").and_then(Value::as_u64),
@@ -385,7 +415,11 @@ pub fn sockopt_to_value(draft: &SockoptDraft) -> Value {
     if let Some(timeout) = draft.tcp_user_timeout {
         object.insert("tcpUserTimeout".to_owned(), Value::Number(timeout.into()));
     }
-    insert_non_empty_string(&mut object, "tcpcongestion", &draft.tcpcongestion);
+    insert_non_empty_string(
+        &mut object,
+        draft.tcp_congestion_key.as_deref().unwrap_or(TCP_CONGESTION_KEY),
+        &draft.tcp_congestion,
+    );
     insert_non_empty_string(&mut object, "interface", &draft.interface);
     if draft.v6_only {
         object.insert("V6Only".to_owned(), Value::Bool(true));
@@ -419,16 +453,68 @@ pub fn sockopt_to_value(draft: &SockoptDraft) -> Value {
     Value::Object(object)
 }
 
-/// Validates a sockopt draft before writing.
-///
-/// Intentionally a no-op today: none of the documented fields interact with the existing
-/// compatibility gates (Reality/Vision/Hysteria/TLS-certs/Shadowsocks), and OS/runtime-specific
-/// constraints (Linux-only fields, `CAP_NET_ADMIN`, kernel congestion modules) are already caught
-/// by the post-write `xray run -test` step. Kept as a named function so a future real constraint
-/// has an obvious home, matching the `validate_kcp_settings` / `validate_finalmask_layers`
-/// call-site convention in `apply_inbound_stream`.
-pub fn validate_sockopt(_draft: &SockoptDraft) -> ConfigModifyResult<()> {
+/// Validates a sockopt draft before writing, refusing exactly what Xray-core refuses when it loads
+/// `SocketConfig`: integers outside `int32` (`mark`, keep-alive, `tcpMaxSeg`, `tcpUserTimeout`,
+/// `tcpWindowClamp`) or `uint32` (`happyEyeballs.interleave` / `maxConcurrentTry`) fail the JSON
+/// decode, and `Build()` refuses a `domainStrategy` / `addressPortStrategy` it does not know
+/// (matched case-insensitively; empty = default). Unknown `tproxy` values are not an error (the
+/// core turns them into `off`), and OS-specific limits (Linux-only fields, `CAP_NET_ADMIN`, kernel
+/// congestion modules) are left to the post-write `xray run -test`.
+pub fn validate_sockopt(draft: &SockoptDraft) -> ConfigModifyResult<()> {
+    let signed: [(&str, Option<i64>); 3] = [
+        ("mark", draft.mark),
+        ("tcpKeepAliveIdle", draft.tcp_keep_alive_idle),
+        ("tcpKeepAliveInterval", draft.tcp_keep_alive_interval),
+    ];
+    for (key, value) in signed {
+        if let Some(value) = value
+            && i32::try_from(value).is_err()
+        {
+            return invalid(format!("streamSettings.sockopt.{key} must fit a 32-bit integer (got {value})"));
+        }
+    }
+    let unsigned: [(&str, Option<u64>); 3] = [
+        ("tcpMaxSeg", draft.tcp_max_seg),
+        ("tcpUserTimeout", draft.tcp_user_timeout),
+        ("tcpWindowClamp", draft.tcp_window_clamp),
+    ];
+    for (key, value) in unsigned {
+        if let Some(value) = value
+            && i32::try_from(value).is_err()
+        {
+            return invalid(format!("streamSettings.sockopt.{key} must fit a 32-bit integer (got {value})"));
+        }
+    }
+    if let Some(happy_eyeballs) = &draft.happy_eyeballs {
+        for (key, value) in [
+            ("interleave", happy_eyeballs.interleave),
+            ("maxConcurrentTry", happy_eyeballs.max_concurrent_try),
+        ] {
+            if let Some(value) = value
+                && u32::try_from(value).is_err()
+            {
+                return invalid(format!(
+                    "streamSettings.sockopt.happyEyeballs.{key} must fit a 32-bit unsigned integer (got {value})"
+                ));
+            }
+        }
+    }
+    for (key, value, known) in [
+        ("domainStrategy", &draft.domain_strategy, DOMAIN_STRATEGIES),
+        ("addressPortStrategy", &draft.address_port_strategy, ADDRESS_PORT_STRATEGIES),
+    ] {
+        if !value.is_empty() && !known.iter().any(|preset| preset.eq_ignore_ascii_case(value)) {
+            return invalid(format!(
+                "streamSettings.sockopt.{key} \"{value}\" is not supported by Xray-core (expected one of {})",
+                known.join(", ")
+            ));
+        }
+    }
     Ok(())
+}
+
+fn invalid(message: String) -> ConfigModifyResult<()> {
+    Err(ConfigModifyError::new(ConfigModifyErrorKind::ValidationFailed, message))
 }
 
 #[cfg(test)]
@@ -488,7 +574,8 @@ mod tests {
         assert_eq!(draft.mark, Some(255));
         assert_eq!(draft.domain_strategy, "UseIPv4");
         assert_eq!(draft.dialer_proxy, "out-1");
-        assert_eq!(draft.tcpcongestion, "bbr");
+        assert_eq!(draft.tcp_congestion, "bbr");
+        assert_eq!(draft.tcp_congestion_key.as_deref(), Some("tcpcongestion"));
         assert_eq!(draft.interface, "eth0");
         assert!(draft.tcp_mptcp);
         assert_eq!(draft.address_port_strategy, "SrvPortOnly");
@@ -560,11 +647,48 @@ mod tests {
     }
 
     #[test]
-    fn validate_accepts_anything() {
+    fn validate_mirrors_socket_config_build() {
         assert!(validate_sockopt(&SockoptDraft::default()).is_ok());
-        let mut draft = SockoptDraft::default();
-        draft.tproxy = "not-a-real-mode".to_owned();
-        assert!(validate_sockopt(&draft).is_ok());
+        assert!(validate_sockopt(&parse_sockopt(&sample_object())).is_ok());
+        let check = |edit: fn(&mut SockoptDraft)| {
+            let mut draft = SockoptDraft::default();
+            edit(&mut draft);
+            validate_sockopt(&draft)
+        };
+        // The core turns an unknown tproxy into "off" and matches strategies case-insensitively.
+        assert!(check(|d| d.tproxy = "not-a-real-mode".to_owned()).is_ok());
+        assert!(check(|d| d.domain_strategy = "forceipv6v4".to_owned()).is_ok());
+        assert!(check(|d| d.address_port_strategy = "NONE".to_owned()).is_ok());
+        assert!(check(|d| d.domain_strategy = "UseIPv5".to_owned()).is_err());
+        assert!(check(|d| d.address_port_strategy = "SrvOnly".to_owned()).is_err());
+        // int32 / uint32 fields.
+        assert!(check(|d| d.mark = Some(i64::from(i32::MIN))).is_ok());
+        assert!(check(|d| d.mark = Some(i64::from(i32::MAX) + 1)).is_err());
+        assert!(check(|d| d.tcp_user_timeout = Some(1 << 31)).is_err());
+        assert!(check(|d| d.tcp_keep_alive_idle = Some(-1)).is_ok());
+        let error = check(|d| {
+            d.happy_eyeballs = Some(HappyEyeballsDraft { interleave: Some(1 << 32), ..Default::default() })
+        })
+        .unwrap_err();
+        assert!(error.message().contains("happyEyeballs.interleave"), "{error}");
+    }
+
+    #[test]
+    fn tcp_congestion_reads_every_spelling_and_writes_canonically() {
+        let legacy = parse_sockopt(json!({"tcpcongestion": "bbr"}).as_object().unwrap());
+        assert_eq!(legacy.tcp_congestion, "bbr");
+        assert!(legacy.extras.is_empty());
+        assert_eq!(sockopt_to_value(&legacy), json!({"tcpcongestion": "bbr"}), "spelling kept");
+
+        let mut fresh = SockoptDraft::default();
+        fresh.tcp_congestion = "cubic".to_owned();
+        assert_eq!(sockopt_to_value(&fresh), json!({"tcpCongestion": "cubic"}));
+
+        // Both spellings: the canonical one is read; the other is preserved untouched.
+        let both = parse_sockopt(json!({"tcpcongestion": "reno", "tcpCongestion": "bbr"}).as_object().unwrap());
+        assert_eq!(both.tcp_congestion, "bbr");
+        assert_eq!(both.tcp_congestion_key, None);
+        assert_eq!(both.extras.get("tcpcongestion"), Some(&json!("reno")));
     }
 
     #[test]

@@ -223,6 +223,25 @@ fn three_outbounds_summaries() {
     assert_eq!(summaries[2].description, "Summary unavailable");
 }
 
+/// Roadmap §4.2: the Loopback row names the tag the traffic re-enters routing with.
+#[test]
+fn loopback_outbound_summary() {
+    let parser = XrayConfigParser::new();
+    let outcome = parser.parse_str(
+        r#"{
+            "outbounds":[
+                {"tag":"a","protocol":"loopback","settings":{"inboundTag":"repeat"}},
+                {"tag":"b","protocol":"loopback","settings":{"inboundTag":"tls","sniffing":{"enabled":true}}},
+                {"tag":"c","protocol":"loopback"}
+            ]
+        }"#,
+    );
+    let summaries = outcome.sections().outbound_summaries();
+    assert_eq!(summaries[0].description, "Re-route as inbound repeat");
+    assert_eq!(summaries[1].description, "Re-route as inbound tls, sniffing");
+    assert_eq!(summaries[2].description, "Re-route (no inboundTag)");
+}
+
 #[test]
 fn outbound_summary_protocol_descriptions_and_send_through() {
     let parser = XrayConfigParser::new();

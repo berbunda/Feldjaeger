@@ -205,6 +205,26 @@ impl FinalMaskChainUse {
     }
 }
 
+/// Which FinalMask chain an outbound's dialer applies (Roadmap §2.6 stage 7.1), or `None` when
+/// that cannot be told for sure.
+///
+/// Verified against `XTLS/Xray-core@main` (`transport/internet/dialer.go`,
+/// `memory_settings.go`): a TCP dial goes through the transport's dialer — RAW, WebSocket, gRPC,
+/// HTTPUpgrade and XHTTP over TCP wrap it with `tcp[]`; mKCP, Hysteria and XHTTP/3 dial UDP and
+/// wrap it with `udp[]` — while a UDP dial goes through the UDP dialer (`udp[]`). VLESS, VMess,
+/// Trojan and Hysteria carry their UDP traffic inside the transport, so only the transport's
+/// chain is used. Other protocols (Freedom, Shadowsocks, WireGuard, …) may dial UDP directly;
+/// no claim is made for them.
+pub fn outbound_finalmask_chain_use(outbound: &Value) -> Option<FinalMaskChainUse> {
+    let protocol = outbound.get("protocol")?.as_str()?.to_ascii_lowercase();
+    if !matches!(protocol.as_str(), "vless" | "vmess" | "trojan" | "hysteria") {
+        return None;
+    }
+    let mut used = FinalMaskChainUse::default();
+    used.mark(transport_finalmask_chain(outbound)?);
+    Some(used)
+}
+
 /// The networks a proxy's `Network()` returns — they decide which workers
 /// `AlwaysOnInboundHandler` creates.
 #[derive(Debug, Default)]

@@ -3,14 +3,17 @@
 //!
 //! Direction-aware: a row is shown only when its key has an effect on that side of the
 //! connection ([`sockopt_field_applies`]); fields without a row still round-trip losslessly
-//! through [`SockoptDraft`]. Outbound-only fields have no widgets yet (Tier 4 §4.2).
+//! through [`SockoptDraft`]. The outbound-only rows (`dialerProxy`, `domainStrategy`, …,
+//! `happyEyeballs`) are the Outbound Shell's "Socket options" section (Roadmap §4.2).
+
+use std::str::FromStr;
 
 use egui::{Color32, RichText, Ui};
 
-use super::{lines_to_vec, resizable_multiline};
+use super::{lines_to_vec, optional_string_combo, resizable_multiline};
 use crate::xray::{
-    INBOUND_ONLY_SOCKOPT_FIELDS, OUTBOUND_ONLY_SOCKOPT_FIELDS, SockoptDraft, StreamDirection, TPROXY_MODES, TcpFastOpenDraft,
-    sockopt_field_applies,
+    ADDRESS_PORT_STRATEGIES, DOMAIN_STRATEGIES, HappyEyeballsDraft, INBOUND_ONLY_SOCKOPT_FIELDS, SockoptDraft,
+    StreamDirection, TCP_CONGESTION_PRESETS, TPROXY_MODES, TcpFastOpenDraft, sockopt_field_applies,
 };
 
 // Field help (Roadmap §3:124).
@@ -46,6 +49,38 @@ const HELP_SOCKOPT_CUSTOM_SOCKOPT: &str =
     "Escape hatch for socket options not exposed as dedicated fields above — a raw JSON array, \
      platform-specific (Linux/Windows/Darwin). Advanced use only.";
 
+// Outbound-only fields (Roadmap §4.2), checked against `infra/conf/transport_sockopt.go` and
+// `transport/internet/dialer.go` of XTLS/Xray-core.
+const HELP_SOCKOPT_DIALER_PROXY: &str =
+    "Tag of another outbound that carries this outbound's connections — the way to chain \
+     outbounds (e.g. through a local Tor SOCKS outbound); it replaced the removed proxySettings. \
+     While it is set, sendThrough and happyEyeballs are not used.";
+const HELP_SOCKOPT_DOMAIN_STRATEGY: &str =
+    "How a domain target is resolved before dialing. AsIs (default): the operating system \
+     resolves it. UseIP*: Xray's DNS, falling back to AsIs when the lookup fails. ForceIP*: \
+     Xray's DNS, the connection fails when the lookup fails. v4 / v6 / v4v6 / v6v4 choose the \
+     address family and its preference.";
+const HELP_SOCKOPT_INTERFACE: &str =
+    "Bind outgoing connections to this network interface (e.g. eth1, wg0). Linux and macOS.";
+const HELP_SOCKOPT_MARK: &str =
+    "SO_MARK of outgoing packets, for policy routing with ip rule / iptables (Linux; needs \
+     CAP_NET_ADMIN). A 32-bit integer.";
+const HELP_SOCKOPT_TCP_CONGESTION: &str =
+    "TCP congestion control algorithm (Linux), e.g. bbr; the kernel must have it available.";
+const HELP_SOCKOPT_TCP_MPTCP: &str = "Multipath TCP (Linux 5.6+); the server has to support it too.";
+const HELP_SOCKOPT_ADDRESS_PORT_STRATEGY: &str =
+    "Look up the real address and/or port of the target in DNS SRV or TXT records before \
+     dialing. Freedom refuses it from Xray-core v26.9.8 (Save is blocked).";
+const HELP_SOCKOPT_HAPPY_EYEBALLS: &str =
+    "RFC 8305 connection racing over the resolved addresses. Used only for TCP, when \
+     domainStrategy makes Xray resolve the domain (UseIP* / ForceIP*), the lookup returns at \
+     least two addresses, tryDelayMs and maxConcurrentTry are above 0, and dialerProxy is empty.";
+const HELP_SOCKOPT_HE_TRY_DELAY: &str = "Milliseconds before the next address is tried; 0 = racing off (default).";
+const HELP_SOCKOPT_HE_PRIORITIZE_IPV6: &str = "Start with an IPv6 address (default: IPv4 first).";
+const HELP_SOCKOPT_HE_INTERLEAVE: &str =
+    "How many addresses of one family are tried before switching to the other; default 1.";
+const HELP_SOCKOPT_HE_MAX_CONCURRENT: &str = "Maximum attempts in flight at once; default 4.";
+
 /// `sockopt.tproxy` combo (documented presets) + free-text fallback. Shared by the Stream tab's
 /// full Sockopt editor and the Tunnel Protocol tab's narrow tproxy field (Roadmap §2.3:88).
 /// Returns true when changed.
@@ -75,28 +110,28 @@ pub(crate) fn tproxy_combo_field(ui: &mut Ui, id_salt: &str, tproxy: &mut String
 
 /// One-line explanation of which `sockopt` fields the editor offers for `direction`.
 pub(crate) fn sockopt_scope_note(direction: StreamDirection) -> String {
-    let outbound_only = OUTBOUND_ONLY_SOCKOPT_FIELDS.join(", ");
     match direction {
-        StreamDirection::Inbound => format!(
-            "streamSettings.sockopt — low-level socket options; applies regardless of transport \
-             method. Outbound-only fields ({outbound_only}) are preserved but not yet editable here."
-        ),
+        StreamDirection::Inbound => "streamSettings.sockopt — low-level socket options; applies \
+             regardless of transport method. Outbound-only fields (dialerProxy, domainStrategy, \
+             mark, …) are preserved but have no effect on a listener and are hidden."
+            .to_owned(),
         StreamDirection::Outbound => format!(
-            "streamSettings.sockopt — low-level socket options; applies regardless of transport \
-             method. Outbound-only fields ({outbound_only}) are preserved but not yet editable \
-             here; inbound-only fields ({}) have no effect on an outbound and are hidden.",
+            "streamSettings.sockopt — options of the socket this outbound dials; applies \
+             regardless of transport method. Only changed keys are written. Inbound-only fields \
+             ({}) have no effect on an outbound and are hidden.",
             INBOUND_ONLY_SOCKOPT_FIELDS.join(", ")
         ),
     }
 }
 
-/// Editor for `streamSettings.sockopt` (Roadmap §2.3:87): the shared fields plus those that
-/// apply to `direction` ([`sockopt_field_applies`]); outbound-only fields stay typed and
-/// round-tripped with no widget yet. Returns true when any field changed.
+/// Editor for `streamSettings.sockopt` (Roadmap §2.3:87, §4.2): the shared fields plus those that
+/// apply to `direction` ([`sockopt_field_applies`]). `dialer_proxy_tags` are offered for
+/// `dialerProxy` (outbound only). Returns true when any field changed.
 pub(crate) fn show_sockopt_edit(
     ui: &mut Ui,
     direction: StreamDirection,
     sockopt: &mut SockoptDraft,
+    dialer_proxy_tags: &[String],
 ) -> bool {
     let applies = |field: &str| sockopt_field_applies(field, direction);
     let mut dirty = false;
@@ -131,6 +166,10 @@ pub(crate) fn show_sockopt_edit(
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
+            if applies("dialerProxy") {
+                dirty |= show_outbound_only_rows(ui, sockopt, dialer_proxy_tags);
+            }
+
             super::field_label(ui, "tproxy", HELP_SOCKOPT_TPROXY);
             if tproxy_combo_field(ui, "sockopt_tproxy", &mut sockopt.tproxy) {
                 dirty = true;
@@ -294,7 +333,131 @@ pub(crate) fn show_sockopt_edit(
         }
     }
 
+    if applies("happyEyeballs") {
+        ui.add_space(6.0);
+        dirty |= show_happy_eyeballs_edit(ui, &mut sockopt.happy_eyeballs);
+    }
+
     dirty
+}
+
+/// Grid rows of the outbound-only fields (inside the editor's grid). Returns true when changed.
+fn show_outbound_only_rows(ui: &mut Ui, sockopt: &mut SockoptDraft, dialer_proxy_tags: &[String]) -> bool {
+    let mut dirty = false;
+    let tags: Vec<&str> = dialer_proxy_tags.iter().map(String::as_str).collect();
+
+    super::field_label(ui, "dialerProxy", HELP_SOCKOPT_DIALER_PROXY);
+    ui.horizontal(|ui| {
+        dirty |= optional_string_combo(ui, "sockopt_dialer_proxy", &mut sockopt.dialer_proxy, &tags);
+    });
+    ui.end_row();
+
+    super::field_label(ui, "domainStrategy", HELP_SOCKOPT_DOMAIN_STRATEGY);
+    ui.horizontal(|ui| {
+        dirty |= optional_string_combo(ui, "sockopt_domain_strategy", &mut sockopt.domain_strategy, DOMAIN_STRATEGIES);
+    });
+    ui.end_row();
+
+    super::field_label(ui, "interface", HELP_SOCKOPT_INTERFACE);
+    dirty |= ui
+        .add(egui::TextEdit::singleline(&mut sockopt.interface).hint_text("optional; e.g. eth1"))
+        .changed();
+    ui.end_row();
+
+    super::field_label(ui, "mark", HELP_SOCKOPT_MARK);
+    dirty |= optional_number_field(ui, &mut sockopt.mark, "optional; integer");
+    ui.end_row();
+
+    super::field_label(ui, "tcpCongestion", HELP_SOCKOPT_TCP_CONGESTION);
+    ui.horizontal(|ui| {
+        dirty |= optional_string_combo(ui, "sockopt_tcp_congestion", &mut sockopt.tcp_congestion, TCP_CONGESTION_PRESETS);
+    });
+    ui.end_row();
+
+    super::field_label(ui, "tcpMptcp", HELP_SOCKOPT_TCP_MPTCP);
+    dirty |= ui.checkbox(&mut sockopt.tcp_mptcp, "").changed();
+    ui.end_row();
+
+    super::field_label(ui, "addressPortStrategy", HELP_SOCKOPT_ADDRESS_PORT_STRATEGY);
+    ui.horizontal(|ui| {
+        dirty |= optional_string_combo(
+            ui,
+            "sockopt_address_port_strategy",
+            &mut sockopt.address_port_strategy,
+            ADDRESS_PORT_STRATEGIES,
+        );
+    });
+    ui.end_row();
+    dirty
+}
+
+/// `sockopt.happyEyeballs` (outbound only): a checkbox for the object, then its four fields.
+/// Absent keys take the core defaults (`tryDelayMs` 0, `interleave` 1, `maxConcurrentTry` 4).
+fn show_happy_eyeballs_edit(ui: &mut Ui, happy_eyeballs: &mut Option<HappyEyeballsDraft>) -> bool {
+    let mut dirty = false;
+    let mut enabled = happy_eyeballs.is_some();
+    ui.horizontal(|ui| {
+        super::help_button(ui, "happyEyeballs", HELP_SOCKOPT_HAPPY_EYEBALLS);
+        if ui.checkbox(&mut enabled, "happyEyeballs").changed() {
+            *happy_eyeballs = enabled.then(HappyEyeballsDraft::default);
+            dirty = true;
+        }
+    });
+    let Some(draft) = happy_eyeballs else {
+        return dirty;
+    };
+    egui::Grid::new("stream_sockopt_happy_eyeballs_grid")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            super::field_label(ui, "tryDelayMs", HELP_SOCKOPT_HE_TRY_DELAY);
+            dirty |= optional_number_field(ui, &mut draft.try_delay_ms, "optional; ms, e.g. 250");
+            ui.end_row();
+
+            super::field_label(ui, "prioritizeIPv6", HELP_SOCKOPT_HE_PRIORITIZE_IPV6);
+            let mut prioritize = draft.prioritize_ipv6.unwrap_or(false);
+            if ui.checkbox(&mut prioritize, "").changed() {
+                draft.prioritize_ipv6 = prioritize.then_some(true);
+                dirty = true;
+            }
+            ui.end_row();
+
+            super::field_label(ui, "interleave", HELP_SOCKOPT_HE_INTERLEAVE);
+            dirty |= optional_number_field(ui, &mut draft.interleave, "optional; default 1");
+            ui.end_row();
+
+            super::field_label(ui, "maxConcurrentTry", HELP_SOCKOPT_HE_MAX_CONCURRENT);
+            dirty |= optional_number_field(ui, &mut draft.max_concurrent_try, "optional; default 4");
+            ui.end_row();
+        });
+    dirty
+}
+
+/// Single-line editor for an optional number: empty = `None`; text that does not parse leaves the
+/// value unchanged. Returns true when the value changed.
+fn optional_number_field<T: Copy + PartialEq + FromStr + ToString>(
+    ui: &mut Ui,
+    value: &mut Option<T>,
+    hint: &str,
+) -> bool {
+    let mut text = value.map(|v| v.to_string()).unwrap_or_default();
+    if !ui.add(egui::TextEdit::singleline(&mut text).hint_text(hint)).changed() {
+        return false;
+    }
+    let trimmed = text.trim();
+    let parsed = if trimmed.is_empty() {
+        None
+    } else {
+        match trimmed.parse::<T>() {
+            Ok(parsed) => Some(parsed),
+            Err(_) => return false,
+        }
+    };
+    if parsed == *value {
+        return false;
+    }
+    *value = parsed;
+    true
 }
 
 /// `sockopt.tcpFastOpen` editor: `bool | number` union — unset / false / true / custom backlog.

@@ -1,11 +1,13 @@
-//! Outbound Protocol tab (Freedom, Blackhole, DNS; Roadmap §2.4:94, §2.4:95, §2.4:96).
+//! Outbound Protocol tab (Freedom, Blackhole, DNS, VLESS, Loopback; Roadmap §2.4:94–96, §2.1:58,
+//! §4.2).
 //!
 //! See <https://xtls.github.io/en/config/outbounds/freedom.html>,
-//! <https://xtls.github.io/en/config/outbounds/blackhole.html>, and
-//! <https://xtls.github.io/en/config/outbounds/dns.html>. Freedom lives in [`freedom`]: its
-//! resolve strategy is `streamSettings.sockopt.domainStrategy` (presets
-//! [`crate::xray::config::stream::DOMAIN_STRATEGIES`]); the undocumented
-//! `settings.domainStrategy` is preserved but no longer edited (Roadmap §2.4:105).
+//! <https://xtls.github.io/en/config/outbounds/blackhole.html>,
+//! <https://xtls.github.io/en/config/outbounds/dns.html> and
+//! <https://xtls.github.io/en/config/outbounds/loopback.html>. Freedom lives in [`freedom`]: its
+//! resolve strategy, `streamSettings.sockopt.domainStrategy`, belongs to the socket options
+//! editor (Roadmap §4.2); the undocumented `settings.domainStrategy` is preserved but no longer
+//! edited (Roadmap §2.4:105). Loopback lives in [`loopback`].
 //!
 //! The DNS outbound has no `streamSettings`/security; it rewrites/filters DNS queries received
 //! from routing via a flat `settings` object plus an ordered `rules[]` list (first match wins).
@@ -16,13 +18,15 @@ use serde_json::{Map, Value};
 use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 
 mod freedom;
+mod loopback;
 mod vless;
 pub use freedom::{
     FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS, FREEDOM_FINAL_RULE_NETWORKS,
     FREEDOM_LEGACY_STRATEGY_KEYS, FREEDOM_PROXY_PROTOCOL_VERSIONS, FreedomFinalRuleDraft,
     FreedomSettingsDraft, LegacyDomainStrategyMigration,
 };
-pub use vless::VlessOutboundSettings;
+pub use loopback::{LoopbackRouting, LoopbackSettingsDraft, loopback_routing};
+pub use vless::{VlessOutboundSettings, legacy_vnext_blocker};
 
 /// Documented `settings.noises[].type` values (free text also accepted).
 pub const FREEDOM_NOISE_TYPES: &[&str] = &["rand", "str", "hex", "base64"];
@@ -46,7 +50,7 @@ pub const DNS_REWRITE_NETWORKS: &[&str] = &["tcp", "udp"];
 pub fn is_shell_editable_protocol(protocol: &str) -> bool {
     matches!(
         protocol.trim().to_ascii_lowercase().as_str(),
-        "freedom" | "blackhole" | "dns" | "vless"
+        "freedom" | "blackhole" | "dns" | "vless" | "loopback"
     )
 }
 
@@ -97,8 +101,7 @@ pub struct DnsRuleDraft {
 /// Outbound Protocol-tab draft (non-General settings).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboundSettingsDraft {
-    /// Freedom: direct/passthrough outbound (Protocol tab plus
-    /// `streamSettings.sockopt.domainStrategy`, see [`freedom`]).
+    /// Freedom: direct/passthrough outbound (see [`freedom`]).
     Freedom(FreedomSettingsDraft),
     /// Blackhole: drops all traffic (optionally with a fake response before close).
     Blackhole {
@@ -129,6 +132,9 @@ pub enum OutboundSettingsDraft {
     /// VLESS: bridge side of the VLESS-native reverse proxy, or a plain forward outbound
     /// (Roadmap §2.1:58). Flat `settings` form only — see [`vless::is_legacy_vnext_form`].
     Vless(VlessOutboundSettings),
+    /// Loopback: re-injects traffic into routing as if it came from `inboundTag` (Roadmap §4.2,
+    /// see [`loopback`]).
+    Loopback(LoopbackSettingsDraft),
 }
 
 impl OutboundSettingsDraft {
@@ -164,12 +170,18 @@ impl OutboundSettingsDraft {
             Self::Blackhole { .. } => "blackhole",
             Self::Dns { .. } => "dns",
             Self::Vless(_) => "vless",
+            Self::Loopback(_) => "loopback",
         }
     }
 
     /// Default for Add VLESS.
     pub fn vless_default() -> Self {
         Self::Vless(VlessOutboundSettings::default_draft())
+    }
+
+    /// Default for Add Loopback.
+    pub fn loopback_default() -> Self {
+        Self::Loopback(LoopbackSettingsDraft::default())
     }
 }
 
@@ -185,6 +197,7 @@ pub fn parse_outbound_settings(outbound: &Value) -> Option<OutboundSettingsDraft
         "blackhole" => Some(parse_blackhole_settings(outbound)),
         "dns" => Some(parse_dns_settings(outbound)),
         "vless" => vless::parse_vless_outbound_settings(outbound).map(OutboundSettingsDraft::Vless),
+        "loopback" => Some(OutboundSettingsDraft::Loopback(loopback::parse_loopback_settings(outbound))),
         _ => None,
     }
 }
@@ -300,8 +313,7 @@ fn numeric_or_string_field(value: Option<&Value>) -> String {
 
 /// Applies a Protocol draft into `settings` **in place** — only the known top-level keys are
 /// touched, so unrelated `settings` keys (and outbound siblings like `mux`) are preserved
-/// untouched. Freedom additionally owns `streamSettings.sockopt.domainStrategy` (that one key
-/// only).
+/// untouched. `streamSettings` belongs to the stream draft.
 pub fn apply_outbound_settings(
     outbound: &mut Value,
     draft: &OutboundSettingsDraft,
@@ -323,6 +335,7 @@ pub fn apply_outbound_settings(
         OutboundSettingsDraft::Vless(settings) => {
             vless::apply_vless_outbound_settings(outbound, settings)
         }
+        OutboundSettingsDraft::Loopback(settings) => loopback::apply_loopback_settings(outbound, settings),
     }
 }
 

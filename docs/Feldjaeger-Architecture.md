@@ -2128,7 +2128,7 @@ WARP+ license keys, Zero Trust org tokens/MDM, MASQUE, system WARP client, auto 
 ## 32.1	Цель и границы
 - В scope (shipped): VLESS, Trojan, Hysteria CRUD; GUI Inbounds → Users с dispatch (`UsersProtocolUi`: Vless / Trojan / Hysteria).
 - Shell без Users (shipped): Tunnel — General + Protocol + Sniffing; wire только `protocol: "tunnel"`; legacy `dokodemo-door` read-only.
-- Вне scope / backlog: VMess/HTTP/SOCKS; Shadowsocks inbound editor (G11 predicate only); subscription/limits/expiry; schema engine.
+- Вне scope / backlog: subscription/limits/expiry; schema engine. Retired (Roadmap §4.1, 2026-10-06): редакторы VMess/HTTP/SOCKS/`mixed`/Shadowsocks/WireGuard inbound (G11 — только predicate); для Socks/HTTP — предупреждение «open proxy» (§96).
 
 Capability gate (клиенты): `InboundClientProtocol::mutate_enabled()` — Vless | Trojan | Hysteria.  
 Отдельно: `shell_edit_enabled()` — VLESS | Trojan | Hysteria | Tunnel (Tunnel: Stream/Security/Users tab disabled; matrix tcp×none; Shell Save не перезаписывает `streamSettings`/`security` на диске).
@@ -2262,7 +2262,7 @@ GUI → ApplicationService (InboundShellDrafts + InboundRef)
   - При выборе WS / mKCP / XHTTP в GUI: auto-coerce security — Trojan → `tls` (WS/mKCP); VLESS Reality→WS/mKCP → `none` (TLS сохраняется) — `coerce_security_mode_for_transport`; выбор mKCP / XHTTP сбрасывает draft на documented defaults
   - Protocol Hysteria `settings.version = 2`; Add defaults TLS + hysteria network
   - Tunnel Protocol tab: `allowedNetwork`, `rewriteAddress`, `rewritePort`, `followRedirect`, `sockopt.tproxy` (combo + free text; Roadmap §2.3:88), `userLevel`, `portMap` editor (target forms `host:port` / `:port` / `host:`); Add defaults `tcp` / `localhost` / empty map
-  - Gates: G7 retired; Save order G9→G10→G6→G5→G1→G2→G8→G12→G4→G3; G11 predicate+tests (Shadowsocks tcp-only; SS editor deferred Tier 4)
+  - Gates: G7 retired; Save order G9→G10→G6→G5→G1→G2→G8→G12→G4→G3; G11 predicate+tests (Shadowsocks tcp-only; SS editor retired, Roadmap §4.1)
   - Share: Reality + TLS для VLESS/Trojan; WS / mKCP — только TLS (`type=ws` path/host; `type=kcp`; `security=none` / Reality → отказ); XHTTP — `type=xhttp` path + optional host/mode + URL-encoded `extra=` (JSON всех advanced кроме host/path/mode); minimal `hy2://auth@host:port` (+ optional `sni`/`insecure`); Tunnel — без Share URI
   - Hysteria Users CRUD + protocol dispatch в Users tab (2026-08-01); Hysteria shell edit GUI разблокирован (G7 retired)
   - Delete inbound для любого protocol (unsupported incl.); Edit/Duplicate — только `shell_edit_enabled` (incl. Tunnel); hard-block если tag в `routing.rules[].inboundTag`; Delete-диалог показывает список ссылающихся routing-правил заранее и блокирует кнопку, пока они не убраны (Roadmap §3:117)
@@ -2273,7 +2273,7 @@ GUI → ApplicationService (InboundShellDrafts + InboundRef)
   - Sockopt editor (Roadmap §2.3:87) — typed `streamSettings.sockopt` для VLESS/Trojan/Hysteria (method-independent); GUI-редактируемые поля: `tproxy`/`tcpFastOpen`/`acceptProxyProtocol`/`V6Only`/`tcpMaxSeg`/`tcpKeepAliveIdle`/`tcpKeepAliveInterval`/`tcpUserTimeout`/`tcpWindowClamp`/`trustedXForwardedFor`/`customSockopt` (raw JSON); read-only summary на Stream tab в view-режиме; outbound-only поля (`mark`/`domainStrategy`/`dialerProxy`/`tcpcongestion`/`interface`/`tcpMptcp`/`addressPortStrategy`/`happyEyeballs`) типизированы в `SockoptDraft`, но без GUI-виджетов и без нового CompatibilityGate — нет ни одного пересечения с G1–G12
 - Вне scope / backlog:
   - Outbound sockopt GUI — `SockoptDraft`/`parse_sockopt`/`sockopt_to_value` уже общие для inbound/outbound streamSettings; Freedom Outbound Shell теперь существует (§35) но не редактирует `streamSettings` вовсе (только `settings.fragment`/`noises` — вне scope §2.4:94); GUI-редактор для outbound sockopt по-прежнему backlog
-  - Wave B: VMess + G11 live для Shadowsocks inbound editor (Tier 4)
+  - Wave B (VMess + G11 live для Shadowsocks inbound editor) — retired 2026-10-06 (Roadmap §4.1)
   - Wave C1 remainder: httpupgrade; multi-level nested `downloadSettings` recursion
   - Wave D remainder: outbound Delete остаётся чистый hard-block без проактивного предупреждения (routing `outboundTag`/`balancer.selector`); inbound Delete уже показывает список ссылающихся routing-правил заранее и блокирует кнопку, пока они не убраны (Roadmap §3:117, `inbound_tag_reference_preview` в Delete-диалоге)
   - Также: смена `protocol`; ACME; миграция `dokodemo-door` → `tunnel`; structured `echSockopt` editor (сейчас raw JSON per-field, но теперь также доступен через whole-object Raw JSON tab — §3:125) (Roadmap §2–3). Users-tab JSON Preview закрыт (Roadmap §3:120) — см. §34.8. Full Share URI query parity закрыт (Roadmap §3:121) — см. §34.9. Share URI QR code UI закрыт (Roadmap §3:122) — см. §34.9. Pop-up help / field documentation overlays закрыт для Inbound Shell editor (Roadmap §3:124) — см. §34.10; остальные страницы приложения не покрыты. Raw JSON editor (whole inbound/outbound) закрыт (Roadmap §3:125) — см. §34.11 / §35.4.
@@ -2410,7 +2410,7 @@ Save / Add / VLESS client mutate — hard-block через `first_failing_gate`.
 | G8 | Reality privateKey / serverNames / shortIds | Save |
 | G9 | Hysteria protocol ⇒ transport hysteria | Save |
 | G10 | Hysteria protocol/transport ⇒ security tls | Save |
-| G11 | Shadowsocks ⇒ tcp/raw only | predicate + tests; SS inbound editor Tier 4 / Wave B |
+| G11 | Shadowsocks ⇒ tcp/raw only | predicate + tests; SS inbound editor retired (Roadmap §4.1, 2026-10-06) — не подключается |
 | G12 | TLS ⇒ каждый `certificates[]` entry: file-пути или PEM (`usage=verify` → key optional); массив non-empty | Save (local); remote SFTP existence — отдельный post-G12 probe |
 
 Dual API: wire-string matrix в `compatibility/matrix.rs` (`ws` → `websocket`, `kcp` → `mkcp`); typed helpers:
@@ -8471,3 +8471,658 @@ finalmask клиента); `obfs` не `salamander` (нестандартный 
 `vless_fm_becomes_server_chains`, `hysteria_fm_replaces_obfs_and_drops_tcp` (`inbound_import`;
 расширен `hysteria_obfs_password_produces_no_warning_itself`). Итог: **1307 passed / 0 failed**,
 clippy lib 66 (без изменений).
+
+# 94	Outbound `streamSettings`: транспорт и клиентский security (Roadmap §4.2) (0.5.41-0)
+
+## 94.1	Почему сейчас
+
+Пункт 7.1 (Outbound FinalMask, §95) прямо зависел от этого пункта: у Outbound Shell не было ни
+вкладки Stream, ни Security, поэтому FinalMask и `quicParams` было некуда встроить. По решению
+пользователя сначала реализован §4.2 «Outbound `streamSettings` editor», затем 7.1 на нём.
+
+## 94.2	Клиентская схема (сверено с `XTLS/Xray-core@main`, 7da5dae)
+
+Один `StreamConfig` обслуживает обе стороны (`infra/conf/transport_internet.go`,
+`transport_method.go`, `transport_security.go`); клиент читает другие поля, чем сервер:
+
+| Транспорт | Клиентские поля | Проверки `Build()` |
+| --------- | --------------- | ------------------ |
+| RAW | только legacy `header` (HTTP-обфускация) — хранится как есть; `acceptProxyProtocol` серверный | — |
+| XHTTP | общая модель `XhttpStreamSettings` (`host`/`path`/`mode`, headers, padding/placement, `xmux`, `downloadSettings`) | как у inbound |
+| gRPC | `authority`, `serviceName`, `multiMode`, `user_agent`, `idle_timeout`, `health_check_timeout`, `permit_without_stream`, `initial_windows_size` | `int32` |
+| WebSocket | `host`, `path` (`?ed=`), `headers`, `heartbeatPeriod` | `uint32`; `Host` в `headers` — deprecated (переносится в `host`) |
+| HTTPUpgrade | `host`, `path` (`?ed=`), `headers` | `Host` в `headers` — ошибка |
+| mKCP | общая модель `KcpStreamSettings` | как у inbound (0.6) |
+| Hysteria | `version`, `auth`, `udpIdleTimeout` (`masquerade` серверный) | `version` = 2, `udpIdleTimeout` 0 или 2–600 |
+
+Security клиента:
+
+- **TLS** (`TlsClientDraft`): `serverName`, `alpn` (`StringList`, форма на диске сохраняется),
+  `fingerprint` (полный список uTLS из `transport/internet/tls/tls.go`, регистр не важен;
+  пусто = `chrome`), `pinnedPeerCertSha256` (через запятую, hex с `:`, по 32 байта),
+  `verifyPeerCertByName`, `echConfigList`, `minVersion`/`maxVersion`, `cipherSuites`,
+  `curvePreferences`, `disableSystemRoot`, `enableSessionResumption`, `masterKeyLog`.
+  `certificates` (CA `usage: verify`), `echSockopt` и серверные ключи — в `extras`, не
+  редактируются. `allowInsecure: true` с v26.1.31 (2c92339) — removed feature, конфиг не
+  загружается: предупреждение + кнопка «Remove allowInsecure», сам редактор его не ставит.
+- **REALITY** (`RealityClientDraft`) — клиентская ветка `REALITYConfig.Build()` (нет
+  `target`/`dest`): `fingerprint` известный и не `unsafe`/`hellogolang`; `publicKey` (алиас
+  `password`, при наличии побеждает — ключ на диске сохраняется) — base64url без паддинга,
+  32 байта; `shortId` ≤ 16 hex, чётная длина (пустой допустим); `spiderX` начинается с `/`;
+  `mldsa65Verify` — 1952 байта; непустые серверные `serverNames`/`shortIds` — ошибка.
+- Матрица: REALITY только RAW/XHTTP/gRPC, Hysteria только TLS (`transport_security_allowed`);
+  при смене транспорта security приводится `coerce_security_mode_for_transport`.
+
+Приоритеты ключей, как в ядре: `method` важнее `network` (у inbound исторически наоборот),
+`rawSettings` важнее `tcpSettings`, `xhttpSettings` важнее `splithttpSettings`. Написание на диске
+(`raw`/`ws`/`splithttp`, `method`, алиас `*Settings`) сохраняется, пока транспорт не сменён.
+`masque`/`xdrive`/неизвестный транспорт и неизвестный `security` — только для чтения, не
+переписываются.
+
+## 94.3	Запись
+
+- `streamSettings` пишется **только после правки** Stream/Security (`OutboundStreamDraft::write`):
+  Save, затронувший лишь Protocol, оставляет `streamSettings` байт в байт, а новый outbound без
+  правок — без `streamSettings` (умолчание ядра RAW/none).
+- При смене транспорта удаляются `*Settings` прочих транспортов: ядро собирает **все**
+  присутствующие объекты, и чужой невалидный объект ломает загрузку. Без смены — не трогаются.
+- `sockopt`, `finalmask` (до §95), `address`/`port` и неизвестные ключи `streamSettings` не
+  трогаются никогда.
+- Всё проверяется до первой мутации; ошибка — ничего не изменено.
+
+## 94.4	Найдено паритет-тестом: plaintext VLESS/Trojan
+
+Паритет-тест с локальным `xray run -test` (Xray 26.9.30) выявил правило ядра, о котором Roadmap
+не знал: с v26.7.11 (XTLS/Xray-core#6303, `validateOutboundTransportSecurity` в
+`infra/conf/xray.go`) VLESS/Trojan outbound без TLS/REALITY (VLESS: и без `encryption` ≠
+`none`) к **публичному** адресу не загружается. «Приватный» — фиксированные списки
+`common/geodata/consts.go`: 18 IP-диапазонов и домены `lan`, `localdomain`, `example`, `invalid`,
+`localhost`, `test`, `local`, `home.arpa`, `internal` с поддоменами плюс любое имя без точек.
+Адрес и `encryption` читаются как в `Build()`: плоская форма, иначе `vnext[0]`/`servers[0]`.
+Реализовано точно (`compatibility/plaintext_outbound.rs`) как версионно-зависимое предупреждение
+`PlaintextOutboundForbidden` (`CoreFeature::PlaintextOutboundForbidden`, v26.7.11): Save не
+блокируется (на старом ядре это валидный конфиг), пост-проверка `xray run -test` остаётся.
+
+## 94.5	GUI и сервис
+
+- `gui/pages/outbound_stream.rs` (новый): секции «Stream (streamSettings)» и «Security» в Outbound
+  Shell для протоколов с транспортом (`outbound_protocol_has_transport`; из Shell-протоколов
+  сейчас только VLESS). Транспорты по протоколу (`outbound_transports_for_protocol`: Hysteria —
+  только свой, прочие — все, кроме Hysteria). Все предупреждения outbound показаны здесь же.
+  Подсказка Vision: `xtls-rprx-vision` работает только поверх RAW с TLS/REALITY или с VLESS
+  Encryption (`proxy/vless/outbound`).
+- Из `inbounds.rs` вынесены общие `show_xhttp_settings_edit` и `show_kcp_settings_edit` (с
+  префиксом id); `string_tag_multi_select` стал `pub(super)`. Поведение inbound не менялось.
+- `OutboundEditorSession.stream`, `AddOutboundShellRequest.stream` / `UpdateOutboundShellRequest.stream`;
+  `add_outbound_shell` / `update_outbound_shell` вызывают `apply_outbound_stream`; предпросмотр
+  diff и предупреждения считаются по тому же JSON.
+
+## 94.6	Код и итог
+
+| Область | Путь |
+| ------- | ---- |
+| Модель транспорта | `xray/config/outbound_stream/mod.rs` |
+| Клиентский security | `xray/config/outbound_stream/security.rs` |
+| Паритет с ядром | `xray/config/outbound_stream/parity.rs` |
+| Plaintext-правило | `xray/config/compatibility/plaintext_outbound.rs`, `core_version.rs` |
+| Предупреждения | `xray/config/compatibility/warnings.rs` |
+| Общие хелперы | `inbound_stream/mod.rs` (`kcp_settings_to_object`, `parse_kcp`), `inbound_security/mod.rs` (`insert_string_list`) |
+| Запись | `xray/config/modify.rs` |
+| Сервис | `app/outbound_ops.rs`, `app/service.rs` |
+| GUI | `gui/pages/outbound_stream.rs`, `gui/pages/outbounds.rs`, `gui/pages/inbounds.rs` |
+
+Тесты (+20): 10 транспортных и 5 security (`outbound_stream`), 2 plaintext, 1 предупреждений,
+`update_vless_outbound_shell_writes_stream_only_when_changed` (`modify_tests`), паритет
+`parity_with_xray_run_test` — 20 случаев валидации + 8 случаев plaintext-правила, все совпали
+с Xray 26.9.30 (без локального Xray проверяется только сторона Feldjäger). Итог: **1327 passed /
+0 failed**, clippy lib 66 (без изменений).
+
+# 95	FinalMask — этап 7.1: Outbound FinalMask и `quicParams` (0.5.42-0)
+
+## 95.1	Анализ полноты пункта
+
+Пункт был не готов к реализации: условие «после §4.2 Outbound `streamSettings`» не выполнено (у
+Outbound Shell не было вкладок Stream/Security, Hysteria outbound Shell нет). По решению
+пользователя сначала сделан §4.2 (§94). Остальное:
+
+- Подсказки client-only полей (`xicmp` без `ips` = адрес дозвона, `dgram`; `xdns.resolvers`;
+  заметки `fragment` по стороне; `udphop` client-only) уже были direction-aware с этапов 0.4,
+  1.x, 2.5 — здесь они впервые работают с `StreamDirection::Outbound`.
+- `quicParams` для Hysteria outbound реализован в модели и GUI, но открыть Hysteria outbound в
+  Shell пока нельзя (пункт §4.2 «Outbounds Shell: Hysteria»); для VLESS доступен XHTTP/3.
+- Пункт 1.6 (`xdns`, XTLS/Xray-core#7090) по-прежнему открыт; форма `xdns` — как в этапе 1.3.
+- Freedom `fragment`/`noises` не затронуты.
+
+## 95.2	Модель
+
+`OutboundStreamDraft` получил `finalmask_tcp`/`finalmask_udp`/`quic_params` и флаги
+`write_finalmask_tcp`/`write_finalmask_udp`/`write_quic_params` — каждая часть пишется только
+после правки, прочие ключи `finalmask` сохраняются. `finalmask` не-объект (`finalmask_foreign`) и
+цепочка, которую типизированная модель не читает (`finalmask_unreadable`), не перезаписываются
+никогда — редактор такой цепочки заменён заметкой.
+
+- Слои проверяются `validate_finalmask_layers(…, StreamDirection::Outbound)` — client-only
+  `udphop` здесь разрешён.
+- `quic_transport()`: Hysteria или XHTTP + TLS + `alpn` ровно `["h3"]`; `quicParams` проверяется
+  `validate_quic_params_for_transport` (на XHTTP/3 `brutal` запрещён), без QUIC-транспорта —
+  общей `validate_quic_params`. После сборки — `validate_stream_quic_params` на итоговом
+  `streamSettings` (ловит и сохранённый `quicParams`, ставший неверным после смены ALPN).
+- `dial_chain()`: `udp` у mKCP/Hysteria/XHTTP/3, иначе `tcp`.
+- `migrate_legacy_udp_hop()`: удалённый `quicParams.udpHop` → слой `udphop` в `udp[0]` (общий
+  `migrate_legacy_udp_hop` этапа 3.2, сторона Outbound); сервис
+  `migrate_outbound_legacy_udp_hop` отказывает при ядре < v26.9.9 (там старый ключ ещё работает)
+  и обновляет diff.
+
+## 95.3	Предупреждения
+
+`outbound_warnings(outbound, core)` получил версию ядра (Discovery) и FinalMask-часть:
+
+- `OutboundFinalMaskChainUnused` — цепочка, через которую outbound не дозванивается. Сверено с
+  `transport/internet/dialer.go` и `memory_settings.go`: TCP-дозвон идёт через диалер
+  транспорта (RAW/WS/gRPC/HTTPUpgrade/XHTTP-TCP — `tcp[]`; mKCP/Hysteria/XHTTP/3 — `udp[]`),
+  UDP-дозвон — через UDP-диалер (`udp[]`). Утверждение делается только для VLESS/VMess/Trojan/
+  Hysteria (UDP — внутри транспорта); Freedom, Shadowsocks, WireGuard могут звонить по UDP
+  напрямую — молчим.
+- общие проверки слоёв и версий `finalmask_warnings(…, Outbound, core)` (`udphop.sockopt`,
+  `xdns`/`xmc` legacy, «требует более нового ядра», `quicParams.udpHop`);
+- `QuicParamsUnusedTransport` — `quicParams` вне QUIC-транспорта.
+
+## 95.4	GUI
+
+В `gui/pages/outbound_stream.rs` после Security — общие `show_quic_params_edit` (только при
+QUIC-транспорте; у XHTTP без h3 — подсказка) и `show_finalmask_edit` с `StreamDirection::Outbound`
+(у Hysteria цепочка `tcp` скрыта, пока пуста). Кнопка «Migrate udpHop to a udphop layer» под
+`quicParams`; комментарий `show_legacy_udp_hop` обновлён.
+
+## 95.5	Итог
+
+Тесты (+5): `finalmask_chain_written_only_when_edited_with_client_layers`,
+`foreign_or_unreadable_finalmask_is_never_overwritten`, `quic_params_follow_the_quic_transport`,
+`legacy_udp_hop_becomes_a_udphop_layer` (`outbound_stream`),
+`flags_outbound_finalmask_by_dial_chain` (`warnings`); паритет §94 включает `mkcp + udphop`,
+Hysteria с `quicParams` и XHTTP/3 + `brutal` (runtime-отказ, `-test` пропускает). Итог: **1332
+passed / 0 failed**, clippy lib 66 (без изменений).
+
+Найдено вне пункта (в Roadmap): inbound TLS-редактор по-прежнему позволяет поставить
+`allowInsecure` (ядро v26.1.31+ отвергает его и на сервере).
+
+
+# 96	Retired-протоколы inbound и предупреждение «open proxy» (Roadmap §4.1) (0.5.43-0)
+
+## 96.1	Решение по Tier 4.1
+
+По оценке пользователя и официальной документации Xray (`config/transport.md`, примечание [2];
+`inbounds/socks.md`; `outbounds/wireguard.md`) редакторы Shadowsocks / VMess / HTTP / Socks /
+`mixed` / WireGuard inbound переведены в **retired**: апстрим прямо называет эти протоколы
+непригодными для обхода блокировок (классифицируемый трафик, нет TLS-вида, фиксированная
+UDP-сигнатура WireGuard, открытый текст Socks/HTTP). Поддержка таких inbound остаётся на уровне
+«чтение + Raw JSON (§3:125) + Delete + Backups». Masque inbound отложен до финализации протокола в
+Xray-core (нет в таблице `transport.md`). Predicate G11 остаётся в коде неподключённым — волна SS,
+ради которой он делался, отменена; комментарии в `compatibility/mod.rs` обновлены.
+
+Вместо редакторов добавлено одно предупреждение там, где эти протоколы опасны для самого сервера:
+Socks/HTTP без аутентификации на внешнем адресе — открытый прокси, за который хостеры блокируют VPS.
+
+## 96.2	Модель (`compatibility/open_proxy.rs`)
+
+`open_proxy_location(inbound) -> Option<String>` — JSON-путь отсутствующей аутентификации.
+Сверено с `XTLS/Xray-core@main`:
+
+- `SocksServerConfig.Build()` (`socks`, алиас `mixed`): `switch` по `auth` без приведения регистра —
+  всё, кроме точного `"password"` (отсутствует, `"noauth"`, `"Password"`), даёт `NO_AUTH`, сколько бы
+  `accounts` ни было → путь `settings.auth`;
+- `HTTPServerConfig.Build()`: ненулевой `accounts` заменяет `users` (пустой `[]` — тоже), пустой
+  итог = без аутентификации → `settings.accounts` / `settings.users`; не-массив ядро не
+  декодирует — утверждения нет.
+
+«Внешний» `listen`: отсутствует / `null` / пустой (по умолчанию ядро слушает `0.0.0.0`), unspecified
+(`0.0.0.0`, `::`) или публичный IP (в т.ч. `[v6]` и `ip:port`). Loopback и частные диапазоны — LAN /
+локальное использование, которое документация и описывает; для них переиспользован
+`plaintext_outbound::is_private_ip` (список `GetPrivateIPMatcher()` из `common/geodata/consts.go`,
+§94) — поэтому unspecified проверяется раньше: `0.0.0.0/8` и `::/127` входят в этот список. Unix-сокет
+(`/…`, абстрактный `@…`) — не сетевой слушатель; прочие не-IP строки — утверждения нет.
+
+`warnings.rs`: `CompatibilityWarningId::OpenProxyInbound`, новый `WarningSeverity::{Caution,
+Danger}` и `CompatibilityWarningId::severity()` (Danger пока только у open proxy). Проверка в
+`inbound_warnings` выполняется **до** раннего выхода по отсутствию `streamSettings` — у Socks/HTTP
+его обычно нет. `with_warning_suffix` (статус-бар — простой текст, знак не нарисовать) оборачивает
+danger-предупреждение в `!!! … !!!`. `WarningSeverity` реэкспортирован из `xray`.
+
+## 96.3	GUI
+
+`gui/pages/mod.rs`: `danger_sign(ui, side)` — знак 1.33 «Прочие опасности» векторно через
+`egui::Painter` (как `qr_code`/`sparkline`, без растрового ассета и новой зависимости): красный
+треугольник, белое поле — тот же треугольник, сжатый к центроиду так, что рамка одинаковой ширины
+со всех сторон, чёрный восклицательный знак (штрих + точка); `danger_warning(ui, text)` — знак +
+жирный красный текст.
+
+`inbounds.rs`: danger-предупреждения показываются **над вкладками** detail pane — на любой вкладке и
+для протоколов без Stream-таба (Socks/HTTP не shell-редактируемы); Stream-таб их отфильтровывает,
+чтобы не дублировать. В таблице Inbounds у тега строки с danger-предупреждением — маленький знак с
+текстом предупреждения во всплывающей подсказке. `show_compatibility_warnings` (inbound) и
+`show_outbound_compatibility_warnings` различают уровень.
+
+## 96.4	Итог
+
+Тесты (+8): `open_proxy` — 6 (Socks/`mixed` по умолчанию, регистр `auth`, `accounts` заменяет
+`users`, локальные/частные/сокетные `listen`, wildcard/публичные `listen`, прочие протоколы);
+`warnings` — 2 (danger без `streamSettings`, `!!!` в суффиксе статуса). Итог: **1340 passed / 0
+failed**, clippy lib 66 (без изменений). Визуально знак в запущенном приложении не проверялся.
+
+# 97	Outbound `proxySettings` удалён в ядре: миграция в `sockopt.dialerProxy` (Roadmap §4.2) (0.5.43-1)
+
+## 97.1	Проблема
+
+XTLS/Xray-core#6058 (3e2f040, 2026-09-08, первый релиз — v26.9.8) начинает
+`OutboundDetourConfig.Build()` (`infra/conf/xray.go`) с проверки `if c.ProxySettings != nil` →
+`errors.PrintRemovedFeatureError` («outbound "proxySettings"» → «"streamSettings.sockopt.dialerProxy"»).
+Это касается **любого** outbound, а не только Freedom,
+как ошибочно было записано раньше (Roadmap §4.2, справка о переносе Freedom `domainStrategy`).
+Поле объявлено как `*json.RawMessage`: `null` декодируется в nil и проходит, любое другое значение
+(даже `{}` или строка) — «removed feature», и Xray не стартует.
+
+General-вкладка Outbound Shell (`outbounds.rs`) при этом предлагала чекбокс «proxySettings (chain
+through another outbound)» для всех протоколов с предупреждением только у Freedom — галка на
+VLESS-outbound и Save давали конфиг, который ядро ≥ v26.9.8 не загружает. Вдобавок
+`apply_outbound_general` удалял `proxySettings` при `proxy_settings: None`, а `parse` возвращал
+`None` для объекта с пустым `tag` — обычный Save молча стирал такой ключ (нарушение
+`rules.md`: удаление только по явному действию пользователя).
+
+Старая семантика ядра (до #6058): `transportLayer: true` — ядро само подставляло `tag` в
+`sockopt.dialerProxy`; `false` — proxy-layer chaining (`senderSettings.ProxySettings`). Апстрим
+называет `dialerProxy` заменой для обоих случаев; для первого миграция точная.
+
+## 97.2	Модель (`outbound_edit/mod.rs`)
+
+`ProxySettingsDraft` удалён — `proxySettings` больше никогда не пишется. Вместо него:
+
+- `LegacyProxySettings { tag, transport_layer, dialer_proxy }` — что лежит на диске (только для
+  показа и выбора исхода миграции); `OutboundGeneral::legacy_proxy_settings` — `Some` для любого
+  не-`null` значения, в точности как в ядре;
+- `OutboundGeneral::migrate_proxy_settings: bool` + метод `migrate_proxy_settings() ->
+  ProxySettingsMigration` (`Moved { tag }` / `DialerProxyWins { legacy, dialer_proxy }` / `Removed`
+  — тега нет / `NothingToMigrate`) — по образцу Freedom `migrate_legacy_domain_strategy` (§2.4):
+  меняется только черновик, запись — на Save;
+- `apply_outbound_general` трогает `proxySettings` только при запланированной миграции: удаляет
+  ключ и, если `streamSettings.sockopt.dialerProxy` пуст **в записываемом значении** (а не в
+  снимке черновика), пишет туда тег, создавая контейнеры. Существующий `dialerProxy` побеждает.
+  Не-объектный `streamSettings`/`sockopt` — ошибка валидации. Без миграции `proxySettings`
+  сохраняется байт в байт.
+
+`OutboundGeneral` получил `Default`; конструкторы в `service.rs` / `modify_tests.rs` обновлены.
+
+## 97.3	Предупреждение и версия ядра
+
+`CoreFeature::OutboundProxySettingsRemoved` (v26.9.8, #6058) — в таблице `CORE_FEATURES` между
+`XmcProfilesSchema` и `UdpHopUdpMask`. `CompatibilityWarningId::OutboundProxySettingsRemoved`
+(уровень Caution, как у прочих «rejected by Xray-core»: сервер не в опасности, конфиг просто не
+загружается), путь `proxySettings`; `outbound_warnings` выдаёт его первым, для любого протокола,
+только когда ядро неизвестно или ≥ v26.9.8 (на более старых ключ работает). Предупреждение видно
+и в таблице Outbounds для не-shell протоколов (VMess, Trojan, …) — там исправление через Raw JSON.
+
+## 97.4	GUI и сервис
+
+`ApplicationService::migrate_outbound_proxy_settings()` — зеркало
+`migrate_outbound_legacy_domain_strategy`: миграция черновика, сброс и пересчёт diff-preview,
+строка статуса по исходу. Кнопка доступна на любом ядре — `dialerProxy` понимают и старые.
+
+`outbounds.rs::show_outbound_general_edit`: чекбокс и поля `proxySettings` удалены. При наличии
+ключа на диске — строка «proxySettings (on disk): tag …[, transportLayer]», предупреждение и кнопка
+«Migrate to sockopt.dialerProxy»; после нажатия — «Migration pending». Чтобы предупреждение не
+дублировалось, Freedom-секция и Stream-секция (`outbound_stream.rs`) берут
+`outbound_editor_warnings_below_general` — все предупреждения, кроме этого.
+
+## 97.5	Итог
+
+Тесты: `outbound_edit` — 10 (было 6; 4 теста записи `proxySettings` заменены 8 тестами
+чтения/миграции: любая не-`null` форма, Save без миграции байт в байт, перенос с сохранением
+соседних ключей `sockopt`/`streamSettings`, создание контейнеров, `dialerProxy` побеждает,
+удаление без тега, повторная миграция, не-объектный `sockopt`); `warnings` +1 (все протоколы,
+`{}`/`null`, граница v26.9.8). Итог: **1345 passed / 0 failed**, clippy lib 66 (без изменений).
+Паритет с официальным Xray 26.9.30 (`xray run -test`): `proxySettings: {"tag": …}` и `{}` —
+«removed feature», `null` — OK, мигрированные Freedom и VLESS+TLS с `sockopt.dialerProxy` — OK.
+GUI в запущенном приложении не проверялся.
+
+# 98	Gate G14: Freedom без `sockopt.addressPortStrategy` (Roadmap §4.2) (0.5.44-0)
+
+## 98.1	Gate и предупреждение — напоминание
+
+Gate (`CompatibilityGateId`, G1–G13 до этого раздела — все inbound) — проверка совместимости,
+которая **блокирует** Save/Add: `modify.rs` возвращает `ValidationFailed` с текстом gate, конфиг не
+меняется. Предупреждение (`CompatibilityWarningId`) ничего не блокирует и сообщает о том, что уже
+лежит на диске. Правило выбора: если редактор Feldjäger может *сам записать* значение, которое ядро
+отвергнет, — gate; если такое значение уже есть в конфиге — предупреждение (+ кнопка исправления).
+
+## 98.2	Правило ядра
+
+XTLS/Xray-core#6058 (v26.9.8) добавил в `OutboundDetourConfig.Build()` для `*freedom.Config`:
+`AddressPortStrategy != AddressPortStrategy_None` → `freedom outbound does not support
+"sockopt.addressPortStrategy"`, Xray не стартует. `SocketConfig.Build()` (`transport_sockopt.go`)
+переводит строку через `strings.ToLower` **без trim**: `""` и `none` в любом регистре → `None`,
+шесть стратегий `srv*`/`txt*` — стратегии, прочее (в т.ч. `" none"`) — «unsupported address and port
+strategy». Проверено `xray run -test`: v26.9.30 отвергает Freedom с `SrvPortOnly` и `" none"`,
+принимает `none` / `NONE` / `""` / `null` и VLESS с `SrvPortOnly`; v26.7.28 принимает Freedom с
+`SrvPortOnly`. Поэтому G14 — первый gate, **зависящий от версии ядра**.
+
+## 98.3	Реализация
+
+- `core_version.rs`: `CoreFeature::FreedomAddressPortStrategyForbidden` (v26.9.8, #6058).
+- `compatibility/mod.rs`: `CompatibilityGateId::G14`; `first_failing_outbound_gate(outbound, core)`
+  и `check_outbound_compatibility(outbound, core)` — outbound-аналоги `first_failing_gate` /
+  `check_inbound_compatibility`; предикат `freedom_address_port_strategy_set` (Freedom — по
+  `protocol` без учёта регистра, как в остальном модуле; строка, не `""` и не `none` без учёта
+  регистра; не-строка — ошибка декодирования вне gate) общий с предупреждением.
+- `modify.rs`: `AddOutboundShellRequest` / `UpdateOutboundShellRequest` получили `core_version:
+  Option<XrayCoreVersion>` (сервис передаёт `xray_core_version()` из Discovery; `None` = текущее
+  ядро, как у предупреждений). `check_outbound_compatibility` вызывается в `add_outbound_shell` /
+  `update_outbound_shell` после General → Protocol → Stream, на **собранном** outbound — значение,
+  оставшееся с диска, тоже блокирует Save (иначе Save записал бы конфиг, который ядро не загрузит).
+  Diff-preview идёт через те же функции, поэтому тоже показывает ошибку G14.
+- `warnings.rs`: `FreedomAddressPortStrategyRejected`, путь
+  `streamSettings.sockopt.addressPortStrategy`, после предупреждений Freedom `settings` (порядок
+  конфига), с той же границей версии.
+- `outbound_protocol/freedom.rs`: `FreedomSettingsDraft::{address_port_strategy,
+  remove_address_port_strategy}` + метод `remove_address_port_strategy()` (по образцу
+  `migrate_legacy_domain_strategy`); `apply_freedom_settings` удаляет ключ только по флагу, пустые
+  `sockopt` / `streamSettings` — только если опустошены этим удалением.
+- Сервис: `remove_outbound_freedom_address_port_strategy()` — черновик + diff-preview. GUI: кнопка
+  «Remove addressPortStrategy» в Freedom-секции, пока по черновику есть предупреждение (то есть
+  только на ядре, которое отвергает ключ).
+
+Будущий Outbound `sockopt` editor (Roadmap §4.2) получит защиту без доработок: значение из его поля
+пройдёт через тот же `check_outbound_compatibility`.
+
+Попутно: текст предупреждения `OpenProxyInbound` (§96) содержал длинные пробелы посреди фраз —
+продолжения Rust-строк (`\` + перевод строки) были потеряны при правке через heredoc; восстановлены.
+
+## 98.4	Итог
+
+Тесты (+5): `compatibility` — 2 (значения стратегии и протоколы; граница v26.9.8 и текст ошибки),
+`warnings` — 1 (порядок, старое ядро, `None`), `freedom` — 1 (сохранение без удаления, удаление с
+сохранением соседних ключей, очистка контейнеров, `none`/пусто), `modify_tests` — 1 (сквозной Save:
+блок без версии и на v26.9.30, проход на v26.7.28, проход после удаления). Итог: **1350 passed / 0
+failed**, clippy lib 66 (без изменений). GUI в запущенном приложении не проверялся.
+
+# 99	Outbound `sockopt` editor (Roadmap §4.2) (0.5.45-0)
+
+## 99.1	Задача и сверка с ядром
+
+С v26.9.8 (#6058) `sockopt.dialerProxy` — единственный способ цепочки outbound'ов (`proxySettings`
+удалён, §97), а редактор Outbound Shell давал только узкое поле `sockopt.domainStrategy` у Freedom.
+Сверено с `XTLS/Xray-core@main`:
+
+- `infra/conf/transport_sockopt.go` — `SocketConfig` декодируется Go `encoding/json`: ключи
+  сопоставляются **без учёта регистра**, `mark` / `tcpKeepAliveIdle` / `tcpKeepAliveInterval` /
+  `tcpMaxSeg` / `tcpUserTimeout` / `tcpWindowClamp` — `int32`, `happyEyeballs.interleave` /
+  `maxConcurrentTry` — `uint32` (переполнение — ошибка декодирования, Xray не стартует). Ключ
+  перегрузки — `json:"tcpCongestion"` (в документации исторически `tcpcongestion`). `Build()`
+  отвергает неизвестные `domainStrategy` / `addressPortStrategy` (сравнение через `ToLower`, пусто —
+  умолчание); неизвестный `tproxy` превращается в `off` без ошибки.
+- `transport/internet/dialer.go` (`DialSystem`): `domainStrategy` резолвит домен до dial (UseIP* при
+  неудаче откатывается к AsIs, ForceIP* — ошибка); `happyEyeballs` работает только для TCP, когда
+  стратегия резолвит домен, адресов ≥ 2, `tryDelayMs` > 0, `maxConcurrentTry` > 0 и **нет**
+  `dialerProxy`; несуществующий тег `dialerProxy` — ошибка каждого соединения во время работы
+  («there is no outbound handler for dialerProxy»), не при загрузке.
+- `app/proxyman/outbound/handler.go`: при `dialerProxy` `sendThrough` не применяется.
+- Проверки циклов `dialerProxy` в ядре нет: ссылка на себя или петля через другие outbound'ы
+  загружается (`xray run -test`: «Configuration OK»), но соединения бесконечно передаются по кругу.
+
+## 99.2	Общая модель (`stream/sockopt.rs`)
+
+- `SockoptDraft::tcpcongestion` → `tcp_congestion` + `tcp_congestion_key: Option<String>`: читается
+  любое написание (регистронезависимо, как в Go; при нескольких — каноническое), существующее
+  сохраняется, новое пишется как `TCP_CONGESTION_KEY` = `tcpCongestion`; прочие написания при
+  дубликатах — в `extras`. `OUTBOUND_ONLY_SOCKOPT_FIELDS` и `KNOWN_SOCKOPT_KEYS` — с каноническим
+  именем.
+- `validate_sockopt` больше не no-op: диапазоны `int32` / `uint32` и перечисления
+  `domainStrategy` / `addressPortStrategy` — ровно то, что отвергает ядро (для inbound тоже: его
+  `sockopt` декодируется той же структурой).
+
+## 99.3	Outbound-черновик: слияние вместо перезаписи (`outbound_stream/mod.rs`)
+
+`OutboundStreamDraft` получил `sockopt`, `disk_sockopt` (снимок с диска) и `sockopt_foreign`
+(`sockopt` или `streamSettings` — не объект и не `null`: не пишется, редактор недоступен).
+`sockopt_changed()` — черновик отличается от снимка. `apply_outbound_stream` пишет `sockopt` только
+тогда, и **трёхсторонним слиянием** (`apply_outbound_sockopt`): из `sockopt_to_value(disk)` и
+`sockopt_to_value(draft)` берутся ключи с разными значениями, и только они ставятся/удаляются в
+текущем объекте. Следствия:
+
+- Protocol-only Save и Save без правок `sockopt` — байт в байт;
+- ключи в форме, которую модель не читает (например, `"mark": "255"`), и неизвестные ключи не
+  трогаются, если пользователь не менял именно их;
+- другой писатель того же объекта в том же Save — миграция `proxySettings` → `dialerProxy` в
+  General (§97, выполняется раньше Stream) — не затирается; набранный в редакторе `dialerProxy`
+  побеждает мигрированный тег;
+- изменённый ключ перегрузки удаляет все написания (`retain` без учёта регистра), иначе Go взял бы
+  любое из двух;
+- контейнеры создаются для нового ключа и удаляются, только если слияние оставило их пустыми.
+
+`validate_outbound_sockopt(outbound, draft)` — `validate_sockopt` плюс запрет `dialerProxy`, равного
+собственному тегу outbound (проверяется только при изменении значения: петля на диске не блокирует
+правку других ключей). Это ошибка валидации Feldjäger, не gate: ядро такой конфиг загружает.
+
+`outbound_protocol_uses_sockopt(protocol)` — все протоколы, кроме Blackhole и Loopback (они не
+открывают сокет; DNS — да, для upstream-запросов).
+
+`dialer_proxy_problem(own_tag, value, others) -> Option<DialerProxyProblem>` —
+`SelfReference` / `UnknownTag` / `Cycle(path)`: проход по `dialerProxy` остальных outbound'ов с
+диска; петля только среди других — не наша проблема (`None`), обрыв цепочки дальше первого шага —
+тоже.
+
+## 99.4	Freedom и gate G14
+
+Узкое поле `FreedomSettingsDraft::sockopt_domain_strategy` и `apply_sockopt_domain_strategy`
+удалены (§2.4 Roadmap: «заменяется этим редактором»): `apply_freedom_settings` больше не трогает
+`streamSettings`. Миграция legacy `settings.domainStrategy` —
+`migrate_legacy_domain_strategy(&mut SockoptDraft)`: заполняет черновик socket options (сохранение —
+через слияние), `settings`-ключи удаляет по-прежнему Freedom-черновик. Поля
+`FreedomSettingsDraft::{address_port_strategy, remove_address_port_strategy}` (§98) заменены методом
+`OutboundStreamDraft::remove_address_port_strategy()` — очистка поля в черновике; кнопка «Remove
+addressPortStrategy» вызывает его. G14 по-прежнему проверяется на **собранном** outbound в
+`add/update_outbound_shell`, поэтому `addressPortStrategy`, выбранный в редакторе у Freedom,
+блокирует Save на ядре ≥ v26.9.8 без доработок gate.
+
+## 99.5	Сервис и GUI
+
+- `ApplicationService::outbound_dialer_proxy_candidates()` (теги остальных outbound'ов в порядке
+  конфига) и `outbound_dialer_proxy_problem()` (по черновику сессии и `dialer_proxy_problem`);
+  `migrate_outbound_legacy_domain_strategy` / `remove_outbound_freedom_address_port_strategy`
+  работают с `session.stream`.
+- `stream_sockopt.rs::show_sockopt_edit(…, dialer_proxy_tags)`: для `StreamDirection::Outbound` в
+  начале сетки — `dialerProxy` (теги + свободный текст), `domainStrategy`, `interface`, `mark`,
+  `tcpCongestion`, `tcpMptcp`, `addressPortStrategy`; после `customSockopt` — блок `happyEyeballs`
+  (чекбокс объекта + четыре поля; пустое поле — умолчание ядра). Inbound передаёт `&[]` и строк не
+  видит (`sockopt_field_applies`).
+- `outbound_stream.rs::show_outbound_sockopt_edit` — сворачиваемая секция «Socket options
+  (streamSettings.sockopt)» в Outbound Shell для `outbound_protocol_uses_sockopt`, открыта, если
+  что-то задано; под полями — подсказка `DialerProxyProblem` (красная для ссылки на себя, янтарная
+  для неизвестного тега и петли). Узкое поле в Freedom-секции убрано.
+
+## 99.6	Итог
+
+Тесты (+9 новых, −4 удалённых, итого +5): `sockopt` — написания `tcpCongestion` (+ тест
+валидации переписан под `SocketConfig.Build()`); `outbound_stream` (+7) — слияние только изменённых ключей (написание, нечитаемые и
+неизвестные ключи), создание/удаление контейнеров, валидация и ссылка на себя, чужой `sockopt`,
+удаление `addressPortStrategy`, `dialer_proxy_problem`, протоколы; `modify_tests` — сквозной Save:
+миграция `proxySettings` + правка `sockopt` в одном Save, приоритет набранного `dialerProxy`, G14
+через редактор. Четыре теста Freedom про `sockopt` удалены вместе с полями (их проверки — в
+`outbound_stream`), два теста миграции переписаны на черновик `SockoptDraft`. Паритет с локальным
+`xray run -test` (Xray 26.9.30): +8 случаев `sockopt` (поля outbound и `tcpcongestion` — OK;
+`domainStrategy`, `addressPortStrategy`, `int32`, `uint32` — отказ ядра; `dialerProxy` на себя —
+ядро принимает, Feldjäger отвергает). Итог: **1355 passed / 0 failed**, clippy lib 66 (без
+изменений). GUI в запущенном приложении не проверялся.
+
+# 100	`sendThrough`: проверка формы по `OutboundDetourConfig.Build()` (Roadmap §4.2) (0.5.46-0)
+
+## 100.1	Правило ядра
+
+`OutboundDetourConfig.Build()` (`infra/conf/xray.go`, `XTLS/Xray-core@main`): `sendThrough` —
+`*string`; `ParseSendThough` разбирает часть до первого `/` через `net.ParseAddress` (снимает
+`[…]` у IPv6, обрезает пробелы по краям). Без `/` любой домен, кроме **точно** `origin` / `srcip`
+(с учётом регистра), — «unable to send through», Xray не стартует; `""` — тоже домен, тоже отказ;
+`null` — ключа нет. С `/` проверка домена пропускается, текст после первого `/` уходит в `ViaCidr`, и
+`SetOutboundGateway` → `ParseRandomIP` (`app/proxyman/outbound/handler.go`) на каждом соединении
+делает `net.ParseCIDR(addr.IP().String() + "/" + prefix)`: домен (`origin/24`, `example.com/24`)
+или кривой префикс (`1.2.3.4/abc`, `/33`) загружается, но соединения через outbound падают.
+`ParseRandomIP` печатает адрес текстом, поэтому IPv4-mapped IPv6 превращается в IPv4 и префикс
+больше 32 у него ломается. При `sockopt.dialerProxy` `sendThrough` не применяется вовсе.
+
+Проверено `xray run -test` (Xray 26.9.30): отказ — `""`, `Origin`, `env:X`, `fe80::1%eth0`, домен;
+OK — `origin`, `srcip`, `[2001:db8::1]`, `2001:db8::/64`, `" 1.2.3.4"`, а также `origin/24`,
+`example.com/24`, `1.2.3.4/abc`, `10.0.0.0/8/9` (сломаны во время работы).
+
+## 100.2	Реализация
+
+- `outbound_edit/mod.rs::validate_send_through(value)` — пусто (ключ не пишется), IP (IPv6 в
+  скобках или без, без зоны), `IP/prefix` (ровно один `/`, префикс — только цифры, 0–32 / 0–128 по
+  семейству после `to_canonical`), `origin`, `srcip`. Текст ошибки различает отказ ядра при
+  загрузке («unable to send through») и поломку во время работы («every connection … fails»).
+- `apply_outbound_general` вызывает её для записываемого значения до любой мутации — Save, Add,
+  diff-preview и предупреждения редактора идут через неё. Значение с диска проверяется тоже: поле
+  всегда переписывается из черновика (обрезка пробелов), а неверное значение ядро всё равно не
+  загрузит или сломается на первом соединении.
+- GUI (`outbounds.rs::show_outbound_general_edit`): подсказка к полю описывает четыре формы;
+  под полем — та же ошибка вживую (красным) или, при заданном `Socket options → dialerProxy`,
+  серая пометка, что `sendThrough` не применяется.
+
+## 100.3	Итог
+
+Тесты (+3): `outbound_edit` — формы (валидные, отказ `Build()`, поломка во время работы) и отказ
+`apply_outbound_general` без записи; паритет `send_through_parity_with_xray_run_test` (15 случаев,
+`Expect::{Valid, Build, Runtime}` — совпали с Xray 26.9.30). Итог: **1358 passed / 0 failed**,
+clippy lib 66 (без изменений). GUI в запущенном приложении не проверялся.
+
+# 101	Outbounds Shell: Loopback (Roadmap §4.2) (0.5.47-0)
+
+## 101.1	Сверка с ядром
+
+`XTLS/Xray-core@main`:
+
+- `infra/conf/loopback.go` — `LoopbackConfig` ровно из двух ключей: `inboundTag` (строка) и
+  `sniffing` — тот же `SniffingConfig`, что у inbound (`enabled`, `destOverride`,
+  `domainsExcluded`, `ipsExcluded`, `metadataOnly`, `routeOnly`). `SniffingConfig.Build()`
+  (`infra/conf/xray.go`) приводит токены `destOverride` к нижнему регистру и принимает `http`,
+  `tls` (а также `https`, `ssl`), `quic`, `fakedns` (а также `fakedns+others`); остальное —
+  «unknown protocol», Xray не стартует.
+- `proxy/loopback/loopback.go` — каждое соединение уходит обратно в dispatcher с `inbound.Tag =
+  inboundTag` (копия исходного inbound) и `SkipDNSResolve`; sniffing выполняется заново, только
+  если `sniffing.enabled`.
+- `app/router/condition.go` — `InboundTagMatcher`: точное сравнение (регистр и пробелы важны),
+  пустой тег не совпадает ни с одним правилом; `inboundTag` правила — `StringList` (массив или
+  строка, разрезаемая по `,` без обрезки).
+
+`xray run -test` (Xray 26.9.30): `{"inboundTag": "repeat"}`, `{}`, sniffing с `HTTPS` /
+`fakedns+others` / `domainsExcluded` — OK; `destOverride: ["smtp"]` и `inboundTag: 5` — отказ.
+
+## 101.2	Модель (`outbound_protocol/loopback.rs`)
+
+- `LoopbackSettingsDraft { inbound_tag, inbound_tag_foreign, sniffing, disk_sniffing,
+  sniffing_foreign }`; `OutboundSettingsDraft::Loopback`, `loopback_default()`,
+  `protocol_name() = "loopback"`; `is_shell_editable_protocol` включает `loopback` (Edit, Duplicate,
+  общий путь записи).
+- `inboundTag` хранится и пишется **как набран** (без обрезки — маршрутизация сравнивает точно);
+  пусто — ключ удаляется. Не-строка на диске (`inbound_tag_foreign`) не трогается, пока пользователь
+  не введёт тег.
+- `sniffing` переиспользует inbound-черновик `SniffingSettings` (получил `Eq`) и
+  `apply_inbound_sniffing`: функция работает с любым объектом, где лежит ключ `sniffing`, поэтому
+  ей передаётся сам `settings`. Пишется только при отличии от снимка `disk_sniffing` — Save без
+  правок sniffing байт в байт (иначе `apply_inbound_sniffing` дописал бы явные `false`/`[]`).
+  Не-объект на диске (`sniffing_foreign`) не перезаписывается; правка в этом случае — ошибка.
+- При записи sniffing сохранённые неизвестные токены `destOverride` проверяются по
+  `SniffingConfig.Build()` (`dest_override_known_to_core`: регистронезависимо, с алиасами); токен,
+  который ядро отвергнет, блокирует правку sniffing, но не Save, который sniffing не меняет.
+- `loopback_routing(routing, own_tag, inbound_tag) -> LoopbackRouting` — `NoTag` / `NoRule` /
+  `Rules(indexes)` / `LoopsBack { rule }` (правило с этим `inboundTag` и `outboundTag`, равным
+  тегу самого Loopback). Ядро такие конфиги загружает, поэтому это подсказка, а не ошибка.
+
+## 101.3	Сервис и GUI
+
+- `ApplicationService::begin_add_outbound_loopback()`, `outbound_loopback_routing()` (по черновику
+  сессии и `routing` с диска), `routing_inbound_tag_candidates()` (теги из `inboundTag` правил, в
+  порядке появления, обе формы `StringList`).
+- `outbounds.rs`: пункт «Loopback» в «Add Outbound», Edit/Duplicate разрешены для
+  `OutboundKind::Loopback`; `show_loopback_settings_edit` — `inboundTag` (теги из routing + текст),
+  под ним подсказка `LoopbackRouting` (серым — номера правил, янтарным — нет тега/правила, красным
+  — петля), затем `sniffing` общим виджетом и список сохраняемых ключей (`domainsExcluded`, …).
+  Секции Stream и Socket options для Loopback не показываются (`outbound_protocol_uses_sockopt`).
+- `inbounds.rs`: поля sniffing вынесены из `show_sniffing_edit_session` в
+  `pub(crate) show_sniffing_fields(ui, &mut SniffingSettings) -> bool`; inbound-сессия ставит
+  `dirty` по её результату — поведение inbound-вкладки не изменилось.
+- `summary.rs`: строка таблицы — «Re-route as inbound {tag}[, sniffing]» / «Re-route (no
+  inboundTag)» вместо «Summary unavailable».
+
+Попутно: устаревшие после §99 комментарии `outbound_protocol/mod.rs` («Freedom owns
+`sockopt.domainStrategy`») и тексты ошибок Duplicate / общего пути записи outbound обновлены.
+
+## 101.4	Итог
+
+Тесты (+8): `loopback` — 6 (Save без правок байт в байт и без обрезки тега; запись тега и
+sniffing с сохранением чужих ключей, минимальный sniffing, удаление тега; чужие формы; токены
+`destOverride` как в `Build()`; подсказка routing — точное сравнение, обе формы, петля; паритет с
+`xray run -test`, 5 случаев), `modify_tests` — 1 (Add → Edit → Duplicate), `tests` — 1 (сводка).
+Итог: **1366 passed / 0 failed**, clippy lib 66 (без изменений). GUI в запущенном приложении не
+проверялся.
+
+# 102	Outbounds Shell: VLESS — `level`/`email` и конвертация legacy `vnext[]` (Roadmap §4.2) (0.5.48-0)
+
+## 102.1	Сверка с ядром
+
+`XTLS/Xray-core@main`, `infra/conf/vless.go`:
+
+- `VLessOutboundConfig` — плоские ключи `address`, `port`, `level`, `email`, `id`, `flow`, `seed`,
+  `encryption`, `reverse`, `testpre`, `testseed` плюс `vnext`. При `c.Address != nil` `Build()`
+  сам строит одноэлементный `vnext` и применяет плоские `level`/`email` к `protocol.User`, а
+  `id`/`flow`/`encryption`/`testpre`/`testseed`/`reverse` — к `vless.Account`; `vnext` с диска при
+  этом **игнорируется**. Иначе `users[0]` разбирается в `protocol.User` и `vless.Account`.
+- `vnext` проверяется так: `"address" is not set` и `"users" should have one and only one member`;
+  несколько серверов тоже не проходят (`"vnext" should have one and only one member`). Плоская
+  форма и `vnext` 1×1 для ядра эквивалентны.
+- `seed` объявлен, но не применяется: в `Build()` строка `//account.Seed = c.Seed`
+  закомментирована. Редактировать его бессмысленно.
+
+Решение по объёму (согласовано с пользователем): старые ядра, понимающие только `vnext`, не
+поддерживаются. Поэтому `vnext` не редактируется на месте, а при Save конвертируется в плоскую форму.
+
+## 102.2	Модель (`outbound_protocol/vless.rs`)
+
+- `VlessOutboundSettings` получил `level: String` (свободный текст, на apply — `u32`, пусто — ключ
+  удаляется), `email: String` (пусто — ключ удаляется) и `legacy_vnext: bool`.
+- `legacy_vnext_entry(outbound) -> Result<(vnext[0], users[0]), reason>` принимает `vnext` только
+  если: ни одного непустого (не-`null`) плоского ключа рядом (`FLAT_KEYS`; `"address": null` ядро
+  читает как nil, поэтому не мешает); ровно один сервер и ровно один пользователь; ключи сервера ⊆
+  `VNEXT_SERVER_KEYS` (`address`/`port`/`users`), пользователя ⊆ `VNEXT_USER_KEYS`
+  (`id`/`flow`/`encryption`/`level`/`email`); `id`/`flow`/`encryption`/`email` — строки. Так
+  конвертация гарантированно ничего не теряет. Например, `users[0].testpre` блокирует её, хотя в
+  плоской форме такой ключ есть: неочевидно, что ядро читает его из `users[0]` с той же семантикой.
+- `parse_vless_outbound_settings` для конвертируемого `vnext` заполняет черновик из
+  `vnext[0]`/`users[0]` с `legacy_vnext = true`; для неконвертируемого возвращает `None` (как раньше).
+  Публичный `legacy_vnext_blocker(outbound) -> Option<String>` отдаёт причину.
+- `apply_vless_outbound_settings` пишет `level` числом и `email`, а при `legacy_vnext` удаляет
+  `settings.vnext`. Прочие ключи `settings` (`seed`, `testpre`, `testseed`, неизвестные) и соседи
+  outbound не трогаются.
+
+## 102.3	Предупреждение `VlessVnextNotSingle`
+
+`outbound_warnings` → `vless_vnext_not_single`: VLESS без непустого `settings.address`, у которого
+`vnext` — массив не из одного элемента (location `settings.vnext`), или у `vnext[0].users` не один
+элемент (location `settings.vnext[0].users`). Без версионного гейта: Feldjäger ориентируется на
+текущие ядра.
+
+## 102.4	Сервис и GUI
+
+- `ApplicationService::begin_edit_outbound_shell`: если `parse_outbound_settings` вернул `None`, а
+  `legacy_vnext_blocker` дал причину, ошибка выглядит так: «Legacy VLESS vnext[] cannot be converted:
+  {reason}. Use Raw JSON.» вместо общего «Protocol not supported».
+- `outbounds.rs::show_vless_settings_edit`: поля `level` и `email`; при `legacy_vnext` над формой
+  курсивом пометка «Save rewrites it into the flat settings form… "Preview changes" shows the
+  rewrite». Отдельной кнопки конвертации нет: явное действие — Save, точный diff показывает
+  «Preview changes». Обновлены hover у Edit и `docs/ui.md`.
+
+## 102.5	Итог
+
+Тесты (+7): `vless` — 6 (вместо `legacy_vnext_form_is_not_parsed`: разбор конвертируемого `vnext`;
+конвертация с сохранением чужих ключей и повторным разбором как плоской формы; 7 блокеров;
+`"address": null`; запись/удаление `level`/`email`; невалидный `level`; сохранение
+`seed`/`testpre`/`testseed`), `warnings` — 1 (`VlessVnextNotSingle`: 0/2 сервера, 2 пользователя,
+плоский `address` побеждает, VMess не затронут). Итог: **1373 passed / 0 failed**, clippy lib 66
+(без изменений). GUI в запущенном приложении не проверялся.

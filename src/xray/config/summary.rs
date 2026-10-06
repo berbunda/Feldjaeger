@@ -1174,9 +1174,25 @@ fn outbound_description(protocol: Option<&str>, value: &Value) -> String {
                 (None, None, _) => "Summary unavailable".to_owned(),
             }
         }
+        OutboundKind::Loopback => {
+            let settings = value.get("settings");
+            let tag = settings
+                .and_then(|s| s.get("inboundTag"))
+                .and_then(Value::as_str)
+                .filter(|tag| !tag.is_empty());
+            let sniffing = settings
+                .and_then(|s| s.get("sniffing"))
+                .and_then(|s| s.get("enabled"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            match (tag, sniffing) {
+                (Some(tag), false) => format!("Re-route as inbound {tag}"),
+                (Some(tag), true) => format!("Re-route as inbound {tag}, sniffing"),
+                (None, _) => "Re-route (no inboundTag)".to_owned(),
+            }
+        }
         OutboundKind::Http
         | OutboundKind::Hysteria
-        | OutboundKind::Loopback
         | OutboundKind::Shadowsocks
         | OutboundKind::Trojan
         | OutboundKind::Vmess

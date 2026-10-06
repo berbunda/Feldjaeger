@@ -144,14 +144,15 @@ use crate::xray::{
     XrayLogLineLimit, XrayLogService, XrayLogSourceKind, add_inbound, is_shell_editable_protocol,
     parse_debug_vars_stdout,
     parse_inbound_general, parse_inbound_protocol, parse_inbound_security, parse_inbound_stream,
-    parse_outbound_general, parse_outbound_settings, parse_sniffing_settings,
+    legacy_vnext_blocker, parse_outbound_general, parse_outbound_settings, parse_sniffing_settings,
     parse_stats_query_stdout, parse_stats_sys_stdout,
     port_is_shell_editable, raw_port_display, update_api_settings, update_dns_settings,
     update_fakedns_settings, update_routing_settings, update_policy_settings,
     update_inbound_shell, build_add_inbound_value, compose_inbound_shell, inbound_warnings,
     outbound_warnings, with_warning_suffix, CompatibilityWarning, LegacyDomainStrategyMigration,
-    XrayCoreVersion,
-    apply_outbound_general, apply_outbound_settings,
+    ProxySettingsMigration, XrayCoreVersion,
+    apply_outbound_general, apply_outbound_settings, apply_outbound_stream, parse_outbound_stream,
+    OutboundStreamDraft, DialerProxyProblem, dialer_proxy_problem, LoopbackRouting, loopback_routing,
     validate_api_settings, validate_dns_settings, validate_fakedns_settings, validate_log_settings,
     validate_routing_settings, RoutingSettings, UpdateRoutingSettingsRequest,
     validate_policy_settings, PolicySettings, UpdatePolicySettingsRequest,
@@ -4209,10 +4210,11 @@ impl ApplicationService {
         });
         if apply_outbound_general(&mut outbound, &session.general).is_err()
             || apply_outbound_settings(&mut outbound, &session.settings).is_err()
+            || apply_outbound_stream(&mut outbound, &session.stream).is_err()
         {
             return Vec::new();
         }
-        outbound_warnings(&outbound)
+        outbound_warnings(&outbound, self.xray_core_version())
     }
 
     /// Non-blocking compatibility warnings for the saved outbound at `outbound_index`. Empty
@@ -4221,7 +4223,7 @@ impl ApplicationService {
         self.loaded_config
             .editable()
             .and_then(|editable| editable.sections().outbounds().get(outbound_index))
-            .map(|outbound| outbound_warnings(outbound.value()))
+            .map(|outbound| outbound_warnings(outbound.value(), self.xray_core_version()))
             .unwrap_or_default()
     }
 
@@ -4237,7 +4239,7 @@ impl ApplicationService {
         let OutboundSettingsDraft::Freedom(settings) = &mut session.settings else {
             return Err("Only Freedom outbounds have a legacy domainStrategy.".to_owned());
         };
-        let message = match settings.migrate_legacy_domain_strategy() {
+        let message = match settings.migrate_legacy_domain_strategy(&mut session.stream.sockopt) {
             LegacyDomainStrategyMigration::Moved { value } => format!(
                 "domainStrategy \"{value}\" moved to streamSettings.sockopt.domainStrategy — \
                  review the preview and Save."
@@ -4254,6 +4256,172 @@ impl ApplicationService {
         session.diff_preview = None;
         self.preview_outbound_shell_diff()?;
         Ok(message)
+    }
+
+    /// Explicit removal of Freedom `streamSettings.sockopt.addressPortStrategy`, which Xray-core
+    /// v26.9.8+ refuses (gate G14 blocks Save while it is there; Roadmap §4.2): changes only the
+    /// editor draft and refreshes the diff preview; Save writes it.
+    pub fn remove_outbound_freedom_address_port_strategy(&mut self) -> Result<String, String> {
+        let session = self
+            .outbound_editor_session
+            .as_mut()
+            .ok_or_else(|| "Not editing an outbound.".to_owned())?;
+        if !matches!(session.settings, OutboundSettingsDraft::Freedom(_)) {
+            return Err("Only Freedom outbounds refuse addressPortStrategy.".to_owned());
+        }
+        let removed = session
+            .stream
+            .remove_address_port_strategy()
+            .ok_or_else(|| "No addressPortStrategy to remove.".to_owned())?;
+        session.diff_preview = None;
+        self.preview_outbound_shell_diff()?;
+        Ok(format!(
+            "streamSettings.sockopt.addressPortStrategy \"{removed}\" will be removed — review the \
+             preview and Save."
+        ))
+    }
+
+    /// Outbounds other than the one being edited, as on disk (empty without a session).
+    fn other_outbounds_of_session(&self) -> Vec<&serde_json::Value> {
+        let Some(session) = self.outbound_editor_session.as_ref() else {
+            return Vec::new();
+        };
+        let Some(editable) = self.loaded_config.editable() else {
+            return Vec::new();
+        };
+        editable
+            .sections()
+            .outbounds()
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| session.is_add || *index != session.outbound_index)
+            .map(|(_, outbound)| outbound.value())
+            .collect()
+    }
+
+    /// Tags the edited outbound can chain through with `sockopt.dialerProxy` (Roadmap §4.2):
+    /// every other outbound's tag, in config order.
+    pub fn outbound_dialer_proxy_candidates(&self) -> Vec<String> {
+        self.other_outbounds_of_session()
+            .into_iter()
+            .filter_map(|outbound| outbound.get("tag").and_then(serde_json::Value::as_str))
+            .map(str::trim)
+            .filter(|tag| !tag.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// What is wrong with the edited outbound's `sockopt.dialerProxy` draft, if anything
+    /// (self-reference, unknown tag, a loop through the other outbounds).
+    pub fn outbound_dialer_proxy_problem(&self) -> Option<DialerProxyProblem> {
+        let session = self.outbound_editor_session.as_ref()?;
+        let own_tag = session.general.tag.as_deref().unwrap_or_default();
+        dialer_proxy_problem(own_tag, &session.stream.sockopt.dialer_proxy, &self.other_outbounds_of_session())
+    }
+
+    /// Where routing sends the connections the edited Loopback outbound re-injects (Roadmap
+    /// §4.2); `None` without a Loopback session.
+    pub fn outbound_loopback_routing(&self) -> Option<LoopbackRouting> {
+        let session = self.outbound_editor_session.as_ref()?;
+        let OutboundSettingsDraft::Loopback(draft) = &session.settings else {
+            return None;
+        };
+        let routing = self.loaded_config.editable().and_then(|editable| editable.sections().routing());
+        Some(loopback_routing(
+            routing.map(|routing| routing.value()),
+            session.general.tag.as_deref().unwrap_or_default(),
+            &draft.inbound_tag,
+        ))
+    }
+
+    /// Tags routing rules match in `inboundTag`, in first-seen order — the names a Loopback
+    /// outbound can re-inject traffic as (Roadmap §4.2).
+    pub fn routing_inbound_tag_candidates(&self) -> Vec<String> {
+        let Some(routing) = self.loaded_config.editable().and_then(|editable| editable.sections().routing()) else {
+            return Vec::new();
+        };
+        let mut tags: Vec<String> = Vec::new();
+        let rules = routing.value().get("rules").and_then(serde_json::Value::as_array);
+        for rule in rules.into_iter().flatten() {
+            let names: Vec<&str> = match rule.get("inboundTag") {
+                Some(serde_json::Value::Array(items)) => items.iter().filter_map(serde_json::Value::as_str).collect(),
+                Some(serde_json::Value::String(text)) => text.split(',').collect(),
+                _ => Vec::new(),
+            };
+            for name in names {
+                if !name.is_empty() && !tags.iter().any(|tag| tag == name) {
+                    tags.push(name.to_owned());
+                }
+            }
+        }
+        tags
+    }
+
+    /// Explicit migration of the removed outbound `proxySettings` into
+    /// `streamSettings.sockopt.dialerProxy` (Roadmap §4.2, XTLS/Xray-core#6058): changes only the
+    /// editor draft and refreshes the diff preview; Save writes it. Offered on every core — older
+    /// ones read `dialerProxy` as well. Returns a status line describing what happened.
+    pub fn migrate_outbound_proxy_settings(&mut self) -> Result<String, String> {
+        let session = self
+            .outbound_editor_session
+            .as_mut()
+            .ok_or_else(|| "Not editing an outbound.".to_owned())?;
+        let message = match session.general.migrate_proxy_settings() {
+            ProxySettingsMigration::Moved { tag } => format!(
+                "proxySettings.tag \"{tag}\" moved to streamSettings.sockopt.dialerProxy — review \
+                 the preview and Save."
+            ),
+            ProxySettingsMigration::DialerProxyWins { legacy, dialer_proxy } => format!(
+                "streamSettings.sockopt.dialerProxy \"{dialer_proxy}\" is kept; proxySettings \
+                 (tag \"{legacy}\") will be removed — review the preview and Save."
+            ),
+            ProxySettingsMigration::Removed => {
+                "proxySettings has no tag to move and will be removed — review the preview and \
+                 Save."
+                    .to_owned()
+            }
+            ProxySettingsMigration::NothingToMigrate => {
+                return Err("No proxySettings to migrate.".to_owned());
+            }
+        };
+        session.diff_preview = None;
+        self.preview_outbound_shell_diff()?;
+        Ok(message)
+    }
+
+    /// Converts the removed `quicParams.udpHop` of the outbound being edited into the equivalent
+    /// `udphop` layer at `finalmask.udp[0]` (Roadmap §2.6 stages 3.2 / 7.1): changes only the
+    /// draft and refreshes the diff preview; Save writes it. Refused when the installed core
+    /// predates the `udphop` mask (v26.9.9) — there the old key still works.
+    pub fn migrate_outbound_legacy_udp_hop(&mut self) -> Result<String, String> {
+        if let Some(installed) = self.xray_core_version()
+            && !crate::xray::CoreFeature::UdpHopUdpMask.available_in(Some(installed))
+        {
+            return Err(format!(
+                "the installed Xray-core {installed} has no `udphop` mask (v26.9.9+, \
+                 XTLS/Xray-core#6327) and still reads quicParams.udpHop — upgrade the core first"
+            ));
+        }
+        let session = self
+            .outbound_editor_session
+            .as_mut()
+            .ok_or_else(|| "Not editing an outbound.".to_owned())?;
+        let message = match session.stream.migrate_legacy_udp_hop()? {
+            crate::xray::LegacyUdpHopMigration::Migrated { dropped_keys } if dropped_keys.is_empty() => {
+                "Moved quicParams.udpHop into a udphop layer at finalmask.udp[0].".to_owned()
+            }
+            crate::xray::LegacyUdpHopMigration::Migrated { dropped_keys } => format!(
+                "Moved quicParams.udpHop into a udphop layer at finalmask.udp[0]; dropped keys no \
+                 Xray-core ever read: {}.",
+                dropped_keys.join(", ")
+            ),
+            _ => "Removed quicParams.udpHop: without ports the old dialer did not hop.".to_owned(),
+        };
+        session.diff_preview = None;
+        Ok(match self.preview_outbound_shell_diff() {
+            Ok(()) => format!("{message} Review the diff, then Save."),
+            Err(error) => format!("{message} Diff preview unavailable: {error}"),
+        })
     }
 
     /// Dry-runs Outbound Shell Save / Add and stores a redacted JSON diff preview
@@ -4273,6 +4441,8 @@ impl ApplicationService {
             let request = AddOutboundShellRequest {
                 general: session.general.clone(),
                 settings: session.settings.clone(),
+                stream: session.stream.clone(),
+                core_version: self.xray_core_version(),
                 preferred_source_file: editable.primary_source_file().map(str::to_owned),
             };
             let mut editable = editable;
@@ -4286,6 +4456,8 @@ impl ApplicationService {
                 outbound_ref,
                 general: session.general.clone(),
                 settings: session.settings.clone(),
+                stream: session.stream.clone(),
+                core_version: self.xray_core_version(),
             };
             let mut editable = editable;
             crate::xray::update_outbound_shell(&mut editable, request).map_err(|e| e.message())?
@@ -6931,6 +7103,11 @@ impl ApplicationService {
         self.begin_add_outbound(OutboundSettingsDraft::vless_default())
     }
 
+    /// Opens an Add session for a new Loopback outbound (Roadmap §4.2).
+    pub fn begin_add_outbound_loopback(&mut self) -> Result<(), String> {
+        self.begin_add_outbound(OutboundSettingsDraft::loopback_default())
+    }
+
     fn begin_add_outbound(&mut self, settings: OutboundSettingsDraft) -> Result<(), String> {
         if self.is_any_remote_busy() {
             return Err("Another operation is already running.".to_owned());
@@ -6941,8 +7118,10 @@ impl ApplicationService {
             general: OutboundGeneral {
                 tag: None,
                 send_through: None,
-                proxy_settings: None,
+                legacy_proxy_settings: None,
+                migrate_proxy_settings: false,
             },
+            stream: OutboundStreamDraft::default_for_protocol(settings.protocol_name()),
             settings,
             is_add: true,
             diff_preview: None,
@@ -6967,14 +7146,20 @@ impl ApplicationService {
             .ok_or_else(|| "Outbound not found.".to_owned())?
             .value()
             .clone();
-        let settings = parse_outbound_settings(&outbound_value)
-            .ok_or_else(|| "Protocol not supported for shell edit.".to_owned())?;
+        let settings = parse_outbound_settings(&outbound_value).ok_or_else(|| {
+            match legacy_vnext_blocker(&outbound_value) {
+                Some(reason) => format!("Legacy VLESS vnext[] cannot be converted: {reason}. Use Raw JSON."),
+                None => "Protocol not supported for shell edit.".to_owned(),
+            }
+        })?;
         let general = parse_outbound_general(&outbound_value);
+        let stream = parse_outbound_stream(&outbound_value);
         self.outbound_editor_session = Some(super::outbound_ops::OutboundEditorSession {
             outbound_index,
             outbound_ref: Some(outbound_ref),
             general,
             settings,
+            stream,
             is_add: false,
             diff_preview: None,
         });
@@ -7016,7 +7201,7 @@ impl ApplicationService {
         if self.is_any_remote_busy() {
             return Err("Another operation is already running.".to_owned());
         }
-        let (general, settings) = {
+        let (general, settings, stream) = {
             let session = self
                 .outbound_editor_session
                 .as_ref()
@@ -7024,7 +7209,7 @@ impl ApplicationService {
             if !session.is_add {
                 return Err("Use start_save_outbound_shell for Edit mode.".to_owned());
             }
-            (session.general.clone(), session.settings.clone())
+            (session.general.clone(), session.settings.clone(), session.stream.clone())
         };
         let editable = self
             .loaded_config
@@ -7046,6 +7231,8 @@ impl ApplicationService {
         let request = AddOutboundShellRequest {
             general,
             settings,
+            stream,
+            core_version: self.xray_core_version(),
             preferred_source_file,
         };
         let (tx, rx) = mpsc::channel();
@@ -7084,7 +7271,7 @@ impl ApplicationService {
         if self.is_any_remote_busy() {
             return Err("Another operation is already running.".to_owned());
         }
-        let (outbound_ref, general, settings) = {
+        let (outbound_ref, general, settings, stream) = {
             let session = self
                 .outbound_editor_session
                 .as_ref()
@@ -7096,7 +7283,12 @@ impl ApplicationService {
                 .outbound_ref
                 .clone()
                 .ok_or_else(|| "Missing outbound ref.".to_owned())?;
-            (outbound_ref, session.general.clone(), session.settings.clone())
+            (
+                outbound_ref,
+                session.general.clone(),
+                session.settings.clone(),
+                session.stream.clone(),
+            )
         };
         let editable = self
             .loaded_config
@@ -7118,6 +7310,8 @@ impl ApplicationService {
             outbound_ref,
             general,
             settings,
+            stream,
+            core_version: self.xray_core_version(),
         };
         let (tx, rx) = mpsc::channel();
         self.outbound_mutation_rx = Some(rx);
@@ -12857,9 +13051,11 @@ mod tests {
             general: crate::xray::OutboundGeneral {
                 tag: Some("new-freedom".to_owned()),
                 send_through: None,
-                proxy_settings: None,
+                legacy_proxy_settings: None,
+                migrate_proxy_settings: false,
             },
             settings: crate::xray::OutboundSettingsDraft::freedom_default(),
+            stream: Default::default(),
             is_add: true,
             diff_preview: None,
         });
@@ -13188,7 +13384,8 @@ mod tests {
         let crate::xray::OutboundSettingsDraft::Freedom(draft) = &session.settings else {
             panic!("freedom draft expected");
         };
-        assert_eq!(draft.sockopt_domain_strategy, "UseIPv4");
+        assert!(draft.remove_legacy_domain_strategy);
+        assert_eq!(session.stream.sockopt.domain_strategy, "UseIPv4", "lands in the socket options draft");
         let preview = format!("{:?}", session.diff_preview.as_ref().expect("preview"));
         assert!(preview.contains("sockopt"), "{preview}");
         assert_eq!(service.outbound_warnings_at(0).len(), 1, "nothing saved yet");

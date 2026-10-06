@@ -8,7 +8,7 @@ use crate::xray::config::{ConfigModifyError, ConfigModifyErrorKind, ConfigModify
 pub const KNOWN_DEST_OVERRIDE: &[&str] = &["http", "tls", "quic", "fakedns"];
 
 /// Parsed / draft sniffing settings.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SniffingSettings {
     /// Whether sniffing is enabled.
     pub enabled: Option<bool>,

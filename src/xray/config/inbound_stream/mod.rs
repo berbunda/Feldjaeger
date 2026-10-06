@@ -174,7 +174,8 @@ pub enum TcpNestedKey {
 }
 
 impl TcpNestedKey {
-    fn as_str(self) -> &'static str {
+    /// The nested object's key on disk.
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::TcpSettings => "tcpSettings",
             Self::RawSettings => "rawSettings",
@@ -618,7 +619,7 @@ fn parse_ws(object: &Map<String, Value>) -> WsStreamSettings {
     }
 }
 
-fn parse_kcp(object: &Map<String, Value>) -> KcpStreamSettings {
+pub(crate) fn parse_kcp(object: &Map<String, Value>) -> KcpStreamSettings {
     // `cwndMultiplier`/`maxSendingWindow` are typed only when they hold an unsigned integer;
     // any other shape stays in extras untouched instead of being dropped.
     let cwnd_multiplier = object.get("cwndMultiplier").and_then(Value::as_u64);
@@ -713,6 +714,29 @@ pub fn validate_kcp_settings(kcp: &KcpStreamSettings) -> ConfigModifyResult<()> 
         ));
     }
     Ok(())
+}
+
+/// `kcpSettings` object for a draft: the four core fields always, `cwndMultiplier` /
+/// `maxSendingWindow` when set, then [`KcpStreamSettings::extras`] unchanged. Shared by the
+/// inbound and outbound (Roadmap §4.2) Stream editors; validate first ([`validate_kcp_settings`]).
+pub(crate) fn kcp_settings_to_object(kcp: &KcpStreamSettings) -> Map<String, Value> {
+    let mut object = Map::new();
+    object.insert("mtu".to_owned(), Value::Number(kcp.mtu.into()));
+    object.insert("tti".to_owned(), Value::Number(kcp.tti.into()));
+    object.insert("uplinkCapacity".to_owned(), Value::Number(kcp.uplink_capacity.into()));
+    object.insert("downlinkCapacity".to_owned(), Value::Number(kcp.downlink_capacity.into()));
+    if let Some(cwnd) = kcp.cwnd_multiplier {
+        object.insert("cwndMultiplier".to_owned(), Value::Number(cwnd.into()));
+    }
+    if let Some(window) = kcp.max_sending_window {
+        object.insert("maxSendingWindow".to_owned(), Value::Number(window.into()));
+    }
+    for (k, v) in &kcp.extras {
+        if !object.contains_key(k) {
+            object.insert(k.clone(), v.clone());
+        }
+    }
+    object
 }
 
 /// Splits `path?ed=N` into path (other query preserved) and Early Data size.
@@ -921,29 +945,7 @@ pub fn apply_inbound_stream(
         }
         StreamMethod::Mkcp => {
             validate_kcp_settings(&draft.kcp)?;
-            let mut object = Map::new();
-            object.insert("mtu".to_owned(), Value::Number(draft.kcp.mtu.into()));
-            object.insert("tti".to_owned(), Value::Number(draft.kcp.tti.into()));
-            object.insert(
-                "uplinkCapacity".to_owned(),
-                Value::Number(draft.kcp.uplink_capacity.into()),
-            );
-            object.insert(
-                "downlinkCapacity".to_owned(),
-                Value::Number(draft.kcp.downlink_capacity.into()),
-            );
-            if let Some(cwnd) = draft.kcp.cwnd_multiplier {
-                object.insert("cwndMultiplier".to_owned(), Value::Number(cwnd.into()));
-            }
-            if let Some(window) = draft.kcp.max_sending_window {
-                object.insert("maxSendingWindow".to_owned(), Value::Number(window.into()));
-            }
-            for (k, v) in &draft.kcp.extras {
-                if !object.contains_key(k) {
-                    object.insert(k.clone(), v.clone());
-                }
-            }
-            stream.insert("kcpSettings".to_owned(), Value::Object(object));
+            stream.insert("kcpSettings".to_owned(), Value::Object(kcp_settings_to_object(&draft.kcp)));
         }
         StreamMethod::Hysteria => {
             let mut object = Map::new();

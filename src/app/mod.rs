@@ -73,7 +73,7 @@ pub use crate::xray::{
     InboundClientProtocol, InboundClientSummary, InboundGeneral, InboundProtocolDraft,
     InboundSecurityDraft, InboundSecurityMode, InboundStreamDraft, KNOWN_DEST_OVERRIDE, LogLevel,
     LogOutput, LogSettings, MaskAddress, NoiseDraft, OutboundGeneral, OutboundKind,
-    OutboundSettingsDraft, ProxySettingsDraft, RealitySettingsDraft, ReverseSniffingDraft,
+    OutboundSettingsDraft, ProxySettingsMigration, RealitySettingsDraft, ReverseSniffingDraft,
     ReverseTagDraft, SecretFieldDraft, SecretString, SniffingSettings,
     StreamMethod, TrojanClientSummary, UpdateInboundGeneralRequest, UpdateInboundShellRequest,
     UpdateInboundSniffingRequest, UpdateLogSettingsRequest, UpdateUserRequest,

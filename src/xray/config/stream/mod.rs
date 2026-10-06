@@ -97,7 +97,7 @@ pub use quic_params::{
 };
 pub use sockopt::{
     ADDRESS_PORT_STRATEGIES, DOMAIN_STRATEGIES, HappyEyeballsDraft, INBOUND_ONLY_SOCKOPT_FIELDS,
-    OUTBOUND_ONLY_SOCKOPT_FIELDS, SockoptDraft, TCP_CONGESTION_PRESETS, TPROXY_MODES,
+    OUTBOUND_ONLY_SOCKOPT_FIELDS, SockoptDraft, TCP_CONGESTION_KEY, TCP_CONGESTION_PRESETS, TPROXY_MODES,
     TcpFastOpenDraft, parse_sockopt, sockopt_field_applies, sockopt_to_value, validate_sockopt,
 };
 pub use values::{
