@@ -257,6 +257,8 @@ Inbounds Shadowsocks / VMess / HTTP / Socks / `mixed` / WireGuard — **retired*
 
 Pop-up help / field documentation overlays (§3:124) shipped scoped to the Inbound Shell editor only — remaining pages, follow-up items below.
 
+- [x] Pop-up help: окно открывается рядом с курсором, а не в левом верхнем углу, и не выходит за границы окна приложения ➕ 2026-10-07 ✅ 2026-10-07 Реализация (Architecture §104, 0.5.49-0): `help_button` запоминает позицию указателя в момент клика (`HelpDialog.anchor`). `show_help_dialog` ставит окно на 12 px ниже и правее курсора, как подсказку; если окно не помещается справа или снизу — по соответствующей оси оно открывается с другой стороны курсора, если не помещается ни там, ни там — прижимается к краю (`help_dialog_left_top`, чистая функция). Размер окна берётся из `egui::AreaState` после первого (невидимого) кадра измерения; после установки позиция больше не навязывается, окно можно перетаскивать, egui удерживает его внутри области приложения (`constrain`). У окна стабильный id по теме справки. Тесты: +3, 1377 passed / 0 failed, clippy lib 66. Действует на всех страницах, где появится `help_button`
+
 - [ ] Pop-up help: DNS page
 - [ ] Pop-up help: FakeDNS page
 - [ ] Pop-up help: Routing page
