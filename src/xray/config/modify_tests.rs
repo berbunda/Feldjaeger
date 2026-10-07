@@ -4536,7 +4536,7 @@ fn update_vless_outbound_shell_writes_stream_only_when_changed() {
     use super::outbound_stream::{OutboundTransport, parse_outbound_stream};
 
     let raw = r#"{"outbounds":[{"tag":"up","protocol":"vless",
-        "settings":{"address":"a.example","port":443,"id":"27848739-7e62-4138-9fd3-098a63964b6b"},
+        "settings":{"address":"a.example","port":443,"id":"27848739-7e62-4138-9fd3-098a63964b6b","encryption":"none"},
         "streamSettings":{"network":"raw","security":"none","sockopt":{"mark":2}}}]}"#;
     let save = |stream_edit: &dyn Fn(&mut super::outbound_stream::OutboundStreamDraft)| {
         let mut config = single_file_editable(raw);

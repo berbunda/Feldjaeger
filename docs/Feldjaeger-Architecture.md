@@ -9456,3 +9456,23 @@ XTLS/Xray-core#6815 (v26.9.30) сменил `dns.FakeIPv6Pool` (`features/dns/fa
 Roadmap: в пункты Masque inbound (§4.1) и Masque outbound (§4.2) добавлен итог аудита, в §4.3
 заведён пункт «Stream XDRIVE transport» со статусом «отложено до документации». Версия не
 менялась (изменения только в документации).
+
+# 111	Багфикс: VLESS outbound без `encryption` не загружался ядром (Roadmap §4.5) (0.5.51-3)
+
+Найдено при написании справки Outbound Shell (§4.4). `VLessOutboundConfig.Build()`
+(`infra/conf/vless.go`) требует `encryption` у каждого пользователя outbound: при отсутствии ключа
+или пустой строке — `VLESS users: please add/set "encryption":"none" for every user`. Проверено
+`xray run -test` (Xray 26.9.30): без ключа и с `""` — ошибка, с `"none"` — OK. Черновик Feldjäger
+создавался с пустым `encryption`, а `apply_vless_outbound_settings` в этом случае ключ не писал.
+Поэтому VLESS outbound, добавленный через Add без ручного ввода, ломал загрузку конфига, и Save
+падал только на проверке `xray run -test`.
+
+Исправление (`outbound_protocol/vless.rs`): `VlessOutboundSettings::default_draft()` получает
+`encryption: "none"`; `apply_vless_outbound_settings` отвергает пустое (после trim) значение с
+сообщением, объясняющим, что писать (`"none"` или клиентская строка `xray vlessenc`), и ничего не
+записывает. Уже сломанный outbound на диске без `encryption` открывается в Shell как раньше, но
+Save требует заполнить поле. Три теста, которые разбирали VLESS outbound без `encryption`
+(конфиг, который ядро не загрузит), получили `"encryption": "none"` во входном JSON.
+
+Тест (+1): `default_draft_has_encryption_none_and_empty_encryption_is_refused`. Итог: **1391 passed /
+0 failed**.

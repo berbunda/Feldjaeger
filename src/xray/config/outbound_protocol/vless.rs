@@ -125,8 +125,9 @@ pub struct VlessOutboundSettings {
     pub port: String,
     /// `settings.id` — client UUID matching a `clients[]` entry on the far end. Required.
     pub id: String,
-    /// `settings.encryption` — VLESS post-quantum encryption string; empty = key absent
-    /// (pre-encryption / matches inbound `decryption: "none"`).
+    /// `settings.encryption` — `"none"` (no VLESS Encryption, matches inbound
+    /// `decryption: "none"`) or the client string of `xray vlessenc`. Required: Xray-core refuses
+    /// an absent or empty one (`please add/set "encryption":"none" for every user`).
     pub encryption: String,
     /// `settings.flow`; empty = key absent.
     pub flow: String,
@@ -144,14 +145,14 @@ pub struct VlessOutboundSettings {
 }
 
 impl VlessOutboundSettings {
-    /// Default for Add VLESS outbound: everything blank, no reverse. The GUI is expected to
-    /// offer a "Generate UUID" action for `id`, same as the inbound Users Add dialog.
+    /// Default for Add VLESS outbound: blank except `encryption: "none"`, no reverse. The GUI is
+    /// expected to offer a "Generate UUID" action for `id`, same as the inbound Users Add dialog.
     pub fn default_draft() -> Self {
         Self {
             address: String::new(),
             port: String::new(),
             id: String::new(),
-            encryption: String::new(),
+            encryption: "none".to_owned(),
             flow: String::new(),
             level: String::new(),
             email: String::new(),
@@ -213,6 +214,14 @@ pub fn apply_vless_outbound_settings(
         return Err(ConfigModifyError::new(
             ConfigModifyErrorKind::ValidationFailed,
             "VLESS outbound id must not be empty".to_owned(),
+        ));
+    }
+    if draft.encryption.trim().is_empty() {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "VLESS outbound encryption must be set: \"none\" (no VLESS Encryption) or the client \
+             string from xray vlessenc — Xray-core refuses an empty one"
+                .to_owned(),
         ));
     }
     let port_trimmed = draft.port.trim();
@@ -456,7 +465,7 @@ mod tests {
 
     #[test]
     fn apply_writes_and_removes_level_and_email() {
-        let mut outbound = json!({"protocol": "vless", "settings": {"level": 3, "email": "old"}});
+        let mut outbound = json!({"protocol": "vless", "settings": {"level": 3, "email": "old", "encryption": "none"}});
         let mut draft = parse_vless_outbound_settings(&outbound).expect("flat");
         assert_eq!((draft.level.as_str(), draft.email.as_str()), ("3", "old"));
         draft.address = "host.example".to_owned();
@@ -490,7 +499,7 @@ mod tests {
     fn flat_seed_and_test_knobs_are_preserved() {
         let mut outbound = json!({
             "protocol": "vless",
-            "settings": {"address": "a", "port": 1, "id": "u", "seed": "s", "testpre": 2, "testseed": [1, 2]}
+            "settings": {"address": "a", "port": 1, "id": "u", "encryption": "none", "seed": "s", "testpre": 2, "testseed": [1, 2]}
         });
         let draft = parse_vless_outbound_settings(&outbound).expect("flat");
         apply_vless_outbound_settings(&mut outbound, &draft).expect("apply");
@@ -511,7 +520,7 @@ mod tests {
             address: "host.example".to_owned(),
             port: "443".to_owned(),
             id: "11111111-1111-1111-1111-111111111111".to_owned(),
-            encryption: String::new(),
+            encryption: "none".to_owned(),
             flow: String::new(),
             level: String::new(),
             email: String::new(),
@@ -522,7 +531,7 @@ mod tests {
         assert_eq!(outbound["settings"]["address"], "host.example");
         assert_eq!(outbound["settings"]["port"], 443);
         assert_eq!(outbound["settings"]["id"], "11111111-1111-1111-1111-111111111111");
-        assert!(outbound["settings"].get("encryption").is_none());
+        assert_eq!(outbound["settings"]["encryption"], "none");
         assert!(outbound["settings"].get("flow").is_none());
         assert!(outbound["settings"].get("reverse").is_none());
         assert_eq!(outbound["settings"]["futureField"], "keep");
@@ -537,7 +546,7 @@ mod tests {
             address: "host.example".to_owned(),
             port: "443".to_owned(),
             id: "11111111-1111-1111-1111-111111111111".to_owned(),
-            encryption: String::new(),
+            encryption: "none".to_owned(),
             flow: String::new(),
             level: String::new(),
             email: String::new(),
@@ -550,6 +559,22 @@ mod tests {
         };
         apply_vless_outbound_settings(&mut outbound, &draft).expect("apply");
         assert_eq!(outbound["settings"]["reverse"]["tag"], "reverse-in");
+    }
+
+    #[test]
+    fn default_draft_has_encryption_none_and_empty_encryption_is_refused() {
+        // Xray-core v26.9.30: `please add/set "encryption":"none" for every user` for an absent
+        // or empty value (checked with `xray run -test`).
+        assert_eq!(VlessOutboundSettings::default_draft().encryption, "none");
+        let mut outbound = json!({"protocol": "vless", "settings": {}});
+        let mut draft = VlessOutboundSettings::default_draft();
+        draft.address = "host.example".to_owned();
+        draft.port = "443".to_owned();
+        draft.id = "11111111-1111-1111-1111-111111111111".to_owned();
+        draft.encryption = "  ".to_owned();
+        let err = apply_vless_outbound_settings(&mut outbound, &draft).unwrap_err();
+        assert!(err.to_string().contains("encryption"), "{err}");
+        assert_eq!(outbound, json!({"protocol": "vless", "settings": {}}), "nothing written");
     }
 
     #[test]
