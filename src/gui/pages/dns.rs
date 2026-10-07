@@ -12,7 +12,7 @@
 use egui::{Color32, RichText, TextEdit, Ui};
 
 use crate::app::{ApplicationService, DnsPageState};
-use crate::gui::pages::lines_to_vec;
+use crate::gui::pages::persistent_multiline_list_row;
 use crate::xray::{DnsHostEntry, DnsServerEntry, DnsSettings, QueryStrategy};
 
 const MUTED_COLOR: Color32 = Color32::from_rgb(140, 140, 140);
@@ -507,9 +507,9 @@ fn show_server_edit_form(
     });
 
     optional_u16_row(ui, "port", &mut server.port, ("dns_server_port", index));
-    multiline_list_row(ui, "domains (one per line)", &mut server.domains, ("dns_server_domains", index));
-    multiline_list_row(ui, "expectedIPs (one per line)", &mut server.expected_ips, ("dns_server_expected", index));
-    multiline_list_row(ui, "unexpectedIPs (one per line)", &mut server.unexpected_ips, ("dns_server_unexpected", index));
+    persistent_multiline_list_row(ui, "domains (one per line)", &mut server.domains, ("dns_server_domains", index));
+    persistent_multiline_list_row(ui, "expectedIPs (one per line)", &mut server.expected_ips, ("dns_server_expected", index));
+    persistent_multiline_list_row(ui, "unexpectedIPs (one per line)", &mut server.unexpected_ips, ("dns_server_unexpected", index));
     ui.checkbox(&mut server.skip_fallback, "skipFallback");
     ui.checkbox(&mut server.final_query, "finalQuery");
     optional_u32_row(ui, "timeoutMs", &mut server.timeout_ms, ("dns_server_timeout", index));
@@ -548,7 +548,7 @@ fn show_host_edit_form(
         ui.label("domain");
         ui.add(TextEdit::singleline(&mut host.domain).desired_width(220.0).hint_text("example.com"));
     });
-    multiline_list_row(ui, "targets (one per line)", &mut host.targets, ("dns_host_targets", index));
+    persistent_multiline_list_row(ui, "targets (one per line)", &mut host.targets, ("dns_host_targets", index));
 }
 
 // ─── Small editing widgets ──────────────────────────────────────────────────
@@ -567,16 +567,6 @@ fn optional_text_row(ui: &mut Ui, label: &str, value: &mut Option<String>, hint:
             } else {
                 Some(trimmed.to_owned())
             };
-        }
-    });
-}
-
-fn multiline_list_row(ui: &mut Ui, label: &str, values: &mut Vec<String>, id: impl std::hash::Hash + std::fmt::Debug) {
-    ui.push_id(id, |ui| {
-        ui.label(label);
-        let mut text = values.join("\n");
-        if ui.add(TextEdit::multiline(&mut text).desired_rows(2)).changed() {
-            *values = lines_to_vec(&text);
         }
     });
 }

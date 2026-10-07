@@ -10,7 +10,7 @@
 use egui::{Color32, RichText, TextEdit, Ui};
 
 use crate::app::{ApiSettingsPageState, ApplicationService};
-use crate::gui::pages::lines_to_vec;
+use crate::gui::pages::persistent_list_text_edit;
 use crate::xray::KNOWN_API_SERVICES;
 
 /// Renders the API Settings page.
@@ -277,13 +277,9 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
             }
         }
     });
-    let mut services_text = draft.services.join("\n");
-    if ui
-        .add(TextEdit::multiline(&mut services_text).desired_rows(3))
-        .changed()
-    {
-        draft.services = lines_to_vec(&services_text);
-    }
+    persistent_list_text_edit(ui, "api_services", &mut draft.services, |ui, text| {
+        ui.add(TextEdit::multiline(text).desired_rows(3))
+    });
     ui.label(
         RichText::new(
             "Toggle known services above, or list them (including unrecognized/future values) \

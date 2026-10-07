@@ -1199,13 +1199,9 @@ fn show_freedom_final_rules_edit(ui: &mut Ui, rules: &mut Vec<FreedomFinalRuleDr
                 });
 
             ui.label("ip (one CIDR per line, e.g. 10.0.0.0/8 or geoip:private; empty = any)");
-            let mut ip_text = rule.ip.join("\n");
-            if ui
-                .add(egui::TextEdit::multiline(&mut ip_text).desired_rows(2))
-                .changed()
-            {
-                rule.ip = super::lines_to_vec(&ip_text);
-            }
+            super::persistent_list_text_edit(ui, ("freedom_final_rule_ip", idx), &mut rule.ip, |ui, text| {
+                ui.add(egui::TextEdit::multiline(text).desired_rows(2))
+            });
         });
     }
 
@@ -1541,18 +1537,9 @@ fn show_dns_rules_edit(ui: &mut Ui, rules: &mut Vec<DnsRuleDraft>) {
                 });
 
             ui.label("domain (one per line; empty = matches all queries)");
-            let mut domain_text = rule.domain.join("\n");
-            if ui
-                .add(egui::TextEdit::multiline(&mut domain_text).desired_rows(2))
-                .changed()
-            {
-                rule.domain = domain_text
-                    .lines()
-                    .map(str::trim)
-                    .filter(|line| !line.is_empty())
-                    .map(str::to_owned)
-                    .collect();
-            }
+            super::persistent_list_text_edit(ui, ("dns_rule_domain", idx), &mut rule.domain, |ui, text| {
+                ui.add(egui::TextEdit::multiline(text).desired_rows(2))
+            });
         });
     }
 

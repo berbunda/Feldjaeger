@@ -15,7 +15,7 @@ use crate::app::{
     ApplicationService, MISSING_FIELD, RoutingPageState, RoutingSortColumn, display_routing_list,
     routing_general_display, routing_rule_row_display,
 };
-use crate::gui::pages::lines_to_vec;
+use crate::gui::pages::{persistent_list_text_edit, persistent_multiline_list_row};
 use crate::xray::{
     BalancerEntry, BalancerStrategyType, CostEntry, DomainStrategy, NetworkKind, RoutingRuleEntry,
     RoutingRuleSummary, RoutingSummary, StrategyEntry, WebhookEntry,
@@ -524,8 +524,8 @@ fn show_rule_edit_form(
 
             ui.add_space(6.0);
             ui.label(RichText::new("Matching Conditions").strong());
-            multiline_list_row(ui, "domain (one per line)", &mut rule.domain, ("routing_rule_domain", index));
-            multiline_list_row(ui, "ip (one per line)", &mut rule.ip, ("routing_rule_ip", index));
+            persistent_multiline_list_row(ui, "domain (one per line)", &mut rule.domain, ("routing_rule_domain", index));
+            persistent_multiline_list_row(ui, "ip (one per line)", &mut rule.ip, ("routing_rule_ip", index));
             optional_text_row(ui, "port", &mut rule.port, "443 or 1000-2000");
             optional_text_row(ui, "sourcePort", &mut rule.source_port, "1000-2000");
             optional_text_row(ui, "localPort", &mut rule.local_port, "1000-2000");
@@ -533,11 +533,11 @@ fn show_rule_edit_form(
                 ui.label("network");
                 optional_network_combo(ui, ("routing_rule_network", index), &mut rule.network);
             });
-            multiline_list_row(ui, "sourceIP (one per line)", &mut rule.source_ip, ("routing_rule_source_ip", index));
-            multiline_list_row(ui, "localIP (one per line)", &mut rule.local_ip, ("routing_rule_local_ip", index));
-            multiline_list_row(ui, "user (one per line)", &mut rule.user, ("routing_rule_user", index));
+            persistent_multiline_list_row(ui, "sourceIP (one per line)", &mut rule.source_ip, ("routing_rule_source_ip", index));
+            persistent_multiline_list_row(ui, "localIP (one per line)", &mut rule.local_ip, ("routing_rule_local_ip", index));
+            persistent_multiline_list_row(ui, "user (one per line)", &mut rule.user, ("routing_rule_user", index));
             optional_text_row(ui, "vlessRoute", &mut rule.vless_route, "0-1");
-            multiline_list_row(
+            persistent_multiline_list_row(
                 ui,
                 "inboundTag (one per line)",
                 &mut rule.inbound_tag,
@@ -554,13 +554,13 @@ fn show_rule_edit_form(
                 pairs_editor(ui, &mut rule.attrs);
             });
 
-            multiline_list_row(
+            persistent_multiline_list_row(
                 ui,
                 "process (one per line)",
                 &mut rule.process,
                 ("routing_rule_process", index),
             );
-            multiline_list_row(
+            persistent_multiline_list_row(
                 ui,
                 "localOS (one per line, e.g. windows/linux/darwin/android/ios)",
                 &mut rule.local_os,
@@ -638,7 +638,7 @@ fn show_balancer_edit_form(
                         .hint_text("lb"),
                 );
             });
-            multiline_list_row(
+            persistent_multiline_list_row(
                 ui,
                 "selector (one prefix per line)",
                 &mut balancer.selector,
@@ -692,7 +692,7 @@ fn show_strategy_edit(ui: &mut Ui, balancer: &mut BalancerEntry, index: usize) {
                         optional_i64_row(ui, "expected", &mut settings.expected, "routing_strategy_expected");
                         optional_text_row(ui, "maxRTT", &mut settings.max_rtt, "1s");
                         optional_f64_row(ui, "tolerance", &mut settings.tolerance, "routing_strategy_tolerance");
-                        multiline_list_row(
+                        persistent_multiline_list_row(
                             ui,
                             "baselines (one duration per line)",
                             &mut settings.baselines,
@@ -746,20 +746,15 @@ fn protocol_checkboxes(ui: &mut Ui, index: usize, values: &mut Vec<String>) {
             }
         });
 
-        let mut extra_text = values
-            .iter()
-            .filter(|v| !KNOWN_PROTOCOLS.iter().any(|known| v.eq_ignore_ascii_case(known)))
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("\n");
+        let is_known = |v: &String| KNOWN_PROTOCOLS.iter().any(|known| v.eq_ignore_ascii_case(known));
+        // The buffer is keyed on the custom entries only, so toggling a checkbox keeps it.
+        let mut extras: Vec<String> = values.iter().filter(|v| !is_known(v)).cloned().collect();
         ui.label(RichText::new("custom protocol values (one per line)").size(12.0));
-        if ui.add(TextEdit::multiline(&mut extra_text).desired_rows(1)).changed() {
-            let mut merged: Vec<String> = values
-                .iter()
-                .filter(|v| KNOWN_PROTOCOLS.iter().any(|known| v.eq_ignore_ascii_case(known)))
-                .cloned()
-                .collect();
-            merged.extend(lines_to_vec(&extra_text));
+        if persistent_list_text_edit(ui, "custom_protocols", &mut extras, |ui, text| {
+            ui.add(TextEdit::multiline(text).desired_rows(1))
+        }) {
+            let mut merged: Vec<String> = values.iter().filter(|v| is_known(v)).cloned().collect();
+            merged.extend(extras);
             *values = merged;
         }
     });
@@ -802,21 +797,6 @@ fn optional_text_row(ui: &mut Ui, label: &str, value: &mut Option<String>, hint:
             } else {
                 Some(trimmed.to_owned())
             };
-        }
-    });
-}
-
-fn multiline_list_row(
-    ui: &mut Ui,
-    label: &str,
-    values: &mut Vec<String>,
-    id: impl std::hash::Hash + std::fmt::Debug,
-) {
-    ui.push_id(id, |ui| {
-        ui.label(label);
-        let mut text = values.join("\n");
-        if ui.add(TextEdit::multiline(&mut text).desired_rows(2)).changed() {
-            *values = lines_to_vec(&text);
         }
     });
 }

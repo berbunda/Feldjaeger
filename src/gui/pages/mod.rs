@@ -507,29 +507,44 @@ pub(crate) fn store_text_buffer<S: Clone + Send + Sync + 'static>(
         .data_mut(|d| d.insert_temp(id, SourcedTextBuffer { source, text }));
 }
 
-/// Newline-separated `Vec<String>` field, same idiom as `routing.rs`'s `multiline_list_row`, but
-/// with a frame-persistent text buffer so blank lines being typed (a trailing Enter) survive.
+/// One-per-line `Vec<String>` text area with a frame-persistent buffer: blank lines being typed
+/// (a trailing Enter) survive although `lines_to_vec` drops them from the model. `add` draws the
+/// widget (any `TextEdit` flavour, a scroll area, a grid cell — no extra layout is added here).
+/// Returns true only when the parsed list differs from `values`.
+pub(crate) fn persistent_list_text_edit(
+    ui: &mut Ui,
+    id: impl std::hash::Hash + std::fmt::Debug,
+    values: &mut Vec<String>,
+    add: impl FnOnce(&mut Ui, &mut String) -> egui::Response,
+) -> bool {
+    let buffer_id = ui.make_persistent_id(id);
+    let mut text = load_text_buffer(ui, buffer_id, values, || values.join("\n"));
+    let mut changed = false;
+    if add(ui, &mut text).changed() {
+        let parsed = lines_to_vec(&text);
+        if parsed != *values {
+            *values = parsed;
+            changed = true;
+        }
+    }
+    store_text_buffer(ui, buffer_id, values.clone(), text);
+    changed
+}
+
+/// Labelled two-row `persistent_list_text_edit` — the standard "(one per line)" field.
 pub(crate) fn persistent_multiline_list_row(
     ui: &mut Ui,
     label: &str,
     values: &mut Vec<String>,
     id: impl std::hash::Hash + std::fmt::Debug,
 ) -> bool {
-    let mut changed = false;
     ui.push_id(id, |ui| {
         ui.label(label);
-        let buffer_id = ui.make_persistent_id("list_text");
-        let mut text = load_text_buffer(ui, buffer_id, values, || values.join("\n"));
-        if ui.add(egui::TextEdit::multiline(&mut text).desired_rows(2)).changed() {
-            let parsed = lines_to_vec(&text);
-            if parsed != *values {
-                *values = parsed;
-                changed = true;
-            }
-        }
-        store_text_buffer(ui, buffer_id, values.clone(), text);
-    });
-    changed
+        persistent_list_text_edit(ui, "list_text", values, |ui, text| {
+            ui.add(egui::TextEdit::multiline(text).desired_rows(2))
+        })
+    })
+    .inner
 }
 
 #[cfg(test)]
@@ -571,5 +586,41 @@ mod tests {
             .data(|d| d.get_temp::<SourcedTextBuffer<Vec<String>>>(buffer_id))
             .expect("buffer");
         assert_eq!(stored.text, "1.1.1.1\n");
+    }
+
+    #[test]
+    fn list_buffer_is_dropped_when_the_model_changes_elsewhere() {
+        let ctx = egui::Context::default();
+        let mut values = vec!["a".to_owned()];
+        let mut buffer_id = egui::Id::NULL;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            buffer_id = ui.make_persistent_id("list");
+        })
+        .drop_without_applying_deltas();
+        ctx.data_mut(|d| {
+            d.insert_temp(
+                buffer_id,
+                SourcedTextBuffer {
+                    source: vec!["a".to_owned()],
+                    text: "a\n".to_owned(),
+                },
+            );
+        });
+
+        // A checkbox / "Migrate" button replaced the list since the buffer was stored.
+        values = vec!["b".to_owned(), "c".to_owned()];
+        let mut changed = false;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            changed = persistent_list_text_edit(ui, "list", &mut values, |ui, text| {
+                ui.add(egui::TextEdit::multiline(text))
+            });
+        })
+        .drop_without_applying_deltas();
+        assert!(!changed);
+        let stored = ctx
+            .data(|d| d.get_temp::<SourcedTextBuffer<Vec<String>>>(buffer_id))
+            .expect("buffer");
+        assert_eq!(stored.text, "b\nc");
+        assert_eq!(stored.source, values);
     }
 }

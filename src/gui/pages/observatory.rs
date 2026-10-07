@@ -267,18 +267,9 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
     ui.separator();
     ui.strong(format!("Subject selectors ({})", draft.subject_selectors.len()));
     ui.add_space(4.0);
-    let mut text = draft.subject_selectors.join("\n");
-    if ui
-        .add(TextEdit::multiline(&mut text).desired_rows(4).hint_text("one outbound tag prefix per line"))
-        .changed()
-    {
-        draft.subject_selectors = text
-            .lines()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-            .collect();
-    }
+    super::persistent_list_text_edit(ui, "observatory_subject_selectors", &mut draft.subject_selectors, |ui, text| {
+        ui.add(TextEdit::multiline(text).desired_rows(4).hint_text("one outbound tag prefix per line"))
+    });
 }
 
 fn optional_text_row(ui: &mut Ui, label: &str, value: &mut Option<String>, hint: &str) {

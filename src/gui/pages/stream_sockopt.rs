@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use egui::{Color32, RichText, Ui};
 
-use super::{lines_to_vec, optional_string_combo, resizable_multiline};
+use super::{optional_string_combo, persistent_list_text_edit, resizable_multiline};
 use crate::xray::{
     ADDRESS_PORT_STRATEGIES, DOMAIN_STRATEGIES, HappyEyeballsDraft, INBOUND_ONLY_SOCKOPT_FIELDS, SockoptDraft,
     StreamDirection, TCP_CONGESTION_PRESETS, TPROXY_MODES, TcpFastOpenDraft, sockopt_field_applies,
@@ -155,7 +155,6 @@ pub(crate) fn show_sockopt_edit(
         .tcp_window_clamp
         .map(|v| v.to_string())
         .unwrap_or_default();
-    let mut trusted_x_forwarded_for = sockopt.trusted_x_forwarded_for.join("\n");
     let mut custom_sockopt_text = sockopt
         .custom_sockopt
         .as_ref()
@@ -300,11 +299,12 @@ pub(crate) fn show_sockopt_edit(
                     "trustedXForwardedFor (one per line)",
                     HELP_SOCKOPT_TRUSTED_X_FORWARDED_FOR,
                 );
-                if ui
-                    .add(egui::TextEdit::multiline(&mut trusted_x_forwarded_for).desired_rows(2))
-                    .changed()
-                {
-                    sockopt.trusted_x_forwarded_for = lines_to_vec(&trusted_x_forwarded_for);
+                if persistent_list_text_edit(
+                    ui,
+                    "sockopt_trusted_x_forwarded_for",
+                    &mut sockopt.trusted_x_forwarded_for,
+                    |ui, text| ui.add(egui::TextEdit::multiline(text).desired_rows(2)),
+                ) {
                     dirty = true;
                 }
                 ui.end_row();

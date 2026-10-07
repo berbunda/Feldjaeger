@@ -23,7 +23,7 @@ use crate::gui::pages::stream_sockopt::{
     tproxy_combo_field,
 };
 use crate::gui::pages::{
-    danger_sign, danger_warning, lines_to_vec, optional_string_combo, persistent_multiline_list_row,
+    danger_sign, danger_warning, optional_string_combo, persistent_list_text_edit, persistent_multiline_list_row,
     resizable_multiline,
 };
 use crate::xray::{
@@ -3569,8 +3569,6 @@ fn show_certificate_draft_edit(
         .ocsp_stapling
         .map(|v| v.to_string())
         .unwrap_or_default();
-    let mut cert_pem = cert.certificate.join("\n");
-    let mut key_pem = cert.key.join("\n");
 
     egui::Grid::new(format!("tls_cert_edit_grid_{idx}"))
         .num_columns(2)
@@ -3591,23 +3589,17 @@ fn show_certificate_draft_edit(
             ui.end_row();
 
             super::field_label(ui, "certificate (PEM)", HELP_CERT_CERTIFICATE_PEM);
-            if resizable_multiline(
-                ui,
-                &mut cert_pem,
-                6,
-                &format!("tls_cert_pem_{idx}"),
-            )
-            .changed()
-            {
-                cert.certificate = lines_to_vec(&cert_pem);
+            if persistent_list_text_edit(ui, ("tls_cert_pem", idx), &mut cert.certificate, |ui, text| {
+                resizable_multiline(ui, text, 6, &format!("tls_cert_pem_{idx}"))
+            }) {
                 dirty = true;
             }
             ui.end_row();
 
             super::field_label(ui, "key (PEM)", HELP_CERT_KEY_PEM);
-            if resizable_multiline(ui, &mut key_pem, 6, &format!("tls_key_pem_{idx}")).changed()
-            {
-                cert.key = lines_to_vec(&key_pem);
+            if persistent_list_text_edit(ui, ("tls_key_pem", idx), &mut cert.key, |ui, text| {
+                resizable_multiline(ui, text, 6, &format!("tls_key_pem_{idx}"))
+            }) {
                 dirty = true;
             }
             ui.end_row();
@@ -3665,9 +3657,7 @@ fn show_reality_settings_edit(
 ) -> bool {
     let mut dirty = false;
     let mut dest = reality.destination.clone();
-    let mut server_names = reality.server_names.join("\n");
     let mut private_key = reality.private_key.clone();
-    let mut short_ids = reality.short_ids.join("\n");
     let mut mldsa65_seed = reality.mldsa65_seed.clone().unwrap_or_default();
     let mut min_client_ver = reality.min_client_ver.clone();
     let mut max_client_ver = reality.max_client_ver.clone();
@@ -3709,11 +3699,9 @@ fn show_reality_settings_edit(
             ui.end_row();
 
             super::field_label(ui, "serverNames (one per line)", HELP_REALITY_SERVER_NAMES);
-            if ui
-                .add(egui::TextEdit::multiline(&mut server_names).desired_rows(3))
-                .changed()
-            {
-                reality.server_names = lines_to_vec(&server_names);
+            if persistent_list_text_edit(ui, "reality_server_names", &mut reality.server_names, |ui, text| {
+                ui.add(egui::TextEdit::multiline(text).desired_rows(3))
+            }) {
                 dirty = true;
             }
             ui.end_row();
@@ -3756,11 +3744,9 @@ fn show_reality_settings_edit(
             ui.end_row();
 
             super::field_label(ui, "shortIds (one per line)", HELP_REALITY_SHORT_IDS);
-            if ui
-                .add(egui::TextEdit::multiline(&mut short_ids).desired_rows(3))
-                .changed()
-            {
-                reality.short_ids = lines_to_vec(&short_ids);
+            if persistent_list_text_edit(ui, "reality_short_ids", &mut reality.short_ids, |ui, text| {
+                ui.add(egui::TextEdit::multiline(text).desired_rows(3))
+            }) {
                 dirty = true;
             }
             ui.end_row();
