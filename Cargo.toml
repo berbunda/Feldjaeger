@@ -39,4 +39,4 @@ x509-parser = "0.18.1"
 tokio = { version = "1.53.2", features = ["rt", "rt-multi-thread", "macros", "time"] }
 
 [build-dependencies]
-embed-resource = "3.0.11"
+embed-resource = "3.0.12"
