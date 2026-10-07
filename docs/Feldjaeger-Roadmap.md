@@ -264,7 +264,7 @@ Pop-up help / field documentation overlays (§3:124) shipped scoped to the Inbou
 - [x] Pop-up help: FakeDNS page ✅ 2026-10-07 Реализация (Architecture §114, 0.5.54-0): 3 текста EN+RU — «Pools» (как включается FakeDNS и какие пулы ядро добавляет само), `ipPool`, `poolSize`; умолчания — по ядру v26.9.30 (`2001:2::/48`), документация до сих пор указывает `fc00::/18`
 - [x] Pop-up help: Routing page ✅ 2026-10-07 Реализация (Architecture §113, 0.5.53-0): 28 текстов EN+RU — domainStrategy, все условия и цели правила, webhook, балансировщики и настройки leastLoad; сверено с документацией и `infra/conf/router.go` / `app/router/condition.go` (`attrs` — регулярные выражения, `localOS`)
 - [x] Pop-up help: Policy page ✅ 2026-10-07 Реализация (Architecture §114, 0.5.54-0): 12 текстов EN+RU — поля уровня, статистика, `policy.system`; заодно исправлены устаревшие умолчания в подписях формы (`handshake` 4 → 60, `uplinkOnly` 2 → 1, `downlinkOnly` 5 → 1, по `SessionDefault` ядра)
-- [ ] Pop-up help: Observatory page
+- [x] Pop-up help: Observatory page ✅ 2026-10-07 Реализация (Architecture §115, 0.5.55-0): 4 текста EN+RU — `probeUrl`, `probeInterval`, `enableConcurrency`, `subjectSelector`; сверено с `app/observatory/observer.go` (GET с таймаутом 5 с, «жив» при любом HTTP-ответе; без enableConcurrency пауза после каждого outbound — круг ≈ N × probeInterval), `cfgcommon/duration` (только строка с единицей) и `outbound.Manager.Select` (префиксы тегов); серая пояснительная строка у `enableConcurrency` заменена справкой
 - [ ] Pop-up help: BurstObservatory page
 - [ ] Pop-up help: API Settings page
 - [ ] Pop-up help: Log Settings page

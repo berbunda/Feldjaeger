@@ -9602,3 +9602,36 @@ Save требует заполнить поле. Три теста, которы
 `optional_u64_row` (Policy) получил параметр `help`; обе страницы вызывают `show_help_dialog`, тест
 `pages_with_help_buttons_render_the_help_dialog` проверяет их. Итог: **1391 passed / 0 failed**,
 clippy lib 65 (без изменений). GUI в запущенном приложении не проверялся.
+
+# 115	Pop-up help: Observatory на двух языках (Roadmap §4.4) (0.5.55-0)
+
+## 115.1	Тексты (`gui/pages/observatory.rs`, 4 текста)
+
+Справка есть только в режиме редактирования (read-only вид показывает значения без полей ввода).
+Источник поведения и умолчаний — ядро v26.9.30, а не документация:
+- `HELP_PROBE_URL` — `app/observatory/observer.go` `probe()`: HTTP GET через выбранный outbound
+  (`tagged.Dialer`), таймаут клиента 5 с, перенаправления не выполняются
+  (`http.ErrUseLastResponse`), код ответа не проверяется — «жив» при любом HTTP-ответе; пустой
+  URL — `https://www.google.com/generate_204`.
+- `HELP_PROBE_INTERVAL` — `infra/conf/cfgcommon/duration`: принимается только строка в формате
+  `time.ParseDuration` (число без единицы — ошибка разбора конфига). `background()`: 0 или
+  отсутствие — 10 с; без `enableConcurrency` пауза идёт после **каждого** outbound, поэтому круг
+  по N outbound длится ≈ N × probeInterval.
+- `HELP_ENABLE_CONCURRENCY` — последовательно в порядке тегов (`sort.Strings`) против
+  одновременной проверки всех с одной паузой после круга.
+- `HELP_SUBJECT_SELECTORS` — `outbound.Manager.Select`: `strings.HasPrefix` по тегам; при пустом
+  списке `Observer.Start()` фоновую проверку не запускает. Потребители — балансировщики
+  leastPing / leastLoad и `ObservatoryService` API.
+
+## 115.2	Форма
+
+Локальный `optional_text_row` получил параметр `help` (метка теперь `&'static str`, как требует
+`help_button`). Серая пояснительная строка под `enableConcurrency` удалена — её заменяет справка
+(текст был неполным: не говорил о порядке и паузах). Заголовок «Subject selectors (N)» получил
+кнопку справки с заголовком окна `subjectSelector` (JSON-ключ). Сведение копий
+`optional_text_row` — отдельный пункт Roadmap §4.4, здесь не трогалось.
+
+## 115.3	Итог
+
+Страница вызывает `show_help_dialog`, тест `pages_with_help_buttons_render_the_help_dialog`
+проверяет и её. Итог: **1391 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не проверялся.

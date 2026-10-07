@@ -741,6 +741,7 @@ mod tests {
             ("routing.rs", include_str!("routing.rs")),
             ("fakedns.rs", include_str!("fakedns.rs")),
             ("policy.rs", include_str!("policy.rs")),
+            ("observatory.rs", include_str!("observatory.rs")),
         ] {
             assert!(source.contains("super::show_help_dialog(ui)"), "{file}");
         }

@@ -5,6 +5,7 @@
 
 use egui::{Color32, RichText, Sense, TextEdit, Ui};
 
+use super::HelpText;
 use crate::app::{
     ApplicationService, MISSING_FIELD, ObservatoryPageState, observatory_general_display,
 };
@@ -14,9 +15,55 @@ const MUTED_COLOR: Color32 = Color32::from_rgb(140, 140, 140);
 const ERROR_COLOR: Color32 = Color32::from_rgb(200, 60, 60);
 const WARN_COLOR: Color32 = Color32::from_rgb(210, 170, 40);
 
+// ─── Field help text (Roadmap §4.4) ──────────────────────────────────────────
+//
+// Condensed from https://xtls.github.io/config/observatory.html; behaviour and defaults are
+// Xray-core's (`app/observatory/observer.go`, `infra/conf/observatory.go`,
+// `infra/conf/cfgcommon/duration`, `app/proxyman/outbound` `Select` v26.9.30).
+
+const HELP_PROBE_URL: HelpText = HelpText::new(
+    "URL requested with HTTP GET through each selected outbound; the time to the response is \
+     the outbound's latency. Any HTTP response within 5 s counts as alive — the status code is \
+     not checked and redirects are not followed; an error or timeout marks the outbound dead. \
+     Empty = https://www.google.com/generate_204.",
+    "URL, который запрашивается методом HTTP GET через каждый выбранный outbound; время до \
+     ответа — задержка этого outbound. Любой HTTP-ответ в пределах 5 с считается «жив» — код \
+     ответа не проверяется, перенаправления не выполняются; ошибка или таймаут помечают outbound \
+     как недоступный. Пусто — https://www.google.com/generate_204.",
+);
+const HELP_PROBE_INTERVAL: HelpText = HelpText::new(
+    "Pause between probes, a number with a unit: ns, us, ms, s, m, h (e.g. 10s, 1m30s); a bare \
+     number is rejected by Xray-core. With enableConcurrency off the pause follows every single \
+     outbound, so one round over N outbounds takes about N × probeInterval. Empty or 0 = 10s.",
+    "Пауза между проверками — число с единицей: ns, us, ms, s, m, h (например, 10s, 1m30s); \
+     число без единицы Xray-core отвергает. При выключенном enableConcurrency пауза идёт после \
+     каждого outbound, поэтому один круг по N outbound занимает около N × probeInterval. Пусто \
+     или 0 — 10s.",
+);
+const HELP_ENABLE_CONCURRENCY: HelpText = HelpText::new(
+    "Off (default): outbounds are probed one at a time in tag order, with probeInterval after \
+     each. On: all selected outbounds are probed at once, then Observatory waits probeInterval — \
+     results refresh faster, at the cost of a burst of simultaneous requests.",
+    "Выключено (по умолчанию): outbound проверяются по одному в порядке тегов, после каждого — \
+     пауза probeInterval. Включено: все выбранные outbound проверяются одновременно, затем \
+     Observatory ждёт probeInterval — результаты обновляются быстрее ценой всплеска \
+     одновременных запросов.",
+);
+const HELP_SUBJECT_SELECTORS: HelpText = HelpText::new(
+    "Outbound tag prefixes, one per line: every outbound whose tag starts with one of them is \
+     probed (\"proxy\" matches proxy-a and proxy-b). With an empty list Observatory does not run \
+     at all. The results are used by balancers with the leastPing / leastLoad strategy (Routing \
+     → Balancers) and reported by the API's ObservatoryService.",
+    "Префиксы тегов outbound, по одному на строку: проверяется каждый outbound, тег которого \
+     начинается с одного из них (\"proxy\" подходит к proxy-a и proxy-b). При пустом списке \
+     Observatory не запускается вовсе. Результаты используют балансировщики со стратегией \
+     leastPing / leastLoad (Routing → Balancers), их также отдаёт ObservatoryService в API.",
+);
+
 /// Renders the Observatory page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     service.tick_observatory_page_status();
+    super::show_help_dialog(ui);
 
     ui.heading("Observatory");
     ui.add_space(8.0);
@@ -251,30 +298,41 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
     ui.strong("General");
     ui.add_space(4.0);
 
-    optional_text_row(ui, "probeUrl", &mut draft.probe_url, "https://www.google.com/generate_204");
-    optional_text_row(ui, "probeInterval", &mut draft.probe_interval, "10s");
-    ui.checkbox(&mut draft.enable_concurrency, "enableConcurrency");
-    ui.label(
-        RichText::new(
-            "enableConcurrency: probe all matching outbounds at once instead of one at a time \
-             (default: off).",
-        )
-        .size(12.0)
-        .color(MUTED_COLOR),
+    optional_text_row(
+        ui,
+        "probeUrl",
+        &mut draft.probe_url,
+        "https://www.google.com/generate_204",
+        HELP_PROBE_URL,
     );
+    optional_text_row(ui, "probeInterval", &mut draft.probe_interval, "10s", HELP_PROBE_INTERVAL);
+    ui.horizontal(|ui| {
+        super::help_button(ui, "enableConcurrency", HELP_ENABLE_CONCURRENCY);
+        ui.checkbox(&mut draft.enable_concurrency, "enableConcurrency");
+    });
 
     ui.add_space(16.0);
     ui.separator();
-    ui.strong(format!("Subject selectors ({})", draft.subject_selectors.len()));
+    ui.horizontal(|ui| {
+        super::help_button(ui, "subjectSelector", HELP_SUBJECT_SELECTORS);
+        ui.strong(format!("Subject selectors ({})", draft.subject_selectors.len()));
+    });
     ui.add_space(4.0);
     super::persistent_list_text_edit(ui, "observatory_subject_selectors", &mut draft.subject_selectors, |ui, text| {
         ui.add(TextEdit::multiline(text).desired_rows(4).hint_text("one outbound tag prefix per line"))
     });
 }
 
-fn optional_text_row(ui: &mut Ui, label: &str, value: &mut Option<String>, hint: &str) {
+fn optional_text_row(
+    ui: &mut Ui,
+    label: &'static str,
+    value: &mut Option<String>,
+    hint: &str,
+    help: HelpText,
+) {
     let mut text = value.clone().unwrap_or_default();
     ui.horizontal(|ui| {
+        super::help_button(ui, label, help);
         ui.label(label);
         if ui
             .add(TextEdit::singleline(&mut text).desired_width(280.0).hint_text(hint))
