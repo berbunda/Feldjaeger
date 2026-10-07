@@ -23,8 +23,11 @@ const WARN_COLOR: Color32 = Color32::from_rgb(210, 170, 40);
 /// RFC 5737 test-net presets, where 65535 would exceed the block's actual address count.
 type FakeDnsPreset = (&'static str, &'static str, Option<u64>);
 
-/// Alternatives to the Xray-documented default (`198.18.0.0/15`, RFC 2544 benchmarking range —
-/// still offered here too, first in the list) for the FakeDNS `ipPool`. Every entry is drawn from
+/// Alternatives to the Xray-core defaults (`198.18.0.0/15`, RFC 2544 benchmarking range, and —
+/// since v26.9.30, XTLS/Xray-core#6815 — `2001:2::/48`, its RFC 5180 IPv6 counterpart, replacing
+/// `fc00::/18`; both still offered here, first in their family) for the FakeDNS `ipPool`. The core
+/// adds these pools itself only when a `fakedns` DNS server is used and there is no top-level
+/// `fakedns` (`FakeDNSPostProcessingStage`). Every entry is drawn from
 /// an IANA special-purpose block that is not expected to be routed on the real internet — the
 /// property that actually matters for a FakeDNS pool (its addresses are synthetic and never
 /// leave the local Xray process, but picking a block that could collide with something real on
@@ -65,7 +68,12 @@ const FAKEDNS_POOL_PRESETS: &[FakeDnsPreset] = &[
         Some(200),
     ),
     (
-        "fc00::/18 (IPv6) — unique local address range",
+        "2001:2::/48 (IPv6) — default since Xray-core v26.9.30 (RFC 5180 benchmarking)",
+        "2001:2::/48",
+        None,
+    ),
+    (
+        "fc00::/18 (IPv6) — default before Xray-core v26.9.30; unique local range, may overlap a private IPv6 network",
         "fc00::/18",
         None,
     ),
@@ -344,5 +352,27 @@ fn show_pool_edit_form(
             .size(11.0)
             .color(MUTED_COLOR),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::xray::validate_fakedns_settings;
+
+    #[test]
+    fn presets_are_valid_pools_and_follow_the_core_defaults() {
+        for (label, cidr, pool_size) in FAKEDNS_POOL_PRESETS {
+            let mut pool = FakeDnsPoolEntry::blank();
+            pool.ip_pool = (*cidr).to_owned();
+            pool.pool_size = *pool_size;
+            let mut settings = FakeDnsSettings::defaults();
+            settings.pools.push(pool);
+            assert!(validate_fakedns_settings(&settings).is_ok(), "{label}");
+        }
+        // First preset of each family = the Xray-core default (`features/dns/fakedns.go`, v26.9.30).
+        let first_v6 = FAKEDNS_POOL_PRESETS.iter().find(|(_, cidr, _)| cidr.contains(':'));
+        assert_eq!(FAKEDNS_POOL_PRESETS[0].1, "198.18.0.0/15");
+        assert_eq!(first_v6.map(|preset| preset.1), Some("2001:2::/48"));
     }
 }

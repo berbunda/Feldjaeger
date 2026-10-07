@@ -9417,3 +9417,25 @@ XTLS/Xray-core#6771 (v26.9.30): из `WireGuardConfig` (`infra/conf/wireguard.go
 ядра и severity), `remote_dns_must_be_ip_addresses`, `outbound_value_with_tag_drops_ignored_domain_strategy`.
 Итог: **1389 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не
 проверялся.
+
+# 109	FakeDNS: IPv6-пул по умолчанию `2001:2::/48` (Roadmap §4.5, аудит v26.9.30 C) (0.5.51-2)
+
+XTLS/Xray-core#6815 (v26.9.30) сменил `dns.FakeIPv6Pool` (`features/dns/fakedns.go`) с
+`fc00::/18` на `2001:2::/48` — IPv6-диапазон для бенчмарков (RFC 5180), аналог IPv4-умолчания
+`198.18.0.0/15` (RFC 2544). Ядро добавляет эти пулы само (`FakeDNSPostProcessingStage`,
+`infra/conf/fakedns.go`) только когда в `dns.servers` есть `fakedns`, а секции `fakedns` нет:
+оба пула по 32768 адресов, или один на 65535 при `queryStrategy` `UseIPv4` / `UseIPv6`.
+
+Изменения в `gui/pages/fakedns.rs`:
+- `2001:2::/48` — первый IPv6-пресет с подписью «default since Xray-core v26.9.30»;
+- `fc00::/18` остался, с подписью «default before v26.9.30; unique local range, may overlap a
+  private IPv6 network». Это тот же довод, по которому в пресетах нет RFC 1918;
+- комментарий к пресетам описывает оба умолчания ядра и условие, при котором ядро их добавляет.
+
+Модель и запись не менялись. Тестовые данные с `fc00::/18` (`fakedns_settings.rs`, `tests.rs`)
+используют его как произвольный валидный CIDR, их не трогали.
+
+Тест (+1): `presets_are_valid_pools_and_follow_the_core_defaults` — каждый пресет проходит
+`validate_fakedns_settings`, первые пресеты IPv4 и IPv6 совпадают с умолчаниями ядра. Итог:
+**1390 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не
+проверялся.
