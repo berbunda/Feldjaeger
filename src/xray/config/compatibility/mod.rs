@@ -18,7 +18,7 @@ mod warnings;
 pub use core_version::{CORE_FEATURES, CoreFeature, XrayCoreVersion};
 pub use warnings::{
     CompatibilityWarning, CompatibilityWarningId, WarningSeverity, inbound_warnings,
-    outbound_warnings, with_warning_suffix,
+    is_netip_addr, outbound_warnings, with_warning_suffix,
 };
 pub use matrix::{
     allowed_security_modes, allowed_stream_methods, coerce_display_stream_method,

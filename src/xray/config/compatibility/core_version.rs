@@ -88,6 +88,10 @@ pub enum CoreFeature {
     /// TUN inbound `autoSystemDnsToGateway` (Linux) and `autoSystemWfpBlockLeak` (Windows) —
     /// XTLS/Xray-core#6773, renamed and extended by #6853 before the release.
     TunAutoSystemDnsAndLeakBlock,
+    /// WireGuard outbound without `domainStrategy` (no longer read) and without the `"local"`
+    /// mode of `remoteDNS`: every entry must be an IP address, anything else panics at start —
+    /// XTLS/Xray-core#6771.
+    WireGuardRemoteDnsIpOnly,
 }
 
 /// The table of Roadmap §2.6 stage 0.7, oldest first.
@@ -105,6 +109,7 @@ pub const CORE_FEATURES: &[CoreFeature] = &[
     CoreFeature::NoiseExpPacket,
     CoreFeature::XdnsObjectSchema,
     CoreFeature::TunAutoSystemDnsAndLeakBlock,
+    CoreFeature::WireGuardRemoteDnsIpOnly,
 ];
 
 impl CoreFeature {
@@ -124,6 +129,7 @@ impl CoreFeature {
             Self::NoiseExpPacket => XrayCoreVersion::new(26, 9, 30),
             Self::XdnsObjectSchema => XrayCoreVersion::new(26, 9, 30),
             Self::TunAutoSystemDnsAndLeakBlock => XrayCoreVersion::new(26, 9, 30),
+            Self::WireGuardRemoteDnsIpOnly => XrayCoreVersion::new(26, 9, 30),
         }
     }
 
@@ -143,6 +149,7 @@ impl CoreFeature {
             Self::NoiseExpPacket => 6862,
             Self::XdnsObjectSchema => 6718,
             Self::TunAutoSystemDnsAndLeakBlock => 6853,
+            Self::WireGuardRemoteDnsIpOnly => 6771,
         }
     }
 
@@ -162,6 +169,7 @@ impl CoreFeature {
             Self::NoiseExpPacket => "`noise` item `type: \"exp\"`",
             Self::XdnsObjectSchema => "`xdns` object schema (domains[] / resolvers[] objects)",
             Self::TunAutoSystemDnsAndLeakBlock => "TUN `autoSystemDnsToGateway` / `autoSystemWfpBlockLeak`",
+            Self::WireGuardRemoteDnsIpOnly => "WireGuard outbound without `domainStrategy`, `remoteDNS` IPs only",
         }
     }
 

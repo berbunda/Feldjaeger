@@ -9383,3 +9383,37 @@ Feldjäger. Данные получены через `gh api` 2026-10-07. Док
 `tun_dns_to_gateway_false_keeps_an_explicit_false_and_drops_true`,
 `tun_validation_mirrors_tun_config_build`, `tun_v26_9_30_keys_warn_on_old_cores_and_wfp_is_windows_only`.
 Итог: **1385 passed / 0 failed**, clippy lib 65. GUI в запущенном приложении не проверялся.
+
+# 108	WireGuard / WARP outbound: `domainStrategy` и `remoteDNS` после v26.9.30 (Roadmap §4.5, аудит v26.9.30 B) (0.5.51-1)
+
+## 108.1	Ядро
+
+XTLS/Xray-core#6771 (v26.9.30): из `WireGuardConfig` (`infra/conf/wireguard.go`) удалён
+`domainStrategy` — ключ больше не читается, любое значение молча игнорируется. В
+`proxy/wireguard/client.go` каждый элемент `remoteDNS` теперь проходит через
+`netip.MustParseAddr`, режима `"local"` больше нет. Проверено `xray run -test` (Xray 26.9.30):
+`remoteDNS: ["local"]` и `["dns.google"]` — **panic** (`ParseAddr(...): unable to parse IP`),
+`["1.1.1.1"]` — OK; `domainStrategy: "ForceIPv4"` и `"nonsense"` — OK (игнорируются).
+
+## 108.2	Реализация
+
+- `CoreFeature::WireGuardRemoteDnsIpOnly` (v26.9.30, #6771).
+- `compatibility/warnings.rs`: `is_netip_addr` повторяет `netip.ParseAddr`: IPv4, IPv6, IPv6 с
+  `%zone`; без trim, ведущие нули не принимаются. `wireguard_outbound_warnings` (из
+  `outbound_warnings`, только при ядре ≥ v26.9.30 или неизвестной версии) выдаёт
+  `WireGuardDomainStrategyIgnored` (Caution) для не-`null` `settings.domainStrategy` и
+  `WireGuardRemoteDnsNotIp` (**Danger** — ядро не запустится) для каждого строкового
+  `settings.remoteDNS[i]`, не являющегося IP. Нестроковый элемент не отмечается: это ошибка
+  разбора JSON при загрузке, а не panic. Предупреждения видны в таблице Outbounds (в том числе для
+  WARP-outbound, который не редактируется в Shell) и в сводке после Add / Save.
+- WARP (`xray/warp/parse.rs`): `parse_generated_xray_value` отвергает сгенерированный `wgcf-cli`
+  outbound с не-IP значением в `remoteDNS` (`GeneratedConfigurationInvalid`), поэтому такой outbound
+  не записывается и ядро не падает. `outbound_value_with_tag` больше не пишет `domainStrategy`:
+  ключ больше не читается ядром. Feldjäger ориентируется на текущие ядра (как в §102).
+
+## 108.3	Итог
+
+Тесты (+4): `netip_addr_matches_go_parse_addr`, `wireguard_outbound_v26_9_30_warnings` (по версиям
+ядра и severity), `remote_dns_must_be_ip_addresses`, `outbound_value_with_tag_drops_ignored_domain_strategy`.
+Итог: **1389 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не
+проверялся.

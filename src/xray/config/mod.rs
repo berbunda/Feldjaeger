@@ -53,7 +53,8 @@ pub use burst_observatory_settings::{
     burst_observatory_settings_to_new_value, validate_burst_observatory_settings,
 };
 pub use compatibility::{
-    CompatibilityWarning, CompatibilityWarningId, WarningSeverity, inbound_warnings, outbound_warnings,
+    CompatibilityWarning, CompatibilityWarningId, WarningSeverity, inbound_warnings, is_netip_addr,
+    outbound_warnings,
     with_warning_suffix, CORE_FEATURES, CoreFeature, XrayCoreVersion,
     CompatibilityGateId, allowed_security_modes, allowed_stream_methods, check_inbound_compatibility,
     check_outbound_compatibility, coerce_display_stream_method, coerce_security_mode_for_transport,

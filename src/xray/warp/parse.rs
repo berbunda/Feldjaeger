@@ -166,6 +166,23 @@ pub fn parse_generated_xray_value(mut value: Value) -> WarpResult<WarpCredential
         .get("domainStrategy")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    // Xray-core v26.9.30+ parses every entry with `netip.MustParseAddr` (XTLS/Xray-core#6771):
+    // the removed "local" mode or a domain would crash the core at start, so refuse them here.
+    let raw_remote_dns = settings.get("remoteDNS").and_then(Value::as_array);
+    if let Some(bad) = raw_remote_dns
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .find(|entry| !crate::xray::config::is_netip_addr(entry))
+    {
+        return Err(WarpError::new(
+            WarpErrorKind::GeneratedConfigurationInvalid,
+            format!(
+                "remoteDNS entry \"{bad}\" is not an IP address; Xray-core v26.9.30+ crashes on it \
+                 (the \"local\" mode was removed in XTLS/Xray-core#6771)"
+            ),
+        ));
+    }
     let remote_dns = settings
         .get("remoteDNS")
         .and_then(Value::as_array)
@@ -240,6 +257,8 @@ pub fn outbound_value_with_tag(credentials: &WarpCredentials, tag: &str) -> Valu
             settings
                 .entry("noKernelTun")
                 .or_insert(Value::Bool(true));
+            // No longer read by Xray-core v26.9.30+ (XTLS/Xray-core#6771); don't write a dead key.
+            settings.remove("domainStrategy");
         }
     }
     value
@@ -363,5 +382,29 @@ mod tests {
         let creds = parse_generated_xray_value(source).unwrap();
         let value = outbound_value_with_tag(&creds, "warp-out");
         assert_eq!(value["settings"]["noKernelTun"], json!(false));
+    }
+
+    fn with_setting(key: &str, setting: Value) -> Value {
+        let mut source = sample_outbound(None, true);
+        source["settings"].as_object_mut().unwrap().insert(key.to_owned(), setting);
+        source
+    }
+
+    #[test]
+    fn remote_dns_must_be_ip_addresses() {
+        for bad in ["local", "dns.google"] {
+            let err = parse_generated_xray_value(with_setting("remoteDNS", json!(["1.1.1.1", bad])))
+                .expect_err(bad);
+            assert_eq!(err.kind(), WarpErrorKind::GeneratedConfigurationInvalid);
+        }
+        let ok = parse_generated_xray_value(with_setting("remoteDNS", json!(["1.1.1.1", "2606:4700:4700::1111"])));
+        assert_eq!(ok.unwrap().remote_dns.len(), 2);
+    }
+
+    #[test]
+    fn outbound_value_with_tag_drops_ignored_domain_strategy() {
+        let creds = parse_generated_xray_value(with_setting("domainStrategy", json!("ForceIPv4"))).unwrap();
+        let value = outbound_value_with_tag(&creds, "warp-out");
+        assert!(value["settings"].get("domainStrategy").is_none());
     }
 }

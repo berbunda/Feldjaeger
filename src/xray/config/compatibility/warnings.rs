@@ -137,6 +137,13 @@ pub enum CompatibilityWarningId {
     /// TUN `settings.autoSystemWfpBlockLeak` — Windows Filtering Platform rules, applied only
     /// when Xray runs on Windows; Feldjäger manages Linux servers (`docs/rules.md`).
     TunWfpBlockLeakWindowsOnly,
+    /// WireGuard outbound `settings.domainStrategy` — no longer read since Xray-core v26.9.30
+    /// ([`CoreFeature::WireGuardRemoteDnsIpOnly`]).
+    WireGuardDomainStrategyIgnored,
+    /// WireGuard outbound `settings.remoteDNS[i]` that is not an IP address (the removed `"local"`
+    /// mode, a domain) — Xray-core v26.9.30+ panics at start, `xray run -test` included;
+    /// [`WarningSeverity::Danger`].
+    WireGuardRemoteDnsNotIp,
 }
 
 /// How a warning is shown: [`Self::Danger`] gets the red road-sign style in the GUI and
@@ -153,7 +160,7 @@ impl CompatibilityWarningId {
     /// Display severity (see [`WarningSeverity`]).
     pub fn severity(self) -> WarningSeverity {
         match self {
-            Self::OpenProxyInbound => WarningSeverity::Danger,
+            Self::OpenProxyInbound | Self::WireGuardRemoteDnsNotIp => WarningSeverity::Danger,
             _ => WarningSeverity::Caution,
         }
     }
@@ -290,6 +297,17 @@ impl CompatibilityWarningId {
                 "no effect on a Linux server: Windows Filtering Platform leak blocking applies \
                  only when Xray runs on Windows (XTLS/Xray-core#6853); the values are still \
                  checked at load — only \"dns\" and \"misconfigtun\" are accepted"
+            }
+            Self::WireGuardDomainStrategyIgnored => {
+                "ignored by Xray-core v26.9.30+: WireGuard outbound no longer reads \
+                 `domainStrategy` (XTLS/Xray-core#6771); resolve names with \
+                 `streamSettings.sockopt.domainStrategy` or routing instead"
+            }
+            Self::WireGuardRemoteDnsNotIp => {
+                "Xray-core v26.9.30+ crashes at start: every `remoteDNS` entry must be an IP \
+                 address — the \"local\" mode and domain names were removed \
+                 (XTLS/Xray-core#6771); `xray run -test` panics too. Replace it with an IP, e.g. \
+                 1.1.1.1"
             }
         };
         Cow::Borrowed(text)
@@ -457,6 +475,7 @@ pub fn outbound_warnings(outbound: &Value, core: Option<XrayCoreVersion>) -> Vec
             location,
         });
     }
+    wireguard_outbound_warnings(outbound, core, &mut warnings);
     let is_freedom = outbound
         .get("protocol")
         .and_then(Value::as_str)
@@ -762,6 +781,53 @@ fn tun_warnings(inbound: &Value, core: Option<XrayCoreVersion>, warnings: &mut V
     }
 }
 
+/// Whether `text` is what Go's `netip.ParseAddr` accepts: an IPv4 / IPv6 address, an IPv6 one
+/// optionally with a `%zone`. WireGuard `remoteDNS` entries go through `netip.MustParseAddr`
+/// since Xray-core v26.9.30 (XTLS/Xray-core#6771), so anything else panics at start.
+pub fn is_netip_addr(text: &str) -> bool {
+    if text.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    text.split_once('%').is_some_and(|(address, zone)| {
+        !zone.is_empty() && address.parse::<std::net::Ipv6Addr>().is_ok()
+    })
+}
+
+/// WireGuard outbound keys changed by XTLS/Xray-core#6771 (v26.9.30). The generic WireGuard
+/// Shell is retired; the WARP outbound (Tier 3) is the WireGuard outbound Feldjäger writes.
+fn wireguard_outbound_warnings(
+    outbound: &Value,
+    core: Option<XrayCoreVersion>,
+    warnings: &mut Vec<CompatibilityWarning>,
+) {
+    let is_wireguard = outbound
+        .get("protocol")
+        .and_then(Value::as_str)
+        .is_some_and(|protocol| protocol.trim().eq_ignore_ascii_case("wireguard"));
+    if !is_wireguard || !CoreFeature::WireGuardRemoteDnsIpOnly.available_in(core) {
+        return;
+    }
+    let Some(settings) = outbound.get("settings") else {
+        return;
+    };
+    if settings.get("domainStrategy").is_some_and(|value| !value.is_null()) {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::WireGuardDomainStrategyIgnored,
+            location: "settings.domainStrategy".to_owned(),
+        });
+    }
+    let entries = settings.get("remoteDNS").and_then(Value::as_array);
+    for (index, entry) in entries.into_iter().flatten().enumerate() {
+        // A non-string entry fails `json.Unmarshal` into `[]string` — a load error, not a panic.
+        if entry.as_str().is_some_and(|text| !is_netip_addr(text)) {
+            warnings.push(CompatibilityWarning {
+                id: CompatibilityWarningId::WireGuardRemoteDnsNotIp,
+                location: format!("settings.remoteDNS[{index}]"),
+            });
+        }
+    }
+}
+
 /// [`CompatibilityWarningId::RequiresNewerCore`] when the installed core is known and older
 /// than `feature`; nothing for an unknown version.
 fn push_if_core_too_old(
@@ -804,6 +870,37 @@ pub fn with_warning_suffix(message: impl Into<String>, warnings: &[Compatibility
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn netip_addr_matches_go_parse_addr() {
+        for ok in ["1.1.1.1", "2606:4700:4700::1111", "fe80::1%eth0", "::ffff:1.2.3.4"] {
+            assert!(is_netip_addr(ok), "{ok}");
+        }
+        for bad in ["local", "dns.google", " 1.1.1.1", "01.1.1.1", "1.1.1.1/32", "fe80::1%", ""] {
+            assert!(!is_netip_addr(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn wireguard_outbound_v26_9_30_warnings() {
+        let outbound = json!({"protocol": "wireguard", "settings": {
+            "domainStrategy": "ForceIPv4",
+            "remoteDNS": ["1.1.1.1", "local", "dns.google"]
+        }});
+        let found = |core| outbound_warnings(&outbound, core).into_iter().map(|w| (w.id, w.location)).collect::<Vec<_>>();
+        let expected = vec![
+            (CompatibilityWarningId::WireGuardDomainStrategyIgnored, "settings.domainStrategy".to_owned()),
+            (CompatibilityWarningId::WireGuardRemoteDnsNotIp, "settings.remoteDNS[1]".to_owned()),
+            (CompatibilityWarningId::WireGuardRemoteDnsNotIp, "settings.remoteDNS[2]".to_owned()),
+        ];
+        assert_eq!(found(None), expected);
+        assert_eq!(found(Some(XrayCoreVersion::new(26, 9, 30))), expected);
+        // v26.9.9 still reads domainStrategy and supports "local".
+        assert!(found(Some(XrayCoreVersion::new(26, 9, 9))).is_empty());
+        assert_eq!(CompatibilityWarningId::WireGuardRemoteDnsNotIp.severity(), WarningSeverity::Danger);
+        let clean = json!({"protocol": "wireguard", "settings": {"remoteDNS": ["1.1.1.1"], "domainStrategy": null}});
+        assert!(outbound_warnings(&clean, None).is_empty());
+    }
 
     #[test]
     fn tun_v26_9_30_keys_warn_on_old_cores_and_wfp_is_windows_only() {
