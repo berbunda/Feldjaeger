@@ -739,6 +739,8 @@ mod tests {
             ("outbounds.rs", include_str!("outbounds.rs")),
             ("dns.rs", include_str!("dns.rs")),
             ("routing.rs", include_str!("routing.rs")),
+            ("fakedns.rs", include_str!("fakedns.rs")),
+            ("policy.rs", include_str!("policy.rs")),
         ] {
             assert!(source.contains("super::show_help_dialog(ui)"), "{file}");
         }

@@ -9566,3 +9566,39 @@ Save требует заполнить поле. Три теста, которы
 Обе страницы вызывают `show_help_dialog`; тест `pages_with_help_buttons_render_the_help_dialog`
 теперь проверяет и их. Итог: **1391 passed / 0 failed**, clippy lib 65 (без изменений). GUI в
 запущенном приложении не проверялся.
+
+# 114	Pop-up help: FakeDNS и Policy на двух языках (Roadmap §4.4) (0.5.54-0)
+
+## 114.1	FakeDNS (`gui/pages/fakedns.rs`, 3 текста)
+
+- `HELP_POOLS` у заголовка «Pools»: как работает FakeDNS, что для этого нужно (`fakedns` в
+  `dns.servers` и sniffing с `destOverride: fakedns` на клиентском inbound), какие пулы ядро
+  добавляет само без секции `fakedns` (`FakeDNSPostProcessingStage`: `198.18.0.0/15` и
+  `2001:2::/48` по 32768 адресов, один пул на 65535 при `UseIPv4` / `UseIPv6`).
+- `HELP_IP_POOL`, `HELP_POOL_SIZE`: LRU соответствий домен ↔ адрес, не больше числа адресов
+  блока, умолчание 65535.
+
+Умолчания взяты из ядра v26.9.30 (§109): документация xtls.github.io всё ещё указывает
+`fc00::/18`.
+
+## 114.2	Policy (`gui/pages/policy.rs`, 12 текстов)
+
+Поля уровня (`level`, `handshake`, `connIdle`, `uplinkOnly`, `downlinkOnly`, `bufferSize`,
+`statsUserUplink`, `statsUserDownlink`, `statsUserOnline`) и `policy.system` (флажок секции, два
+текста для inbound / outbound счётчиков). Источник умолчаний — ядро, а не документация:
+- `features/policy/policy.go` `SessionDefault()`: `handshake` 60 (подогнан под
+  `client_header_timeout` nginx), `connIdle` 300, `uplinkOnly` 1, `downlinkOnly` 1;
+- `readDefaultBufferSize()`: 512 КБ на amd64, 4 КБ на arm64 / mips64, 0 на arm / mips;
+  переменная окружения `XRAY_RAY_BUFFER_SIZE` (`xray.ray.buffer.size`) задаётся в МБ;
+- `infra/conf/policy.go`: `bufferSize` < 0 — без ограничения, 0 — без буфера.
+
+**Исправлены подписи формы:** «handshake (s, default 4)», «uplinkOnly (s, default 2)» и
+«downlinkOnly (s, default 5)» показывали старые умолчания ядра. Теперь там 60 / 1 / 1. То же
+исправлено в doc-комментариях `PolicyLevelEntry` (`policy_settings.rs`). Запись конфига не
+менялась: незаданное поле по-прежнему не пишется, и ядро подставляет своё значение.
+
+## 114.3	Итог
+
+`optional_u64_row` (Policy) получил параметр `help`; обе страницы вызывают `show_help_dialog`, тест
+`pages_with_help_buttons_render_the_help_dialog` проверяет их. Итог: **1391 passed / 0 failed**,
+clippy lib 65 (без изменений). GUI в запущенном приложении не проверялся.

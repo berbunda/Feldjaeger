@@ -33,13 +33,13 @@ use super::summary::cmp_policy_level;
 pub struct PolicyLevelEntry {
     /// The level identifier — a non-negative integer in string form, and the JSON object key.
     pub level: String,
-    /// `handshake` (seconds). `None` omits the key (documented Xray default: 4).
+    /// `handshake` (seconds). `None` omits the key (Xray-core default: 60).
     pub handshake: Option<u64>,
-    /// `connIdle` (seconds). `None` omits the key (documented Xray default: 300).
+    /// `connIdle` (seconds). `None` omits the key (Xray-core default: 300).
     pub conn_idle: Option<u64>,
-    /// `uplinkOnly` (seconds). `None` omits the key (documented Xray default: 2).
+    /// `uplinkOnly` (seconds). `None` omits the key (Xray-core default: 1).
     pub uplink_only: Option<u64>,
-    /// `downlinkOnly` (seconds). `None` omits the key (documented Xray default: 5).
+    /// `downlinkOnly` (seconds). `None` omits the key (Xray-core default: 1).
     pub downlink_only: Option<u64>,
     /// `statsUserUplink`. Always written (default `false`).
     pub stats_user_uplink: bool,

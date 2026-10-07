@@ -17,14 +17,92 @@ use crate::app::{
 use crate::xray::{
     PolicyLevelEntry, PolicySummary, SystemPolicyEntry, SystemPolicySummary, UserPolicySummary,
 };
+use super::{HelpText, field_label, help_button, help_checkbox};
 
 const MUTED_COLOR: Color32 = Color32::from_rgb(140, 140, 140);
 const ERROR_COLOR: Color32 = Color32::from_rgb(200, 60, 60);
 const WARN_COLOR: Color32 = Color32::from_rgb(210, 170, 40);
 
+// ─── Field help text (Roadmap §4.4) ──────────────────────────────────────────
+//
+// Condensed from https://xtls.github.io/config/policy.html; defaults are Xray-core's
+// (`features/policy/policy.go` `SessionDefault`, `readDefaultBufferSize`; `infra/conf/policy.go`).
+
+const HELP_LEVEL: HelpText = HelpText::new(
+    "User level this entry applies to — a non-negative number. Users, inbounds and outbounds \
+     select it with their level / userLevel; level 0 is the default for everyone.",
+    "Уровень пользователя, к которому относится запись, — неотрицательное число. Пользователи, \
+     inbound и outbound выбирают его через level / userLevel; уровень 0 — по умолчанию для всех.",
+);
+const HELP_HANDSHAKE: HelpText = HelpText::new(
+    "Seconds a new connection may take to finish its handshake before it is closed. Unchecked = \
+     60.",
+    "Сколько секунд у нового подключения есть на завершение рукопожатия, прежде чем оно будет \
+     закрыто. Без отметки — 60.",
+);
+const HELP_CONN_IDLE: HelpText = HelpText::new(
+    "Seconds a connection may pass no data in either direction before it is closed. Unchecked = \
+     300.",
+    "Сколько секунд подключение может не передавать данные ни в одну сторону, прежде чем будет \
+     закрыто. Без отметки — 300.",
+);
+const HELP_UPLINK_ONLY: HelpText = HelpText::new(
+    "After the server closes the downlink, seconds the connection is kept for the remaining \
+     uplink. Unchecked = 1.",
+    "Сколько секунд после закрытия сервером входящего потока подключение сохраняется для \
+     оставшегося исходящего. Без отметки — 1.",
+);
+const HELP_DOWNLINK_ONLY: HelpText = HelpText::new(
+    "After the client closes the uplink, seconds the connection is kept for the remaining \
+     downlink. Unchecked = 1.",
+    "Сколько секунд после закрытия клиентом исходящего потока подключение сохраняется для \
+     оставшегося входящего. Без отметки — 1.",
+);
+const HELP_BUFFER_SIZE: HelpText = HelpText::new(
+    "Internal buffer per connection, in KB; 0 = no buffer. Unchecked = the default for the CPU: \
+     512 on x86-64, 4 on arm64 / mips64, 0 on arm / mips (the XRAY_RAY_BUFFER_SIZE environment \
+     variable, in MB, changes that default).",
+    "Внутренний буфер на подключение в КБ; 0 — без буфера. Без отметки — значение для процессора: \
+     512 на x86-64, 4 на arm64 / mips64, 0 на arm / mips (переменная окружения \
+     XRAY_RAY_BUFFER_SIZE, в МБ, меняет это значение по умолчанию).",
+);
+const HELP_STATS_USER_UPLINK: HelpText = HelpText::new(
+    "Count the uplink traffic of every user of this level (per user email, read through the stats \
+     API — Statistics page). Needs the stats object.",
+    "Считать исходящий трафик каждого пользователя этого уровня (по email пользователя, читается \
+     через stats API — страница Statistics). Требует объект stats.",
+);
+const HELP_STATS_USER_DOWNLINK: HelpText = HelpText::new(
+    "Count the downlink traffic of every user of this level (per user email). Needs the stats \
+     object.",
+    "Считать входящий трафик каждого пользователя этого уровня (по email пользователя). Требует \
+     объект stats.",
+);
+const HELP_STATS_USER_ONLINE: HelpText = HelpText::new(
+    "Track which users of this level are online and from which IPs (per user email). Needs the \
+     stats object.",
+    "Отслеживать, какие пользователи этого уровня в сети и с каких IP (по email пользователя). \
+     Требует объект stats.",
+);
+const HELP_SYSTEM: HelpText = HelpText::new(
+    "policy.system — traffic counters per inbound and outbound tag (not per user). Needs the \
+     stats object.",
+    "policy.system — счётчики трафика по тегам inbound и outbound (не по пользователям). Требует \
+     объект stats.",
+);
+const HELP_STATS_INBOUND: HelpText = HelpText::new(
+    "Count uplink / downlink traffic of every inbound that has a tag.",
+    "Считать исходящий / входящий трафик каждого inbound с тегом.",
+);
+const HELP_STATS_OUTBOUND: HelpText = HelpText::new(
+    "Count uplink / downlink traffic of every outbound that has a tag.",
+    "Считать исходящий / входящий трафик каждого outbound с тегом.",
+);
+
 /// Renders the Policy page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     service.tick_policy_page_status();
+    super::show_help_dialog(ui);
 
     ui.heading("Policy");
     ui.add_space(8.0);
@@ -505,7 +583,7 @@ fn show_level_edit_form(
         .id_salt(("policy_level_edit", index))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label("level");
+                field_label(ui, "level", HELP_LEVEL);
                 ui.add(
                     egui::TextEdit::singleline(&mut level.level)
                         .desired_width(80.0)
@@ -517,25 +595,29 @@ fn show_level_edit_form(
             ui.label(RichText::new("Timeouts").strong());
             optional_u64_row(
                 ui,
-                "handshake (s, default 4)",
+                "handshake (s, default 60)",
+                HELP_HANDSHAKE,
                 &mut level.handshake,
                 ("policy_level_handshake", index),
             );
             optional_u64_row(
                 ui,
                 "connIdle (s, default 300)",
+                HELP_CONN_IDLE,
                 &mut level.conn_idle,
                 ("policy_level_conn_idle", index),
             );
             optional_u64_row(
                 ui,
-                "uplinkOnly (s, default 2)",
+                "uplinkOnly (s, default 1)",
+                HELP_UPLINK_ONLY,
                 &mut level.uplink_only,
                 ("policy_level_uplink_only", index),
             );
             optional_u64_row(
                 ui,
-                "downlinkOnly (s, default 5)",
+                "downlinkOnly (s, default 1)",
+                HELP_DOWNLINK_ONLY,
                 &mut level.downlink_only,
                 ("policy_level_downlink_only", index),
             );
@@ -545,21 +627,22 @@ fn show_level_edit_form(
             optional_u64_row(
                 ui,
                 "bufferSize (KB, platform default)",
+                HELP_BUFFER_SIZE,
                 &mut level.buffer_size,
                 ("policy_level_buffer_size", index),
             );
 
             ui.add_space(4.0);
             ui.label(RichText::new("Statistics").strong());
-            ui.checkbox(&mut level.stats_user_uplink, "statsUserUplink");
-            ui.checkbox(&mut level.stats_user_downlink, "statsUserDownlink");
-            ui.checkbox(&mut level.stats_user_online, "statsUserOnline");
+            help_checkbox(ui, "statsUserUplink", HELP_STATS_USER_UPLINK, &mut level.stats_user_uplink);
+            help_checkbox(ui, "statsUserDownlink", HELP_STATS_USER_DOWNLINK, &mut level.stats_user_downlink);
+            help_checkbox(ui, "statsUserOnline", HELP_STATS_USER_ONLINE, &mut level.stats_user_online);
         });
 }
 
 fn show_system_policy_edit(ui: &mut Ui, draft: &mut crate::xray::PolicySettings) {
     let mut enabled = draft.system.is_some();
-    if ui.checkbox(&mut enabled, "system policy").changed() {
+    if help_checkbox(ui, "system policy", HELP_SYSTEM, &mut enabled) {
         draft.system = if enabled {
             Some(draft.system.take().unwrap_or_else(SystemPolicyEntry::blank))
         } else {
@@ -572,16 +655,17 @@ fn show_system_policy_edit(ui: &mut Ui, draft: &mut crate::xray::PolicySettings)
     egui::CollapsingHeader::new("System policy settings")
         .default_open(true)
         .show(ui, |ui| {
-            ui.checkbox(&mut system.stats_inbound_uplink, "statsInboundUplink");
-            ui.checkbox(&mut system.stats_inbound_downlink, "statsInboundDownlink");
-            ui.checkbox(&mut system.stats_outbound_uplink, "statsOutboundUplink");
-            ui.checkbox(&mut system.stats_outbound_downlink, "statsOutboundDownlink");
+            help_checkbox(ui, "statsInboundUplink", HELP_STATS_INBOUND, &mut system.stats_inbound_uplink);
+            help_checkbox(ui, "statsInboundDownlink", HELP_STATS_INBOUND, &mut system.stats_inbound_downlink);
+            help_checkbox(ui, "statsOutboundUplink", HELP_STATS_OUTBOUND, &mut system.stats_outbound_uplink);
+            help_checkbox(ui, "statsOutboundDownlink", HELP_STATS_OUTBOUND, &mut system.stats_outbound_downlink);
         });
 }
 
 fn optional_u64_row(
     ui: &mut Ui,
-    label: &str,
+    label: &'static str,
+    help: HelpText,
     value: &mut Option<u64>,
     id: impl std::hash::Hash + std::fmt::Debug,
 ) {
@@ -589,6 +673,7 @@ fn optional_u64_row(
     let mut number = value.unwrap_or(0);
     ui.push_id(id, |ui| {
         ui.horizontal(|ui| {
+            help_button(ui, label, help);
             ui.checkbox(&mut enabled, label);
             ui.add_enabled(enabled, egui::DragValue::new(&mut number));
         });

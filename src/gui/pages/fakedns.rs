@@ -11,6 +11,7 @@
 
 use egui::{Color32, RichText, TextEdit, Ui};
 
+use super::HelpText;
 use crate::app::{ApplicationService, FakeDnsPageState};
 use crate::xray::{FakeDnsPoolEntry, FakeDnsSettings};
 
@@ -84,9 +85,41 @@ const FAKEDNS_POOL_PRESETS: &[FakeDnsPreset] = &[
     ),
 ];
 
+// ─── Field help text (Roadmap §4.4) ──────────────────────────────────────────
+//
+// Condensed from https://xtls.github.io/config/fakedns.html; the defaults are Xray-core's
+// (`infra/conf/fakedns.go`, `features/dns/fakedns.go` v26.9.30 — the docs still show fc00::/18).
+
+const HELP_POOLS: HelpText = HelpText::new(
+    "FakeDNS answers DNS queries with addresses from these pools and remembers which domain got \
+     which address, so the real domain can be restored and routed by name. It works only when \
+     dns.servers lists \"fakedns\" and the client inbound sniffs with destOverride fakedns. Without \
+     a fakedns section Xray-core adds 198.18.0.0/15 and 2001:2::/48 itself (32768 each; one pool \
+     of 65535 with queryStrategy UseIPv4 / UseIPv6).",
+    "FakeDNS отвечает на DNS-запросы адресами из этих пулов и запоминает, какой домен получил какой \
+     адрес, чтобы восстановить настоящий домен и маршрутизировать по имени. Работает, только если \
+     в dns.servers есть \"fakedns\", а клиентский inbound использует sniffing с destOverride \
+     fakedns. Без секции fakedns Xray-core сам добавляет 198.18.0.0/15 и 2001:2::/48 (по 32768; \
+     один пул на 65535 при queryStrategy UseIPv4 / UseIPv6).",
+);
+const HELP_IP_POOL: HelpText = HelpText::new(
+    "CIDR block the fake addresses come from, e.g. 198.18.0.0/15. Pick a block that is not used \
+     on your networks — its addresses must never be real destinations.",
+    "CIDR-блок, из которого выдаются фиктивные адреса, например 198.18.0.0/15. Выбирайте блок, не \
+     используемый в ваших сетях, — его адреса никогда не должны быть настоящими адресами \
+     назначения.",
+);
+const HELP_POOL_SIZE: HelpText = HelpText::new(
+    "How many domain ↔ address mappings are kept; the least recently used is evicted when the \
+     pool is full. Must not exceed the number of addresses in ipPool. Unchecked = 65535.",
+    "Сколько соответствий домен ↔ адрес хранится; при заполнении вытесняется давно не \
+     использовавшееся. Не должно превышать число адресов в ipPool. Без отметки — 65535.",
+);
+
 /// Renders the FakeDNS page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     service.tick_fakedns_page_status();
+    super::show_help_dialog(ui);
 
     ui.heading("FakeDNS");
     ui.add_space(8.0);
@@ -272,7 +305,10 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
         return;
     };
 
-    ui.strong("Pools");
+    ui.horizontal(|ui| {
+        super::help_button(ui, "Pools", HELP_POOLS);
+        ui.strong("Pools");
+    });
     ui.add_space(4.0);
 
     let mut remove_pool: Option<usize> = None;
@@ -325,7 +361,7 @@ fn show_pool_edit_form(
     });
 
     ui.horizontal(|ui| {
-        ui.label("ipPool");
+        super::field_label(ui, "ipPool", HELP_IP_POOL);
         ui.add(
             TextEdit::singleline(&mut pool.ip_pool)
                 .desired_width(220.0)
@@ -337,6 +373,7 @@ fn show_pool_edit_form(
     let mut number = pool.pool_size.unwrap_or(65535);
     ui.push_id(("fakedns_pool_size", index), |ui| {
         ui.horizontal(|ui| {
+            super::help_button(ui, "poolSize", HELP_POOL_SIZE);
             ui.checkbox(&mut enabled, "poolSize");
             ui.add_enabled(enabled, egui::DragValue::new(&mut number).range(1..=u64::MAX));
         });
