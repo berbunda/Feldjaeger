@@ -134,6 +134,9 @@ pub enum CompatibilityWarningId {
     /// A Socks / `mixed` / HTTP inbound without authentication on an outside-facing `listen` —
     /// an open proxy ([`super::open_proxy`]); [`WarningSeverity::Danger`].
     OpenProxyInbound,
+    /// TUN `settings.autoSystemWfpBlockLeak` — Windows Filtering Platform rules, applied only
+    /// when Xray runs on Windows; Feldjäger manages Linux servers (`docs/rules.md`).
+    TunWfpBlockLeakWindowsOnly,
 }
 
 /// How a warning is shown: [`Self::Danger`] gets the red road-sign style in the GUI and
@@ -283,6 +286,11 @@ impl CompatibilityWarningId {
                 "deprecated by Xray-core: a `Host` header is moved into `host` (and dropped when \
                  `host` is set); use the host field"
             }
+            Self::TunWfpBlockLeakWindowsOnly => {
+                "no effect on a Linux server: Windows Filtering Platform leak blocking applies \
+                 only when Xray runs on Windows (XTLS/Xray-core#6853); the values are still \
+                 checked at load — only \"dns\" and \"misconfigtun\" are accepted"
+            }
         };
         Cow::Borrowed(text)
     }
@@ -317,6 +325,8 @@ pub fn inbound_warnings(inbound: &Value, core: Option<XrayCoreVersion>) -> Vec<C
             location,
         });
     }
+    // Before the stream checks: TUN has no `streamSettings`.
+    tun_warnings(inbound, core, &mut warnings);
     let Some(stream) = inbound.get("streamSettings") else {
         return warnings;
     };
@@ -722,6 +732,36 @@ fn finalmask_warnings(
     }
 }
 
+/// TUN `settings` keys added in v26.9.30 (`infra/conf/tun.go`, XTLS/Xray-core#6773 / #6853): an
+/// older core does not know them and silently drops them; `autoSystemWfpBlockLeak` also does
+/// nothing outside Windows.
+fn tun_warnings(inbound: &Value, core: Option<XrayCoreVersion>, warnings: &mut Vec<CompatibilityWarning>) {
+    let is_tun = inbound
+        .get("protocol")
+        .and_then(Value::as_str)
+        .is_some_and(|protocol| protocol.trim().eq_ignore_ascii_case("tun"));
+    let Some(settings) = inbound.get("settings").filter(|_| is_tun) else {
+        return;
+    };
+    // Only values that change behaviour: `false` / `[]` / `null` equal the old core's defaults.
+    if settings.get("autoSystemDnsToGateway").and_then(Value::as_bool) == Some(true) {
+        let location = "settings.autoSystemDnsToGateway".to_owned();
+        push_if_core_too_old(CoreFeature::TunAutoSystemDnsAndLeakBlock, core, location, warnings);
+    }
+    let blocks_leaks = settings
+        .get("autoSystemWfpBlockLeak")
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.is_empty());
+    if blocks_leaks {
+        let location = "settings.autoSystemWfpBlockLeak".to_owned();
+        push_if_core_too_old(CoreFeature::TunAutoSystemDnsAndLeakBlock, core, location.clone(), warnings);
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::TunWfpBlockLeakWindowsOnly,
+            location,
+        });
+    }
+}
+
 /// [`CompatibilityWarningId::RequiresNewerCore`] when the installed core is known and older
 /// than `feature`; nothing for an unknown version.
 fn push_if_core_too_old(
@@ -764,6 +804,42 @@ pub fn with_warning_suffix(message: impl Into<String>, warnings: &[Compatibility
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn tun_v26_9_30_keys_warn_on_old_cores_and_wfp_is_windows_only() {
+        let tun = json!({"protocol": "tun", "settings": {
+            "gateway": ["10.0.0.1"],
+            "autoSystemDnsToGateway": true,
+            "autoSystemWfpBlockLeak": ["dns"]
+        }});
+        let ids = |core| inbound_warnings(&tun, core).into_iter().map(|w| (w.id, w.location)).collect::<Vec<_>>();
+        let windows_only = (
+            CompatibilityWarningId::TunWfpBlockLeakWindowsOnly,
+            "settings.autoSystemWfpBlockLeak".to_owned(),
+        );
+        // Current / unknown core: only the Windows-only note.
+        assert_eq!(ids(None), vec![windows_only.clone()]);
+        assert_eq!(ids(Some(XrayCoreVersion::new(26, 9, 30))), vec![windows_only.clone()]);
+        // v26.9.9 does not know either key.
+        let installed = XrayCoreVersion::new(26, 9, 9);
+        let too_old = CompatibilityWarningId::RequiresNewerCore {
+            feature: CoreFeature::TunAutoSystemDnsAndLeakBlock,
+            installed,
+        };
+        assert_eq!(
+            ids(Some(installed)),
+            vec![
+                (too_old, "settings.autoSystemDnsToGateway".to_owned()),
+                (too_old, "settings.autoSystemWfpBlockLeak".to_owned()),
+                windows_only,
+            ]
+        );
+        // Defaults (false / []) and other protocols: nothing.
+        let defaults = json!({"protocol": "tun", "settings": {"autoSystemDnsToGateway": false, "autoSystemWfpBlockLeak": []}});
+        assert!(inbound_warnings(&defaults, Some(installed)).is_empty());
+        let not_tun = json!({"protocol": "tunnel", "settings": {"autoSystemWfpBlockLeak": ["dns"]}});
+        assert!(inbound_warnings(&not_tun, None).is_empty());
+    }
 
     #[test]
     fn open_proxy_inbound_is_a_danger_warning_without_stream_settings() {

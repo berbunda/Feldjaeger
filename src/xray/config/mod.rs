@@ -101,7 +101,8 @@ pub use inbound_fallbacks::{
     fallbacks_transport_compatible, parse_fallbacks, reconcile_inbound_fallbacks, validate_fallbacks,
 };
 pub use inbound_protocol::{
-    InboundProtocolDraft, TUNNEL_NETWORKS, apply_inbound_protocol, parse_inbound_protocol,
+    InboundProtocolDraft, TUN_WFP_BLOCK_LEAK_VALUES, TUNNEL_NETWORKS, apply_inbound_protocol,
+    parse_inbound_protocol, validate_tun_settings,
     validate_port_map_target,
 };
 pub use inbound_security::{

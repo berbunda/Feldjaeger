@@ -85,6 +85,9 @@ pub enum CoreFeature {
     /// `xdns` object schema (`domains[]` / `resolvers[]` objects, `extraPoll`) replacing the
     /// string form — XTLS/Xray-core#6718.
     XdnsObjectSchema,
+    /// TUN inbound `autoSystemDnsToGateway` (Linux) and `autoSystemWfpBlockLeak` (Windows) —
+    /// XTLS/Xray-core#6773, renamed and extended by #6853 before the release.
+    TunAutoSystemDnsAndLeakBlock,
 }
 
 /// The table of Roadmap §2.6 stage 0.7, oldest first.
@@ -101,6 +104,7 @@ pub const CORE_FEATURES: &[CoreFeature] = &[
     CoreFeature::UdpHopSockoptRemoved,
     CoreFeature::NoiseExpPacket,
     CoreFeature::XdnsObjectSchema,
+    CoreFeature::TunAutoSystemDnsAndLeakBlock,
 ];
 
 impl CoreFeature {
@@ -119,6 +123,7 @@ impl CoreFeature {
             Self::UdpHopSockoptRemoved => XrayCoreVersion::new(26, 9, 30),
             Self::NoiseExpPacket => XrayCoreVersion::new(26, 9, 30),
             Self::XdnsObjectSchema => XrayCoreVersion::new(26, 9, 30),
+            Self::TunAutoSystemDnsAndLeakBlock => XrayCoreVersion::new(26, 9, 30),
         }
     }
 
@@ -137,6 +142,7 @@ impl CoreFeature {
             Self::UdpHopSockoptRemoved => 6754,
             Self::NoiseExpPacket => 6862,
             Self::XdnsObjectSchema => 6718,
+            Self::TunAutoSystemDnsAndLeakBlock => 6853,
         }
     }
 
@@ -155,6 +161,7 @@ impl CoreFeature {
             Self::UdpHopSockoptRemoved => "`udphop` without `sockopt`",
             Self::NoiseExpPacket => "`noise` item `type: \"exp\"`",
             Self::XdnsObjectSchema => "`xdns` object schema (domains[] / resolvers[] objects)",
+            Self::TunAutoSystemDnsAndLeakBlock => "TUN `autoSystemDnsToGateway` / `autoSystemWfpBlockLeak`",
         }
     }
 

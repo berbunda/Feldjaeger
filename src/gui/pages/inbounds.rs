@@ -32,7 +32,7 @@ use crate::xray::{
     FallbackDestKind, FallbackObject, InboundStreamDraft, InboundSummary,
     KCP_CWND_MULTIPLIER_MIN, KCP_DEFAULT_CWND_MULTIPLIER, KCP_DEFAULT_MAX_SENDING_WINDOW,
     KCP_IGNORED_FIELDS, KCP_MTU_MIN, KCP_TTI_MAX, KCP_TTI_MIN, KcpStreamSettings, ShareSecurity, ShareTransport, StreamDirection,
-    TLS_VERSION_PRESETS, TUNNEL_NETWORKS, CertificateDraft,
+    TLS_VERSION_PRESETS, TUN_WFP_BLOCK_LEAK_VALUES, TUNNEL_NETWORKS, CertificateDraft,
     TlsSettingsDraft, XHTTP_DOWNLOAD_SECURITIES, XHTTP_MODES, XHTTP_MODE_DEFAULT, XHTTP_PADDING_METHODS,
     XHTTP_PATH_DEFAULT, XHTTP_PLACEMENTS, XHTTP_SESSION_ID_TABLES, XHTTP_UPLINK_METHODS,
     XhttpCoreSettings, XhttpDownloadDraft, XhttpRange, XhttpStreamSettings,
@@ -212,6 +212,27 @@ const HELP_TUNNEL_PORT_MAP: HelpText = HelpText::new(
      rewriteAddress/rewritePort для этого порта. Порты, которых здесь нет, используют \
      rewriteAddress/rewritePort выше.",
 );
+
+// Protocol tab — TUN (keys added in Xray-core v26.9.30, `infra/conf/tun.go`).
+const HELP_TUN_DNS_TO_GATEWAY: HelpText = HelpText::new(
+    "Linux: points the system DNS at the TUN gateway, so DNS queries go into the tunnel. Needs \
+     at least one `gateway` address — otherwise Xray-core refuses to start. Requires Xray-core \
+     v26.9.30+; older cores ignore it.",
+    "Linux: направляет системный DNS на шлюз TUN, чтобы DNS-запросы шли в туннель. Нужен хотя \
+     бы один адрес `gateway`, иначе Xray-core не запустится. Требует Xray-core v26.9.30+; \
+     старые ядра поле игнорируют.",
+);
+const HELP_TUN_WFP_BLOCK_LEAK: HelpText = HelpText::new(
+    "Windows only: Windows Filtering Platform rules that block traffic leaking past the TUN — \
+     \"dns\" (DNS outside the TUN; needs `dns`) and \"misconfigtun\" (traffic of a misconfigured \
+     TUN); both need autoSystemRoutingTable. Does nothing on a Linux server, but Xray-core still \
+     refuses any other value at load. Requires Xray-core v26.9.30+.",
+    "Только Windows: правила Windows Filtering Platform, блокирующие утечки трафика мимо TUN, — \
+     \"dns\" (DNS вне TUN; нужен `dns`) и \"misconfigtun\" (трафик неправильно настроенного \
+     TUN); оба требуют autoSystemRoutingTable. На Linux-сервере ничего не делает, но любое другое \
+     значение Xray-core всё равно отвергает при загрузке. Требует Xray-core v26.9.30+.",
+);
+
 // Stream tab — method selector + TCP.
 const HELP_STREAM_METHOD: HelpText = HelpText::new(
     "Transport carrying the proxy protocol on the wire (tcp/raw, WebSocket, mKCP, gRPC, XHTTP, \
@@ -1767,6 +1788,8 @@ fn show_tun_protocol_readonly(ui: &mut Ui, service: &ApplicationService, row: &I
         user_level,
         auto_system_routing_table,
         auto_outbounds_interface,
+        auto_system_dns_to_gateway,
+        auto_system_wfp_block_leak,
     }) = draft
     else {
         ui.label(
@@ -1807,6 +1830,16 @@ fn show_tun_protocol_readonly(ui: &mut Ui, service: &ApplicationService, row: &I
                 "(unset)"
             } else {
                 &auto_outbounds_interface
+            });
+            ui.end_row();
+            super::field_label(ui, "autoSystemDnsToGateway", HELP_TUN_DNS_TO_GATEWAY);
+            ui.label(if auto_system_dns_to_gateway { "true" } else { "false" });
+            ui.end_row();
+            super::field_label(ui, "autoSystemWfpBlockLeak", HELP_TUN_WFP_BLOCK_LEAK);
+            ui.label(if auto_system_wfp_block_leak.is_empty() {
+                "(empty)".to_owned()
+            } else {
+                auto_system_wfp_block_leak.join(", ")
             });
             ui.end_row();
         });
@@ -2349,6 +2382,8 @@ fn show_tun_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
         user_level,
         auto_system_routing_table,
         auto_outbounds_interface,
+        auto_system_dns_to_gateway,
+        auto_system_wfp_block_leak,
     } = &mut session.protocol
     else {
         return;
@@ -2410,10 +2445,70 @@ fn show_tun_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
                 dirty = true;
             }
             ui.end_row();
+
+            super::field_label(ui, "autoSystemDnsToGateway", HELP_TUN_DNS_TO_GATEWAY);
+            if ui.checkbox(auto_system_dns_to_gateway, "").changed() {
+                dirty = true;
+            }
+            ui.end_row();
+
+            super::field_label(ui, "autoSystemWfpBlockLeak", HELP_TUN_WFP_BLOCK_LEAK);
+            ui.horizontal(|ui| {
+                for known in TUN_WFP_BLOCK_LEAK_VALUES {
+                    let mut checked = auto_system_wfp_block_leak
+                        .iter()
+                        .any(|value| value.trim().eq_ignore_ascii_case(known));
+                    if ui.checkbox(&mut checked, *known).changed() {
+                        if checked {
+                            auto_system_wfp_block_leak.push((*known).to_owned());
+                        } else {
+                            auto_system_wfp_block_leak
+                                .retain(|value| !value.trim().eq_ignore_ascii_case(known));
+                        }
+                        dirty = true;
+                    }
+                }
+                ui.label(RichText::new("Windows only").size(12.0).color(Color32::from_rgb(140, 140, 140)));
+            });
+            ui.end_row();
         });
+
+    // Values the core refuses at load (Build() accepts only dns / misconfigtun, any OS).
+    let unknown_leaks: Vec<String> = auto_system_wfp_block_leak
+        .iter()
+        .filter(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            !value.is_empty() && !TUN_WFP_BLOCK_LEAK_VALUES.contains(&value.as_str())
+        })
+        .cloned()
+        .collect();
+    if !unknown_leaks.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "autoSystemWfpBlockLeak: unknown value(s) {} — Xray-core refuses to load; Save is blocked",
+                    unknown_leaks.join(", ")
+                ))
+                .color(Color32::from_rgb(220, 80, 80)),
+            );
+            if ui.button("Remove unknown values").clicked() {
+                auto_system_wfp_block_leak.retain(|value| !unknown_leaks.contains(value));
+                dirty = true;
+            }
+        });
+    }
 
     if persistent_multiline_list_row(ui, "gateway (one per line)", gateway, "tun_gateway") {
         dirty = true;
+    }
+    if *auto_system_dns_to_gateway && gateway.iter().all(|g| g.trim().is_empty()) {
+        ui.label(
+            RichText::new(
+                "autoSystemDnsToGateway needs at least one gateway address — Xray-core refuses \
+                 to start on Linux; Save is blocked",
+            )
+            .color(Color32::from_rgb(220, 80, 80)),
+        );
     }
     if persistent_multiline_list_row(ui, "dns (one per line)", dns, "tun_dns") {
         dirty = true;

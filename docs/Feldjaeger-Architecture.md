@@ -9336,3 +9336,50 @@ Feldjäger. Данные получены через `gh api` 2026-10-07. Док
 
 Пункты A–E заведены в Roadmap §4.5 как дочерние пункты аудита. A–D — код, каждый со своей версией
 и разделом Architecture; E — только записи в Roadmap. Изменений кода в этом разделе нет.
+
+# 107	TUN inbound: `autoSystemDnsToGateway` и `autoSystemWfpBlockLeak` (Roadmap §4.5, аудит v26.9.30 A) (0.5.51-0)
+
+## 107.1	Ядро
+
+`infra/conf/tun.go` (v26.9.30; XTLS/Xray-core#6773 добавил `autoSystemDNS`, #6853 до релиза
+переименовал его в `autoSystemDnsToGateway` и добавил `autoSystemWfpBlockLeak`):
+
+- `autoSystemDnsToGateway: bool` — Linux: системный DNS направляется на `gateway`. В `Build()` на
+  Linux без непустого `gateway` — ошибка `autoSystemDnsToGateway needs gateway to be set`.
+- `autoSystemWfpBlockLeak: []string` — Windows Filtering Platform: `dns` / `misconfigtun`, регистр
+  не важен. Любое другое значение — ошибка на **любой** ОС. На Windows также нужен
+  `autoSystemRoutingTable`, а для `"dns"` — `dns`.
+
+Проверено `xray run -test` (Xray 26.9.30, сборка для Windows): валидный конфиг — OK; `["routes"]` —
+`unknown autoSystemWfpBlockLeak value`; без `autoSystemRoutingTable` — ошибка (Windows-ветка);
+`autoSystemDnsToGateway` без `gateway` — OK, потому что это Linux-ветка. Linux-проверка
+подтверждена только по исходнику.
+
+## 107.2	Реализация
+
+- `inbound_protocol/mod.rs`: в `InboundProtocolDraft::Tun` добавлены `auto_system_dns_to_gateway`
+  и `auto_system_wfp_block_leak`, а также `TUN_WFP_BLOCK_LEAK_VALUES`. `true` пишется ключом; при
+  `false` ключ удаляется, но явный `false` на диске сохраняется — неизменённый конфиг остаётся байт
+  в байт. Список пишется как `gateway`. `validate_tun_settings` зеркалит проверки, которые на
+  Linux-сервере роняют загрузку: неизвестное значение и `autoSystemDnsToGateway` без `gateway`.
+  Shell Save блокируется. Windows-условия на Linux-сервере не действуют, поэтому их нет в проверках —
+  они описаны в справке.
+- Аргументы `apply_tun_protocol` собраны в `TunSettings` (10 полей). Заодно снято предупреждение
+  clippy `too_many_arguments`: clippy lib 66 → 65.
+- `compatibility`: `CoreFeature::TunAutoSystemDnsAndLeakBlock` (v26.9.30, #6853) →
+  `RequiresNewerCore` для `true` / непустого списка на старом ядре (старое ядро ключи молча
+  отбрасывает). Добавлено предупреждение `TunWfpBlockLeakWindowsOnly`: Feldjäger управляет
+  Linux-серверами, а там поле ничего не делает. `tun_warnings` вызывается до проверки
+  `streamSettings` (у TUN их нет).
+- GUI (`gui/pages/inbounds.rs`): в просмотре и форме TUN появились `autoSystemDnsToGateway`
+  (чекбокс) и `autoSystemWfpBlockLeak` (чекбоксы `dns` / `misconfigtun`, пометка «Windows only»).
+  Неизвестные значения с диска показываются красным с кнопкой «Remove unknown values». Для
+  `autoSystemDnsToGateway` без gateway выводится красная строка. Справка `HELP_TUN_*` на двух
+  языках (`HelpText::new`).
+
+## 107.3	Итог
+
+Тесты (+4): `tun_v26_9_30_keys_round_trip_unchanged`,
+`tun_dns_to_gateway_false_keeps_an_explicit_false_and_drops_true`,
+`tun_validation_mirrors_tun_config_build`, `tun_v26_9_30_keys_warn_on_old_cores_and_wfp_is_windows_only`.
+Итог: **1385 passed / 0 failed**, clippy lib 65. GUI в запущенном приложении не проверялся.

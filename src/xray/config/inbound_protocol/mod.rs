@@ -67,8 +67,17 @@ pub enum InboundProtocolDraft {
         /// `settings.autoOutboundsInterface` — free-form outbound-interface selection; empty =
         /// key absent.
         auto_outbounds_interface: String,
+        /// `settings.autoSystemDnsToGateway` (Linux, v26.9.30+) — point the system DNS at
+        /// `gateway`; `false` = key absent (an explicit `false` on disk is kept).
+        auto_system_dns_to_gateway: bool,
+        /// `settings.autoSystemWfpBlockLeak[]` (Windows, v26.9.30+) — `dns` / `misconfigtun`;
+        /// empty = key absent.
+        auto_system_wfp_block_leak: Vec<String>,
     },
 }
+
+/// Values `TunConfig.Build()` accepts in `autoSystemWfpBlockLeak` (compared lower-cased).
+pub const TUN_WFP_BLOCK_LEAK_VALUES: &[&str] = &["dns", "misconfigtun"];
 
 impl InboundProtocolDraft {
     /// Default for Add VLESS.
@@ -114,6 +123,8 @@ impl InboundProtocolDraft {
             user_level: 0,
             auto_system_routing_table: Vec::new(),
             auto_outbounds_interface: String::new(),
+            auto_system_dns_to_gateway: false,
+            auto_system_wfp_block_leak: Vec::new(),
         }
     }
 
@@ -253,6 +264,11 @@ fn parse_tun_protocol(inbound: &Value) -> InboundProtocolDraft {
         .filter(|s| !s.is_empty())
         .unwrap_or_default()
         .to_owned();
+    let auto_system_dns_to_gateway = settings
+        .and_then(|s| s.get("autoSystemDnsToGateway"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let auto_system_wfp_block_leak = string_array(settings.and_then(|s| s.get("autoSystemWfpBlockLeak")));
     InboundProtocolDraft::Tun {
         name,
         desc,
@@ -262,6 +278,8 @@ fn parse_tun_protocol(inbound: &Value) -> InboundProtocolDraft {
         user_level,
         auto_system_routing_table,
         auto_outbounds_interface,
+        auto_system_dns_to_gateway,
+        auto_system_wfp_block_leak,
     }
 }
 
@@ -346,31 +364,80 @@ pub fn apply_inbound_protocol(
             user_level,
             auto_system_routing_table,
             auto_outbounds_interface,
+            auto_system_dns_to_gateway,
+            auto_system_wfp_block_leak,
         } => apply_tun_protocol(
             inbound,
-            name,
-            desc,
-            *mtu,
-            gateway,
-            dns,
-            *user_level,
-            auto_system_routing_table,
-            auto_outbounds_interface,
+            TunSettings {
+                name,
+                desc,
+                mtu: *mtu,
+                gateway,
+                dns,
+                user_level: *user_level,
+                auto_system_routing_table,
+                auto_outbounds_interface,
+                auto_system_dns_to_gateway: *auto_system_dns_to_gateway,
+                auto_system_wfp_block_leak,
+            },
         ),
     }
 }
 
-fn apply_tun_protocol(
-    inbound: &mut Value,
-    name: &str,
-    desc: &str,
+/// Borrowed TUN draft fields for [`apply_tun_protocol`].
+struct TunSettings<'a> {
+    name: &'a str,
+    desc: &'a str,
     mtu: u32,
-    gateway: &[String],
-    dns: &[String],
+    gateway: &'a [String],
+    dns: &'a [String],
     user_level: u64,
-    auto_system_routing_table: &[String],
-    auto_outbounds_interface: &str,
+    auto_system_routing_table: &'a [String],
+    auto_outbounds_interface: &'a str,
+    auto_system_dns_to_gateway: bool,
+    auto_system_wfp_block_leak: &'a [String],
+}
+
+/// The checks of `TunConfig.Build()` (`infra/conf/tun.go`, v26.9.30) that fail the load on a
+/// Linux server: an unknown `autoSystemWfpBlockLeak` value (any OS), and `autoSystemDnsToGateway`
+/// without a gateway (Linux). The Windows-only conditions of the same function never apply here.
+pub fn validate_tun_settings(
+    gateway: &[String],
+    auto_system_dns_to_gateway: bool,
+    auto_system_wfp_block_leak: &[String],
 ) -> ConfigModifyResult<()> {
+    for value in auto_system_wfp_block_leak {
+        let value = value.trim();
+        if !value.is_empty() && !TUN_WFP_BLOCK_LEAK_VALUES.contains(&value.to_ascii_lowercase().as_str()) {
+            return Err(ConfigModifyError::new(
+                ConfigModifyErrorKind::ValidationFailed,
+                format!("TUN autoSystemWfpBlockLeak: unknown value \"{value}\" (allowed: dns, misconfigtun)"),
+            ));
+        }
+    }
+    if auto_system_dns_to_gateway && gateway.iter().all(|g| g.trim().is_empty()) {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "TUN autoSystemDnsToGateway needs gateway to be set".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn apply_tun_protocol(inbound: &mut Value, tun: TunSettings<'_>) -> ConfigModifyResult<()> {
+    let TunSettings {
+        name,
+        desc,
+        mtu,
+        gateway,
+        dns,
+        user_level,
+        auto_system_routing_table,
+        auto_outbounds_interface,
+        auto_system_dns_to_gateway,
+        auto_system_wfp_block_leak,
+    } = tun;
+    validate_tun_settings(gateway, auto_system_dns_to_gateway, auto_system_wfp_block_leak)?;
     let settings = ensure_settings_object(inbound)?;
     apply_optional_string(settings, "name", name);
     apply_optional_string(settings, "desc", desc);
@@ -388,6 +455,12 @@ fn apply_tun_protocol(
     }
     apply_string_array(settings, "autoSystemRoutingTable", auto_system_routing_table);
     apply_optional_string(settings, "autoOutboundsInterface", auto_outbounds_interface);
+    if auto_system_dns_to_gateway {
+        settings.insert("autoSystemDnsToGateway".to_owned(), Value::Bool(true));
+    } else if settings.get("autoSystemDnsToGateway") != Some(&Value::Bool(false)) {
+        settings.remove("autoSystemDnsToGateway");
+    }
+    apply_string_array(settings, "autoSystemWfpBlockLeak", auto_system_wfp_block_leak);
     Ok(())
 }
 
@@ -672,5 +745,61 @@ mod tests {
         let mut inbound = json!({"protocol": "tun"});
         apply_inbound_protocol(&mut inbound, &InboundProtocolDraft::tun_default()).expect("apply");
         assert_eq!(inbound["settings"], json!({}));
+    }
+
+    #[test]
+    fn tun_v26_9_30_keys_round_trip_unchanged() {
+        let original = json!({
+            "protocol": "tun",
+            "settings": {
+                "gateway": ["10.0.0.1"],
+                "dns": ["1.1.1.1"],
+                "autoSystemRoutingTable": ["linux", "windows"],
+                "autoSystemDnsToGateway": true,
+                "autoSystemWfpBlockLeak": ["DNS", "misconfigtun"]
+            }
+        });
+        let mut inbound = original.clone();
+        let draft = parse_inbound_protocol(&inbound).expect("parse");
+        let InboundProtocolDraft::Tun { auto_system_dns_to_gateway, auto_system_wfp_block_leak, .. } = &draft else {
+            panic!("tun draft");
+        };
+        assert!(*auto_system_dns_to_gateway);
+        assert_eq!(auto_system_wfp_block_leak, &["DNS".to_owned(), "misconfigtun".to_owned()]);
+        apply_inbound_protocol(&mut inbound, &draft).expect("apply");
+        assert_eq!(inbound, original, "no edits must leave the JSON byte-identical");
+    }
+
+    #[test]
+    fn tun_dns_to_gateway_false_keeps_an_explicit_false_and_drops_true() {
+        let mut explicit = json!({"protocol": "tun", "settings": {"autoSystemDnsToGateway": false}});
+        let draft = parse_inbound_protocol(&explicit).expect("parse");
+        apply_inbound_protocol(&mut explicit, &draft).expect("apply");
+        assert_eq!(explicit["settings"]["autoSystemDnsToGateway"], json!(false));
+
+        let mut enabled = json!({"protocol": "tun", "settings": {"gateway": ["10.0.0.1"], "autoSystemDnsToGateway": true}});
+        let mut draft = parse_inbound_protocol(&enabled).expect("parse");
+        if let InboundProtocolDraft::Tun { auto_system_dns_to_gateway, .. } = &mut draft {
+            *auto_system_dns_to_gateway = false;
+        }
+        apply_inbound_protocol(&mut enabled, &draft).expect("apply");
+        assert!(enabled["settings"].get("autoSystemDnsToGateway").is_none());
+    }
+
+    #[test]
+    fn tun_validation_mirrors_tun_config_build() {
+        // Unknown leak value: refused on every OS (`unknown autoSystemWfpBlockLeak value`).
+        let err = validate_tun_settings(&[], false, &["dns".to_owned(), "routes".to_owned()]).unwrap_err();
+        assert!(err.to_string().contains("routes"), "{err}");
+        // Case does not matter, blanks are skipped.
+        assert!(validate_tun_settings(&[], false, &["DNS".into(), "MisconfigTun".into(), " ".into()]).is_ok());
+        // Linux: autoSystemDnsToGateway needs a gateway.
+        let err = validate_tun_settings(&[" ".to_owned()], true, &[]).unwrap_err();
+        assert!(err.to_string().contains("gateway"), "{err}");
+        assert!(validate_tun_settings(&["10.0.0.1".to_owned()], true, &[]).is_ok());
+
+        let mut inbound = json!({"protocol": "tun", "settings": {"autoSystemDnsToGateway": true}});
+        let draft = parse_inbound_protocol(&inbound).expect("parse");
+        assert!(apply_inbound_protocol(&mut inbound, &draft).is_err(), "Save is blocked");
     }
 }
