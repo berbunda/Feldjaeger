@@ -1,0 +1,1 @@
+{"tcp": [{"type": "sudoku", "settings": {"password": "sudoku-secret", "paddingMin": 2, "paddingMax": 8}}]}

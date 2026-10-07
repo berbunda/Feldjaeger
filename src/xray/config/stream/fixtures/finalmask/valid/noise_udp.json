@@ -1,0 +1,1 @@
+{"udp": [{"type": "noise", "settings": {"reset": "30-60", "noise": [{"rand": "16-32", "delay": "10-20"}, {"type": "str", "packet": "hello"}]}}]}

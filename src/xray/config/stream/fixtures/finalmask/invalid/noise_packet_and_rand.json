@@ -1,0 +1,1 @@
+{"udp": [{"type": "noise", "settings": {"noise": [{"packet": [1], "rand": 2}]}}]}

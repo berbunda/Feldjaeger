@@ -1,0 +1,1 @@
+{"udp": [{"type": "header-custom", "settings": {"mode": "prefix", "client": [{"type": "hex", "packet": "17fefd"}, {"rand": 8, "capture": "nonce"}], "server": [{"type": "hex", "packet": "17fefd"}, {"reuse": "nonce"}]}}]}

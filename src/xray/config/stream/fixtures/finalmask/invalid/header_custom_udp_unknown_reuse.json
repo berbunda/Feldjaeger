@@ -1,0 +1,1 @@
+{"udp": [{"type": "header-custom", "settings": {"client": [{"reuse": "nonce"}, {"rand": 8, "capture": "nonce"}]}}]}

@@ -1,0 +1,1 @@
+{"tcp": [{"type": "header-custom", "settings": {"clients": [[{"type": "str", "packet": "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"}, {"rand": 16, "capture": "nonce"}]], "servers": [[{"delay": "5-20", "type": "str", "packet": "HTTP/1.1 200 OK\r\n\r\n"}, {"reuse": "nonce"}]], "errors": [[{"type": "hex", "packet": "485454502f312e3120343034"}]]}}]}

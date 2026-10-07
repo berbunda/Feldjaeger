@@ -1,0 +1,1 @@
+{"udp": [{"type": "realm", "settings": {"url": "realm://public@realm.example.com/room", "stunServers": ["stun.nextcloud.com:3478"]}}]}

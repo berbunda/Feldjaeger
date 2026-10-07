@@ -1,0 +1,1 @@
+{"udp": [{"type": "xicmp", "settings": {"ips": ["1.1.1.1"]}}]}

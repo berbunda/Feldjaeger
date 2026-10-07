@@ -30,8 +30,10 @@ target
 .history
 Tasks
 Completed
-tests
-fixtures
+# Root-level only: `src/**/fixtures/` hold test data loaded with include_str! and must be tracked,
+# otherwise `cargo test` does not compile in a fresh clone.
+/tests
+/fixtures
 
 # Local Xray build for tests against the real core (XRAY_BIN fallback)
 /xray-bin/

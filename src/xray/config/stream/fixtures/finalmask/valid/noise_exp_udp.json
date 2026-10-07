@@ -1,0 +1,1 @@
+{"udp": [{"type": "noise", "settings": {"noise": [{"type": "exp", "packet": "<b 0x01> <r 8-16> <t>"}]}}]}

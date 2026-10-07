@@ -1,0 +1,1 @@
+{"tcp": [{"type": "sudoku", "settings": {"password": "sudoku-secret", "ascii": "prefer_entropy", "customTables": ["xpxvvpvv", "VV PP XX VV"], "paddingMin": 5, "paddingMax": 15}}]}

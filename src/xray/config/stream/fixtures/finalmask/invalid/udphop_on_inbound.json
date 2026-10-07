@@ -1,0 +1,1 @@
+{"udp": [{"type": "udphop", "settings": {"mode": "intervalLocal"}}]}
