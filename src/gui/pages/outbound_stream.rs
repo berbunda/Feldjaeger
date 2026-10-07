@@ -23,70 +23,180 @@ use crate::xray::{
     TLS_VERSION_PRESETS, outbound_transports_for_protocol,
 };
 
-const HELP_TRANSPORT: HelpText = HelpText::en(
+const HELP_TRANSPORT: HelpText = HelpText::new(
     "streamSettings.network — how this outbound reaches the server. It must match the transport \
-     of the server's inbound. Hysteria uses its own transport only.");
-const HELP_GRPC_AUTHORITY: HelpText = HelpText::en(
-    "HTTP/2 :authority sent to the server; empty = the outbound's address.");
-const HELP_GRPC_SERVICE_NAME: HelpText = HelpText::en("gRPC service name; must match the server's serviceName.");
-const HELP_GRPC_MULTI_MODE: HelpText = HelpText::en("Multi mode (experimental); must match the server.");
-const HELP_GRPC_USER_AGENT: HelpText = HelpText::en("User-Agent header; empty = the gRPC library default.");
-const HELP_GRPC_IDLE_TIMEOUT: HelpText = HelpText::en(
+     of the server's inbound. Hysteria uses its own transport only.",
+    "streamSettings.network — как этот outbound связывается с сервером. Должен совпадать с \
+     транспортом inbound на сервере. Hysteria использует только собственный транспорт.",
+);
+const HELP_GRPC_AUTHORITY: HelpText = HelpText::new(
+    "HTTP/2 :authority sent to the server; empty = the outbound's address.",
+    "HTTP/2 :authority, отправляемый серверу; пусто — адрес outbound.",
+);
+const HELP_GRPC_SERVICE_NAME: HelpText = HelpText::new(
+    "gRPC service name; must match the server's serviceName.",
+    "Имя сервиса gRPC; должно совпадать с serviceName сервера.",
+);
+const HELP_GRPC_MULTI_MODE: HelpText = HelpText::new(
+    "Multi mode (experimental); must match the server.",
+    "Режим multi (экспериментальный); должен совпадать с сервером.",
+);
+const HELP_GRPC_USER_AGENT: HelpText = HelpText::new(
+    "User-Agent header; empty = the gRPC library default.",
+    "Заголовок User-Agent; пусто — значение библиотеки gRPC по умолчанию.",
+);
+const HELP_GRPC_IDLE_TIMEOUT: HelpText = HelpText::new(
     "idle_timeout — seconds without traffic before a health check ping; empty or ≤ 0 = off \
-     (values below 10 are raised to 10 by gRPC).");
-const HELP_GRPC_HEALTH_CHECK_TIMEOUT: HelpText = HelpText::en(
-    "health_check_timeout — seconds to wait for the ping answer; empty = 20.");
-const HELP_GRPC_PERMIT_WITHOUT_STREAM: HelpText = HelpText::en("Send health check pings even without active streams.");
-const HELP_GRPC_INITIAL_WINDOWS_SIZE: HelpText = HelpText::en(
+     (values below 10 are raised to 10 by gRPC).",
+    "idle_timeout — сколько секунд без трафика проходит до проверочного ping; пусто или ≤ 0 — \
+     выключено (значения меньше 10 gRPC поднимает до 10).",
+);
+const HELP_GRPC_HEALTH_CHECK_TIMEOUT: HelpText = HelpText::new(
+    "health_check_timeout — seconds to wait for the ping answer; empty = 20.",
+    "health_check_timeout — сколько секунд ждать ответа на ping; пусто — 20.",
+);
+const HELP_GRPC_PERMIT_WITHOUT_STREAM: HelpText = HelpText::new(
+    "Send health check pings even without active streams.",
+    "Отправлять проверочные ping даже без активных потоков.",
+);
+const HELP_GRPC_INITIAL_WINDOWS_SIZE: HelpText = HelpText::new(
     "initial_windows_size — HTTP/2 stream window in bytes; empty or 0 = default. 65536 helps \
-     with some CDNs (e.g. Cloudflare).");
-const HELP_WS_HOST: HelpText = HelpText::en(
-    "Host header sent in the WebSocket handshake; empty = tlsSettings.serverName, then the address.");
-const HELP_WS_PATH: HelpText = HelpText::en("HTTP path of the WebSocket endpoint; must match the server.");
-const HELP_WS_ED: HelpText = HelpText::en(
+     with some CDNs (e.g. Cloudflare).",
+    "initial_windows_size — окно потока HTTP/2 в байтах; пусто или 0 — по умолчанию. 65536 \
+     помогает с некоторыми CDN (например, Cloudflare).",
+);
+const HELP_WS_HOST: HelpText = HelpText::new(
+    "Host header sent in the WebSocket handshake; empty = tlsSettings.serverName, then the address.",
+    "Заголовок Host в рукопожатии WebSocket; пусто — tlsSettings.serverName, затем адрес.",
+);
+const HELP_WS_PATH: HelpText = HelpText::new(
+    "HTTP path of the WebSocket endpoint; must match the server.",
+    "HTTP-путь конечной точки WebSocket; должен совпадать с сервером.",
+);
+const HELP_WS_ED: HelpText = HelpText::new(
     "Early Data: up to this many bytes of the first payload ride in the handshake (written as \
-     path?ed=N). The server must allow it too.");
-const HELP_WS_HEARTBEAT: HelpText = HelpText::en("heartbeatPeriod — seconds between ping frames; empty = off.");
-const HELP_HEADERS: HelpText = HelpText::en(
+     path?ed=N). The server must allow it too.",
+    "Early Data: до стольких байт первых данных передаются в рукопожатии (записывается как \
+     path?ed=N). Сервер тоже должен это разрешать.",
+);
+const HELP_WS_HEARTBEAT: HelpText = HelpText::new(
+    "heartbeatPeriod — seconds between ping frames; empty = off.",
+    "heartbeatPeriod — интервал в секундах между ping-кадрами; пусто — выключено.",
+);
+const HELP_HEADERS: HelpText = HelpText::new(
     "Extra HTTP headers of the handshake. Put the Host into the host field: a Host header is \
-     deprecated on WebSocket and refused on HTTPUpgrade.");
-const HELP_HU_HOST: HelpText = HelpText::en("Host header of the HTTP Upgrade request; empty = serverName, then the address.");
-const HELP_HU_PATH: HelpText = HelpText::en("HTTP path of the upgrade request; must match the server.");
-const HELP_HY_AUTH: HelpText = HelpText::en("Hysteria authentication — the auth of one of the server's users.");
-const HELP_HY_UDP_IDLE: HelpText = HelpText::en("udpIdleTimeout — seconds a UDP session may stay idle (2–600); empty = 60.");
-const HELP_SECURITY: HelpText = HelpText::en(
+     deprecated on WebSocket and refused on HTTPUpgrade.",
+    "Дополнительные HTTP-заголовки рукопожатия. Host указывайте в поле host: заголовок Host \
+     устарел для WebSocket и отвергается для HTTPUpgrade.",
+);
+const HELP_HU_HOST: HelpText = HelpText::new(
+    "Host header of the HTTP Upgrade request; empty = serverName, then the address.",
+    "Заголовок Host запроса HTTP Upgrade; пусто — serverName, затем адрес.",
+);
+const HELP_HU_PATH: HelpText = HelpText::new(
+    "HTTP path of the upgrade request; must match the server.",
+    "HTTP-путь запроса upgrade; должен совпадать с сервером.",
+);
+const HELP_HY_AUTH: HelpText = HelpText::new(
+    "Hysteria authentication — the auth of one of the server's users.",
+    "Аутентификация Hysteria — auth одного из пользователей сервера.",
+);
+const HELP_HY_UDP_IDLE: HelpText = HelpText::new(
+    "udpIdleTimeout — seconds a UDP session may stay idle (2–600); empty = 60.",
+    "udpIdleTimeout — сколько секунд UDP-сессия может простаивать (2–600); пусто — 60.",
+);
+const HELP_SECURITY: HelpText = HelpText::new(
     "streamSettings.security of the client: TLS, or REALITY towards a REALITY server. REALITY \
-     only works over RAW, XHTTP and gRPC; Hysteria needs TLS.");
-const HELP_TLS_SERVER_NAME: HelpText = HelpText::en(
-    "SNI sent to the server and the name its certificate must carry; empty = the address.");
-const HELP_TLS_ALPN: HelpText = HelpText::en("ALPN offered in the handshake (e.g. h2, http/1.1; exactly h3 for XHTTP/3).");
-const HELP_TLS_FINGERPRINT: HelpText = HelpText::en(
-    "uTLS ClientHello to imitate; empty = chrome. unsafe = Go's own hello (not recommended).");
-const HELP_TLS_PINNED: HelpText = HelpText::en(
+     only works over RAW, XHTTP and gRPC; Hysteria needs TLS.",
+    "streamSettings.security клиента: TLS или REALITY для REALITY-сервера. REALITY работает \
+     только поверх RAW, XHTTP и gRPC; Hysteria требует TLS.",
+);
+const HELP_TLS_SERVER_NAME: HelpText = HelpText::new(
+    "SNI sent to the server and the name its certificate must carry; empty = the address.",
+    "SNI, отправляемый серверу, и имя, которое должно быть в его сертификате; пусто — адрес.",
+);
+const HELP_TLS_ALPN: HelpText = HelpText::new(
+    "ALPN offered in the handshake (e.g. h2, http/1.1; exactly h3 for XHTTP/3).",
+    "ALPN, предлагаемый при рукопожатии (например, h2, http/1.1; для XHTTP/3 — ровно h3).",
+);
+const HELP_TLS_FINGERPRINT: HelpText = HelpText::new(
+    "uTLS ClientHello to imitate; empty = chrome. unsafe = Go's own hello (not recommended).",
+    "uTLS ClientHello, который нужно имитировать; пусто — chrome. unsafe — собственный hello Go \
+     (не рекомендуется).",
+);
+const HELP_TLS_PINNED: HelpText = HelpText::new(
     "pinnedPeerCertSha256 — SHA-256 of the server's certificate (hex, colons allowed, several \
-     separated by commas). Pinning replaces the removed allowInsecure for self-signed servers.");
-const HELP_TLS_VERIFY_BY_NAME: HelpText = HelpText::en(
+     separated by commas). Pinning replaces the removed allowInsecure for self-signed servers.",
+    "pinnedPeerCertSha256 — SHA-256 сертификата сервера (hex, двоеточия допускаются, несколько \
+     через запятую). Закрепление заменяет удалённый allowInsecure для серверов с \
+     самоподписанным сертификатом.",
+);
+const HELP_TLS_VERIFY_BY_NAME: HelpText = HelpText::new(
     "verifyPeerCertByName — names accepted in the server certificate instead of serverName \
-     (comma-separated).");
-const HELP_TLS_ECH: HelpText = HelpText::en(
+     (comma-separated).",
+    "verifyPeerCertByName — имена, принимаемые в сертификате сервера вместо serverName (через \
+     запятую).",
+);
+const HELP_TLS_ECH: HelpText = HelpText::new(
     "echConfigList — the server's Encrypted Client Hello config (base64), or a DNS source as \
-     documented by Xray.");
-const HELP_TLS_VERSION: HelpText = HelpText::en("TLS version bound; empty = Xray default.");
-const HELP_TLS_CIPHERS: HelpText = HelpText::en("cipherSuites — colon-separated list; empty = Go default.");
-const HELP_TLS_CURVES: HelpText = HelpText::en("curvePreferences — key exchange groups, in order.");
-const HELP_TLS_DISABLE_SYSTEM_ROOT: HelpText = HelpText::en("Do not trust the operating system's CA store.");
-const HELP_TLS_SESSION_RESUMPTION: HelpText = HelpText::en("Allow TLS session resumption.");
-const HELP_TLS_MASTER_KEY_LOG: HelpText = HelpText::en("Path of a TLS key log file (debugging only).");
-const HELP_REALITY_SERVER_NAME: HelpText = HelpText::en("One of the server's serverNames.");
-const HELP_REALITY_FINGERPRINT: HelpText = HelpText::en(
-    "uTLS ClientHello to imitate; empty = chrome. REALITY refuses unsafe and hellogolang.");
-const HELP_REALITY_PUBLIC_KEY: HelpText = HelpText::en(
-    "The server's X25519 public key (`xray x25519` prints it next to the private key), base64url.");
-const HELP_REALITY_SHORT_ID: HelpText = HelpText::en("One of the server's shortIds (hex, up to 16 digits; may be empty if the server lists \"\").");
-const HELP_REALITY_SPIDER_X: HelpText = HelpText::en("Initial path of the crawler that imitates a browser; empty = /.");
-const HELP_REALITY_MLDSA65_VERIFY: HelpText = HelpText::en(
-    "The server's ML-DSA-65 public key (from mldsa65Seed); empty = no post-quantum signature check.");
-const HELP_REALITY_SHOW: HelpText = HelpText::en("Debug output of the REALITY handshake.");
+     documented by Xray.",
+    "echConfigList — конфигурация Encrypted Client Hello сервера (base64) или DNS-источник, как \
+     описано в документации Xray.",
+);
+const HELP_TLS_VERSION: HelpText = HelpText::new(
+    "TLS version bound; empty = Xray default.",
+    "Граница версии TLS; пусто — значение Xray по умолчанию.",
+);
+const HELP_TLS_CIPHERS: HelpText = HelpText::new(
+    "cipherSuites — colon-separated list; empty = Go default.",
+    "cipherSuites — список через двоеточие; пусто — значение Go по умолчанию.",
+);
+const HELP_TLS_CURVES: HelpText = HelpText::new(
+    "curvePreferences — key exchange groups, in order.",
+    "curvePreferences — группы обмена ключами, по порядку.",
+);
+const HELP_TLS_DISABLE_SYSTEM_ROOT: HelpText = HelpText::new(
+    "Do not trust the operating system's CA store.",
+    "Не доверять хранилищу корневых сертификатов операционной системы.",
+);
+const HELP_TLS_SESSION_RESUMPTION: HelpText = HelpText::new(
+    "Allow TLS session resumption.",
+    "Разрешить возобновление TLS-сессий.",
+);
+const HELP_TLS_MASTER_KEY_LOG: HelpText = HelpText::new(
+    "Path of a TLS key log file (debugging only).",
+    "Путь к файлу журнала ключей TLS (только для отладки).",
+);
+const HELP_REALITY_SERVER_NAME: HelpText = HelpText::new(
+    "One of the server's serverNames.",
+    "Одно из serverNames сервера.",
+);
+const HELP_REALITY_FINGERPRINT: HelpText = HelpText::new(
+    "uTLS ClientHello to imitate; empty = chrome. REALITY refuses unsafe and hellogolang.",
+    "uTLS ClientHello, который нужно имитировать; пусто — chrome. REALITY отвергает unsafe и \
+     hellogolang.",
+);
+const HELP_REALITY_PUBLIC_KEY: HelpText = HelpText::new(
+    "The server's X25519 public key (`xray x25519` prints it next to the private key), base64url.",
+    "Открытый ключ X25519 сервера (`xray x25519` выводит его рядом с закрытым), base64url.",
+);
+const HELP_REALITY_SHORT_ID: HelpText = HelpText::new(
+    "One of the server's shortIds (hex, up to 16 digits; may be empty if the server lists \"\").",
+    "Одно из shortIds сервера (hex, до 16 цифр; может быть пустым, если сервер указывает \"\").",
+);
+const HELP_REALITY_SPIDER_X: HelpText = HelpText::new(
+    "Initial path of the crawler that imitates a browser; empty = /.",
+    "Начальный путь краулера, имитирующего браузер; пусто — /.",
+);
+const HELP_REALITY_MLDSA65_VERIFY: HelpText = HelpText::new(
+    "The server's ML-DSA-65 public key (from mldsa65Seed); empty = no post-quantum signature check.",
+    "Открытый ключ ML-DSA-65 сервера (из mldsa65Seed); пусто — без проверки постквантовой \
+     подписи.",
+);
+const HELP_REALITY_SHOW: HelpText = HelpText::new(
+    "Debug output of the REALITY handshake.",
+    "Отладочный вывод рукопожатия REALITY.",
+);
 
 const GREY: Color32 = Color32::from_rgb(140, 140, 140);
 const AMBER: Color32 = Color32::from_rgb(210, 170, 40);

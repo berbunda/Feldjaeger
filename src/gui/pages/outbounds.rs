@@ -5,7 +5,7 @@
 
 use egui::{Color32, RichText, Sense, Ui};
 
-use super::optional_string_combo;
+use super::{HelpText, optional_string_combo};
 
 use crate::app::{
     ApplicationService, BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS,
@@ -20,6 +20,236 @@ use crate::xray::{
     LoopbackRouting, outbound_protocol_uses_sockopt, validate_send_through,
 };
 
+// ─── Field help text (Roadmap §4.4) ──────────────────────────────────────────
+//
+// Outbound Shell fields, condensed from the official Xray-core docs
+// (https://xtls.github.io/config/outbounds/) and checked against `infra/conf/*.go`. Each constant
+// backs one `super::field_label(...)` / `super::help_button(...)` call; the Stream / Security /
+// Socket options / FinalMask sections carry their own help (`outbound_stream.rs`,
+// `stream_sockopt.rs`, `stream_finalmask.rs`).
+
+// General.
+const HELP_GENERAL_TAG: HelpText = HelpText::new(
+    "Identifier of this outbound. Routing rules (outboundTag), balancers and other outbounds' \
+     dialerProxy refer to it, so it must be unique. Fixed after Add — use Rename in the table.",
+    "Идентификатор этого outbound. На него ссылаются правила маршрутизации (outboundTag), \
+     балансировщики и dialerProxy других outbound, поэтому он должен быть уникальным. После \
+     добавления не меняется здесь — используйте Rename в таблице.",
+);
+const HELP_GENERAL_SEND_THROUGH: HelpText = HelpText::new(
+    "Local address outgoing connections are sent from: an IP; IP/prefix — a random address of \
+     that range per connection; origin — the local address the client reached the inbound on; \
+     srcip — the client's own address. Empty = system default. Not used while Socket options → \
+     dialerProxy is set.",
+    "Локальный адрес, с которого уходят исходящие подключения: IP; IP/префикс — случайный адрес \
+     из диапазона на каждое подключение; origin — локальный адрес, на который клиент пришёл в \
+     inbound; srcip — собственный адрес клиента. Пусто — выбор системы. Не используется, пока \
+     задан Socket options → dialerProxy.",
+);
+
+// Freedom.
+const HELP_FREEDOM_REDIRECT: HelpText = HelpText::new(
+    "Sends every connection to this host:port instead of its own destination. :port keeps the \
+     original address and changes only the port; port 0 keeps the original port. Empty = \
+     disabled.",
+    "Отправляет каждое подключение на этот host:port вместо исходного адреса назначения. :port \
+     сохраняет исходный адрес и меняет только порт; порт 0 сохраняет исходный порт. Пусто — \
+     выключено.",
+);
+const HELP_USER_LEVEL: HelpText = HelpText::new(
+    "User level: connections use the local policy (policy.levels) of this level — timeouts, \
+     buffer size, statistics. Default 0.",
+    "Уровень пользователя: подключения используют локальную политику (policy.levels) этого \
+     уровня — таймауты, размер буфера, статистику. По умолчанию 0.",
+);
+const HELP_FREEDOM_PROXY_PROTOCOL: HelpText = HelpText::new(
+    "Sends a PROXY protocol header (v1 or v2) to the target, so a backend behind redirect sees \
+     the client's real address. The target must expect it, or the connection breaks. 0 \
+     (default) = off.",
+    "Отправляет получателю заголовок PROXY protocol (v1 или v2), чтобы сервис за redirect видел \
+     реальный адрес клиента. Получатель должен его ожидать, иначе соединение сломается. 0 (по \
+     умолчанию) — выключено.",
+);
+const HELP_FREEDOM_FRAGMENT: HelpText = HelpText::new(
+    "Splits what Freedom sends into small pieces, so DPI that needs a whole message (the TLS \
+     ClientHello with its SNI) sees only fragments. Applies to TCP only.",
+    "Разбивает то, что отправляет Freedom, на мелкие части, чтобы DPI, которому нужно сообщение \
+     целиком (TLS ClientHello с его SNI), видел только фрагменты. Действует только для TCP.",
+);
+const HELP_FREEDOM_FRAGMENT_PACKETS: HelpText = HelpText::new(
+    "Which writes to split: tlshello — the TLS ClientHello; FROM-TO (e.g. 1-3) — those writes of \
+     the TCP stream, counting from 1.",
+    "Какие записи разбивать: tlshello — TLS ClientHello; FROM-TO (например, 1-3) — эти записи \
+     TCP-потока, считая с 1.",
+);
+const HELP_FREEDOM_FRAGMENT_LENGTH: HelpText = HelpText::new(
+    "Piece size in bytes: a number or a range such as 100-200 (a random value per piece).",
+    "Размер части в байтах: число или диапазон вроде 100-200 (случайное значение для каждой \
+     части).",
+);
+const HELP_FREEDOM_FRAGMENT_INTERVAL: HelpText = HelpText::new(
+    "Pause between pieces in milliseconds, a number or a range such as 10-20. With tlshello, 0 \
+     sends the fragmented ClientHello in one TCP packet.",
+    "Пауза между частями в миллисекундах, число или диапазон вроде 10-20. С tlshello значение 0 \
+     отправляет фрагментированный ClientHello одним TCP-пакетом.",
+);
+const HELP_FREEDOM_NOISES: HelpText = HelpText::new(
+    "UDP junk packets sent before the real data to confuse DPI. type: rand — random bytes, \
+     packet is the length (N or MIN-MAX); str — the text in packet; hex / base64 — packet \
+     decoded. delay — milliseconds to wait after the noise (N or MIN-MAX).",
+    "Мусорные UDP-пакеты перед настоящими данными, чтобы запутать DPI. type: rand — случайные \
+     байты, packet задаёт длину (N или MIN-MAX); str — текст из packet; hex / base64 — \
+     декодированный packet. delay — пауза в миллисекундах после шума (N или MIN-MAX).",
+);
+const HELP_FREEDOM_FINAL_RULES: HelpText = HelpText::new(
+    "Final allow / block filter on the real destination, checked in order before and after \
+     dialing; the first matching rule decides. Domain targets are resolved with \
+     sockopt.domainStrategy first. Not applied when sockopt.dialerProxy is set.",
+    "Итоговый фильтр allow / block по реальному адресу назначения; правила проверяются по порядку \
+     до и после подключения, решает первое совпавшее. Доменные адреса сначала разрешаются через \
+     sockopt.domainStrategy. Не применяется, когда задан sockopt.dialerProxy.",
+);
+const HELP_FINAL_RULE_ACTION: HelpText = HelpText::new(
+    "allow — let the connection through; block — hold it open for blockDelay seconds, then \
+     close it.",
+    "allow — пропустить подключение; block — удерживать его blockDelay секунд, затем закрыть.",
+);
+const HELP_FINAL_RULE_NETWORK: HelpText = HelpText::new(
+    "tcp, udp or tcp,udp; (any) = every network.",
+    "tcp, udp или tcp,udp; (any) — любая сеть.",
+);
+const HELP_FINAL_RULE_PORT: HelpText = HelpText::new(
+    "Destination port in routing syntax, e.g. 25 or 1000-2000,443; empty = any port.",
+    "Порт назначения в синтаксисе маршрутизации, например 25 или 1000-2000,443; пусто — любой \
+     порт.",
+);
+const HELP_FINAL_RULE_BLOCK_DELAY: HelpText = HelpText::new(
+    "Seconds a blocked connection is held open before it is closed, a number or a range such as \
+     30-90; empty = 30-90.",
+    "Сколько секунд заблокированное подключение удерживается перед закрытием, число или диапазон \
+     вроде 30-90; пусто — 30-90.",
+);
+const HELP_FINAL_RULE_IP: HelpText = HelpText::new(
+    "Destination addresses in routing syntax, one per line: a CIDR (10.0.0.0/8) or geoip:… \
+     (geoip:private); empty = any address.",
+    "Адреса назначения в синтаксисе маршрутизации, по одному на строку: CIDR (10.0.0.0/8) или \
+     geoip:… (geoip:private); пусто — любой адрес.",
+);
+
+// Blackhole.
+const HELP_BLACKHOLE_RESPONSE_TYPE: HelpText = HelpText::new(
+    "What Blackhole sends before closing; whatever the client sends is discarded. none \
+     (default) — close at once; http — a simple HTTP 403 response; custom — the bytes of \
+     customResponseData.",
+    "Что Blackhole отправляет перед закрытием; всё, что присылает клиент, отбрасывается. none \
+     (по умолчанию) — закрыть сразу; http — простой ответ HTTP 403; custom — байты из \
+     customResponseData.",
+);
+const HELP_BLACKHOLE_CUSTOM_DATA: HelpText = HelpText::new(
+    "The response bytes for type custom, base64 (standard alphabet). Data that is not valid \
+     base64 fails the config load.",
+    "Байты ответа для type custom в base64 (стандартный алфавит). Если это не корректный base64, \
+     конфиг не загрузится.",
+);
+
+// DNS.
+const HELP_DNS_REWRITE_NETWORK: HelpText = HelpText::new(
+    "Forward the DNS query over tcp or udp; empty = keep the network it arrived on.",
+    "Пересылать DNS-запрос по tcp или udp; пусто — оставить сеть, по которой он пришёл.",
+);
+const HELP_DNS_REWRITE_ADDRESS: HelpText = HelpText::new(
+    "DNS server the query is sent to; empty = keep the address the client asked.",
+    "DNS-сервер, на который отправляется запрос; пусто — оставить адрес, который запросил клиент.",
+);
+const HELP_DNS_REWRITE_PORT: HelpText = HelpText::new(
+    "Port of that DNS server, 1-65535; empty = keep the original port.",
+    "Порт этого DNS-сервера, 1-65535; пусто — оставить исходный порт.",
+);
+const HELP_DNS_RULES: HelpText = HelpText::new(
+    "Checked in order — the first matching rule decides. Without a match, A / AAAA queries go to \
+     the built-in DNS module and other types get an empty response with RCODE 0.",
+    "Проверяются по порядку — решает первое совпавшее правило. Если совпадения нет, запросы A / \
+     AAAA уходят во встроенный DNS-модуль, а остальные типы получают пустой ответ с RCODE 0.",
+);
+const HELP_DNS_RULE_ACTION: HelpText = HelpText::new(
+    "direct — send the query to the target DNS server; hijack — hand it to the built-in DNS \
+     module; drop — drop it without an answer; return — answer with rCode.",
+    "direct — отправить запрос на целевой DNS-сервер; hijack — передать его встроенному \
+     DNS-модулю; drop — отбросить без ответа; return — ответить с кодом rCode.",
+);
+const HELP_DNS_RULE_QTYPE: HelpText = HelpText::new(
+    "Query types to match: a number (1 = A, 28 = AAAA, 65 = HTTPS) or a range / comma list such \
+     as 11,13,15-17; empty = any type.",
+    "Типы запросов для сопоставления: число (1 = A, 28 = AAAA, 65 = HTTPS) или диапазон / список \
+     через запятую вроде 11,13,15-17; пусто — любой тип.",
+);
+const HELP_DNS_RULE_RCODE: HelpText = HelpText::new(
+    "DNS response code for action return, 0–65535 (0 = NOERROR, 3 = NXDOMAIN). Ignored by the \
+     other actions.",
+    "Код ответа DNS для action return, 0–65535 (0 = NOERROR, 3 = NXDOMAIN). Другие действия его \
+     игнорируют.",
+);
+const HELP_DNS_RULE_DOMAIN: HelpText = HelpText::new(
+    "Query names in routing syntax, one per line (domain:, full:, regexp:, keyword:, geosite:…); \
+     empty = every query.",
+    "Имена запросов в синтаксисе маршрутизации, по одному на строку (domain:, full:, regexp:, \
+     keyword:, geosite:…); пусто — все запросы.",
+);
+
+// Loopback.
+const HELP_LOOPBACK_INBOUND_TAG: HelpText = HelpText::new(
+    "The inbound tag the traffic re-enters routing with: rules whose inboundTag lists it decide \
+     where it goes next. Matched exactly (case and spaces count); it does not have to be the tag \
+     of a real inbound.",
+    "Тег inbound, с которым трафик снова попадает в маршрутизацию: куда он пойдёт дальше, решают \
+     правила, в inboundTag которых он указан. Сравнивается точно (регистр и пробелы важны); \
+     настоящего inbound с таким тегом может и не быть.",
+);
+const HELP_LOOPBACK_SNIFFING: HelpText = HelpText::new(
+    "settings.sniffing — sniff the re-injected traffic again (e.g. TLS SNI after a decrypting \
+     outbound); runs only when enabled.",
+    "settings.sniffing — повторно анализировать возвращённый трафик (например, TLS SNI после \
+     расшифровывающего outbound); работает, только если включено.",
+);
+
+// VLESS.
+const HELP_VLESS_ADDRESS: HelpText = HelpText::new(
+    "Server this outbound dials: an IP or a domain (required).",
+    "Сервер, к которому подключается этот outbound: IP или домен (обязательно).",
+);
+const HELP_VLESS_PORT: HelpText = HelpText::new(
+    "Server port, 1-65535 (required).",
+    "Порт сервера, 1-65535 (обязательно).",
+);
+const HELP_VLESS_ID: HelpText = HelpText::new(
+    "User ID: the UUID of one of the server's clients[] (required). Generate makes a new random \
+     UUID — add the same one to the server.",
+    "ID пользователя: UUID одного из clients[] сервера (обязательно). Generate создаёт новый \
+     случайный UUID — добавьте его же на сервер.",
+);
+const HELP_VLESS_FLOW: HelpText = HelpText::new(
+    "Flow control, e.g. xtls-rprx-vision; must match the server's client entry. Empty = key \
+     absent (no flow).",
+    "Управление потоком, например xtls-rprx-vision; должно совпадать с записью клиента на \
+     сервере. Пусто — ключа нет (без flow).",
+);
+const HELP_VLESS_ENCRYPTION: HelpText = HelpText::new(
+    "Required. none — no VLESS Encryption (the server's decryption is none); otherwise the client \
+     half of the server's decryption, printed by xray vlessenc. Xray-core refuses an empty value.",
+    "Обязательно. none — без VLESS Encryption (decryption сервера — none); иначе клиентская \
+     половина decryption сервера, которую выводит xray vlessenc. Пустое значение Xray-core \
+     отвергает.",
+);
+const HELP_VLESS_LEVEL: HelpText = HelpText::new(
+    "User level: index into policy.levels (timeouts, buffer size); empty = key absent (level 0).",
+    "Уровень пользователя: индекс в policy.levels (таймауты, размер буфера); пусто — ключа нет \
+     (уровень 0).",
+);
+const HELP_VLESS_EMAIL: HelpText = HelpText::new(
+    "User label in logs and statistics; empty = key absent.",
+    "Метка пользователя в журналах и статистике; пусто — ключа нет.",
+);
+
 /// Renders the Outbounds page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     service.tick_outbounds_page_status();
@@ -27,6 +257,9 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     show_duplicate_outbound_dialog(ui, service);
     show_rename_outbound_dialog(ui, service);
     show_raw_json_outbound_dialog(ui, service);
+    // The "h" buttons of the Outbound Shell and its Stream / Security / Socket options / FinalMask
+    // sections open their pop-up here.
+    super::show_help_dialog(ui);
 
     ui.heading("Outbounds");
     ui.add_space(8.0);
@@ -882,21 +1115,16 @@ fn show_outbound_general_edit(ui: &mut Ui, service: &mut ApplicationService, is_
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            ui.label("tag");
+            super::field_label(ui, "tag", HELP_GENERAL_TAG);
             if is_add {
                 ui.text_edit_singleline(&mut tag);
             } else {
-                ui.label(if tag.is_empty() { MISSING_FIELD } else { &tag })
-                    .on_hover_text("Rename is not supported yet (Roadmap §2.4:99)");
+                ui.label(if tag.is_empty() { MISSING_FIELD } else { &tag });
             }
             ui.end_row();
 
-            ui.label("sendThrough");
-            ui.text_edit_singleline(&mut send_through).on_hover_text(
-                "Local address outgoing connections are sent from: an IP; IP/prefix — a random \
-                 address of that range per connection; origin — the local address the client \
-                 reached the inbound on; srcip — the client's own address. Empty = system default.",
-            );
+            super::field_label(ui, "sendThrough", HELP_GENERAL_SEND_THROUGH);
+            ui.text_edit_singleline(&mut send_through);
             ui.end_row();
         });
     // Checked live with the same rule as Save (Roadmap §4.2), plus the core's precedence:
@@ -1009,19 +1237,15 @@ fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            ui.label("redirect");
-            ui.text_edit_singleline(&mut redirect_text)
-                .on_hover_text("host:port or :port; empty = disabled");
+            super::field_label(ui, "redirect", HELP_FREEDOM_REDIRECT);
+            ui.text_edit_singleline(&mut redirect_text);
             ui.end_row();
 
-            ui.label("userLevel");
+            super::field_label(ui, "userLevel", HELP_USER_LEVEL);
             ui.add(egui::DragValue::new(&mut level).range(0..=u32::MAX as i64));
             ui.end_row();
 
-            ui.label("proxyProtocol").on_hover_text(
-                "Send a PROXY protocol header to the target; the target must expect it, or the \
-                 connection breaks",
-            );
+            super::field_label(ui, "proxyProtocol", HELP_FREEDOM_PROXY_PROTOCOL);
             egui::ComboBox::from_id_salt("freedom_proxy_protocol")
                 .selected_text(proxy_protocol_label(proxy_protocol))
                 .show_ui(ui, |ui| {
@@ -1038,11 +1262,13 @@ fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
 
     ui.add_space(6.0);
     let mut fragment_enabled = draft.fragment.is_some();
-    if ui
-        .checkbox(&mut fragment_enabled, "fragment")
-        .on_hover_text("Packet fragmentation for DPI evasion")
-        .changed()
-    {
+    let fragment_toggled = ui
+        .horizontal(|ui| {
+            super::help_button(ui, "fragment", HELP_FREEDOM_FRAGMENT);
+            ui.checkbox(&mut fragment_enabled, "fragment").changed()
+        })
+        .inner;
+    if fragment_toggled {
         draft.fragment = if fragment_enabled {
             Some(FragmentDraft::default())
         } else {
@@ -1054,31 +1280,30 @@ fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
             .num_columns(2)
             .spacing([16.0, 6.0])
             .show(ui, |ui| {
-                ui.label("packets");
-                ui.text_edit_singleline(&mut fragment.packets)
-                    .on_hover_text("e.g. tlshello or 1-3");
+                super::field_label(ui, "packets", HELP_FREEDOM_FRAGMENT_PACKETS);
+                ui.text_edit_singleline(&mut fragment.packets);
                 ui.end_row();
-                ui.label("length");
-                ui.text_edit_singleline(&mut fragment.length)
-                    .on_hover_text("e.g. 100-200");
+                super::field_label(ui, "length", HELP_FREEDOM_FRAGMENT_LENGTH);
+                ui.text_edit_singleline(&mut fragment.length);
                 ui.end_row();
-                ui.label("interval");
-                ui.text_edit_singleline(&mut fragment.interval)
-                    .on_hover_text("ms, e.g. 10-20");
+                super::field_label(ui, "interval", HELP_FREEDOM_FRAGMENT_INTERVAL);
+                ui.text_edit_singleline(&mut fragment.interval);
                 ui.end_row();
             });
     }
 
     ui.add_space(8.0);
-    ui.strong("noises");
+    ui.horizontal(|ui| {
+        super::help_button(ui, "noises", HELP_FREEDOM_NOISES);
+        ui.strong("noises");
+    });
     show_freedom_noises_edit(ui, &mut draft.noises);
 
     ui.add_space(8.0);
-    ui.strong("finalRules").on_hover_text(
-        "Checked in order before and after dialing; the first matching rule decides. Domain \
-         targets are resolved with sockopt.domainStrategy first. Not applied when \
-         sockopt.dialerProxy is set.",
-    );
+    ui.horizontal(|ui| {
+        super::help_button(ui, "finalRules", HELP_FREEDOM_FINAL_RULES);
+        ui.strong("finalRules");
+    });
     if draft.final_rules_foreign {
         ui.label(
             RichText::new(
@@ -1156,7 +1381,7 @@ fn show_freedom_final_rules_edit(ui: &mut Ui, rules: &mut Vec<FreedomFinalRuleDr
                 .num_columns(2)
                 .spacing([12.0, 4.0])
                 .show(ui, |ui| {
-                    ui.label("action");
+                    super::field_label(ui, "action", HELP_FINAL_RULE_ACTION);
                     egui::ComboBox::from_id_salt(("freedom_final_rule_action", idx))
                         .selected_text(if rule.action.is_empty() {
                             "(unset)"
@@ -1170,7 +1395,7 @@ fn show_freedom_final_rules_edit(ui: &mut Ui, rules: &mut Vec<FreedomFinalRuleDr
                         });
                     ui.end_row();
 
-                    ui.label("network");
+                    super::field_label(ui, "network", HELP_FINAL_RULE_NETWORK);
                     egui::ComboBox::from_id_salt(("freedom_final_rule_network", idx))
                         .selected_text(if rule.network.is_empty() {
                             "(any)"
@@ -1185,20 +1410,19 @@ fn show_freedom_final_rules_edit(ui: &mut Ui, rules: &mut Vec<FreedomFinalRuleDr
                         });
                     ui.end_row();
 
-                    ui.label("port");
-                    ui.text_edit_singleline(&mut rule.port.text)
-                        .on_hover_text("e.g. 25 or 1000-2000,443; empty = any port");
+                    super::field_label(ui, "port", HELP_FINAL_RULE_PORT);
+                    ui.text_edit_singleline(&mut rule.port.text);
                     ui.end_row();
 
-                    ui.label("blockDelay");
-                    ui.text_edit_singleline(&mut rule.block_delay.text).on_hover_text(format!(
-                        "Seconds a blocked connection is held open, e.g. 30 or 30-90; empty = \
-                         {FREEDOM_DEFAULT_BLOCK_DELAY}"
-                    ));
+                    super::field_label(ui, "blockDelay", HELP_FINAL_RULE_BLOCK_DELAY);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut rule.block_delay.text)
+                            .hint_text(FREEDOM_DEFAULT_BLOCK_DELAY),
+                    );
                     ui.end_row();
                 });
 
-            ui.label("ip (one CIDR per line, e.g. 10.0.0.0/8 or geoip:private; empty = any)");
+            super::field_label(ui, "ip (one per line)", HELP_FINAL_RULE_IP);
             super::persistent_list_text_edit(ui, ("freedom_final_rule_ip", idx), &mut rule.ip, |ui, text| {
                 ui.add(egui::TextEdit::multiline(text).desired_rows(2))
             });
@@ -1284,8 +1508,7 @@ fn show_blackhole_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            ui.label("response.type")
-                .on_hover_text("none = close immediately; http = send a fake HTTP 403 then close; custom = send customResponseData then close");
+            super::field_label(ui, "response.type", HELP_BLACKHOLE_RESPONSE_TYPE);
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("blackhole_response_type")
                     .selected_text(if kind.is_empty() {
@@ -1303,8 +1526,7 @@ fn show_blackhole_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
             ui.end_row();
 
             if kind.trim().eq_ignore_ascii_case("custom") {
-                ui.label("response.customResponseData")
-                    .on_hover_text("Base64-encoded raw bytes sent before close");
+                super::field_label(ui, "response.customResponseData", HELP_BLACKHOLE_CUSTOM_DATA);
                 ui.text_edit_singleline(&mut custom_data);
                 ui.end_row();
             }
@@ -1337,7 +1559,7 @@ fn show_dns_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            ui.label("rewriteNetwork");
+            super::field_label(ui, "rewriteNetwork", HELP_DNS_REWRITE_NETWORK);
             ui.horizontal(|ui| {
                 egui::ComboBox::from_id_salt("dns_rewrite_network")
                     .selected_text(if network.is_empty() {
@@ -1354,17 +1576,15 @@ fn show_dns_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
             });
             ui.end_row();
 
-            ui.label("rewriteAddress");
-            ui.text_edit_singleline(&mut address)
-                .on_hover_text("Target DNS server address; empty = unchanged");
+            super::field_label(ui, "rewriteAddress", HELP_DNS_REWRITE_ADDRESS);
+            ui.text_edit_singleline(&mut address);
             ui.end_row();
 
-            ui.label("rewritePort");
-            ui.text_edit_singleline(&mut port)
-                .on_hover_text("1-65535; empty = unchanged");
+            super::field_label(ui, "rewritePort", HELP_DNS_REWRITE_PORT);
+            ui.text_edit_singleline(&mut port);
             ui.end_row();
 
-            ui.label("userLevel");
+            super::field_label(ui, "userLevel", HELP_USER_LEVEL);
             ui.add(egui::DragValue::new(&mut level).range(0..=u32::MAX as i64));
             ui.end_row();
         });
@@ -1375,9 +1595,10 @@ fn show_dns_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
     *user_level = level.max(0) as u64;
 
     ui.add_space(8.0);
-    ui.strong("rules").on_hover_text(
-        "Evaluated in order — first match wins. No matching rule: A/AAAA go to the internal DNS module, other types get an empty RCODE 0 response.",
-    );
+    ui.horizontal(|ui| {
+        super::help_button(ui, "rules", HELP_DNS_RULES);
+        ui.strong("rules");
+    });
     show_dns_rules_edit(ui, rules);
 }
 
@@ -1401,11 +1622,7 @@ fn show_loopback_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            ui.label("inboundTag").on_hover_text(
-                "The inbound tag the traffic re-enters routing with: rules whose inboundTag \
-                 lists it decide where it goes next. Matched exactly (case and spaces count); \
-                 it does not have to be the tag of a real inbound.",
-            );
+            super::field_label(ui, "inboundTag", HELP_LOOPBACK_INBOUND_TAG);
             ui.horizontal(|ui| {
                 optional_string_combo(ui, "loopback_inbound_tag", &mut draft.inbound_tag, &presets);
             });
@@ -1453,10 +1670,10 @@ fn show_loopback_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
     }
 
     ui.add_space(8.0);
-    ui.strong("sniffing").on_hover_text(
-        "settings.sniffing — sniff the re-injected traffic again (e.g. TLS SNI after a \
-         decrypting outbound); runs only when enabled.",
-    );
+    ui.horizontal(|ui| {
+        super::help_button(ui, "sniffing", HELP_LOOPBACK_SNIFFING);
+        ui.strong("sniffing");
+    });
     if draft.sniffing_foreign {
         ui.label(
             RichText::new("settings.sniffing is not a JSON object; it is preserved — fix it on the Raw JSON tab to edit.")
@@ -1506,7 +1723,7 @@ fn show_dns_rules_edit(ui: &mut Ui, rules: &mut Vec<DnsRuleDraft>) {
                 .num_columns(2)
                 .spacing([12.0, 4.0])
                 .show(ui, |ui| {
-                    ui.label("action");
+                    super::field_label(ui, "action", HELP_DNS_RULE_ACTION);
                     ui.horizontal(|ui| {
                         egui::ComboBox::from_id_salt(("dns_rule_action", idx))
                             .selected_text(if rule.action.is_empty() {
@@ -1523,20 +1740,18 @@ fn show_dns_rules_edit(ui: &mut Ui, rules: &mut Vec<DnsRuleDraft>) {
                     });
                     ui.end_row();
 
-                    ui.label("qType");
-                    ui.text_edit_singleline(&mut rule.q_type).on_hover_text(
-                        "Integer (e.g. 1, 28, 65), or range/comma-list (e.g. 11,13,15-17); empty = any",
-                    );
+                    super::field_label(ui, "qType", HELP_DNS_RULE_QTYPE);
+                    ui.text_edit_singleline(&mut rule.q_type);
                     ui.end_row();
 
-                    ui.label("rCode").on_hover_text("Relevant only when action = return");
+                    super::field_label(ui, "rCode", HELP_DNS_RULE_RCODE);
                     let mut r_code = rule.r_code;
                     ui.add(egui::DragValue::new(&mut r_code).range(0..=65535));
                     rule.r_code = r_code;
                     ui.end_row();
                 });
 
-            ui.label("domain (one per line; empty = matches all queries)");
+            super::field_label(ui, "domain (one per line)", HELP_DNS_RULE_DOMAIN);
             super::persistent_list_text_edit(ui, ("dns_rule_domain", idx), &mut rule.domain, |ui, text| {
                 ui.add(egui::TextEdit::multiline(text).desired_rows(2))
             });
@@ -1592,49 +1807,37 @@ fn show_vless_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
         .num_columns(2)
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
-            ui.label("address");
-            ui.text_edit_singleline(&mut settings.address)
-                .on_hover_text("Server this outbound dials (required)");
+            super::field_label(ui, "address", HELP_VLESS_ADDRESS);
+            ui.text_edit_singleline(&mut settings.address);
             ui.end_row();
 
-            ui.label("port");
-            ui.text_edit_singleline(&mut settings.port)
-                .on_hover_text("1-65535 (required)");
+            super::field_label(ui, "port", HELP_VLESS_PORT);
+            ui.text_edit_singleline(&mut settings.port);
             ui.end_row();
 
-            ui.label("id");
+            super::field_label(ui, "id", HELP_VLESS_ID);
             ui.horizontal(|ui| {
-                ui.add(egui::TextEdit::singleline(&mut settings.id).desired_width(300.0))
-                    .on_hover_text("UUID matching a clients[] entry on the far end (required)");
+                ui.add(egui::TextEdit::singleline(&mut settings.id).desired_width(300.0));
                 if ui.button("Generate").clicked() {
                     settings.id = crate::app::generate_client_uuid();
                 }
             });
             ui.end_row();
 
-            ui.label("flow");
-            ui.text_edit_singleline(&mut settings.flow)
-                .on_hover_text("e.g. xtls-rprx-vision; empty = key absent");
+            super::field_label(ui, "flow", HELP_VLESS_FLOW);
+            ui.text_edit_singleline(&mut settings.flow);
             ui.end_row();
 
-            ui.label("encryption");
-            ui.text_edit_singleline(&mut settings.encryption)
-                .on_hover_text(
-                    "VLESS post-quantum encryption string (matches the inbound's decryption); \
-                     empty = key absent",
-                );
+            super::field_label(ui, "encryption", HELP_VLESS_ENCRYPTION);
+            ui.add(egui::TextEdit::singleline(&mut settings.encryption).hint_text("none"));
             ui.end_row();
 
-            ui.label("level");
-            ui.text_edit_singleline(&mut settings.level).on_hover_text(
-                "User level: index into policy.levels (timeouts, buffer size); empty = key absent \
-                 (level 0)",
-            );
+            super::field_label(ui, "level", HELP_VLESS_LEVEL);
+            ui.text_edit_singleline(&mut settings.level);
             ui.end_row();
 
-            ui.label("email");
-            ui.text_edit_singleline(&mut settings.email)
-                .on_hover_text("User label in logs and statistics; empty = key absent");
+            super::field_label(ui, "email", HELP_VLESS_EMAIL);
+            ui.text_edit_singleline(&mut settings.email);
             ui.end_row();
         });
 

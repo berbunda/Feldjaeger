@@ -101,21 +101,34 @@ impl ReverseDraftFields {
     }
 }
 
+const HELP_VLESS_REVERSE: HelpText = HelpText::new(
+    "VLESS-native reverse proxy (https://xtls.github.io/en/document/level-2/vless_reverse.html): \
+     this side registers with the other one under reverse.tag, and traffic is routed into the \
+     tunnel through routing rules with that tag as outboundTag.",
+    "Обратный прокси на основе VLESS (https://xtls.github.io/en/document/level-2/vless_reverse.html): \
+     эта сторона регистрируется у другой под reverse.tag, а трафик направляется в туннель \
+     правилами маршрутизации с этим тегом в outboundTag.",
+);
+const HELP_VLESS_REVERSE_TAG: HelpText = HelpText::new(
+    "Local-only identifier of the reverse tunnel, used in routing rules on this side; the two \
+     sides do not need matching tags.",
+    "Локальный идентификатор обратного туннеля, используется в правилах маршрутизации на этой \
+     стороне; тегам двух сторон не нужно совпадать.",
+);
+
 /// Checkbox-gated `reverse` editor: presence toggle + `tag` field + a "Sniffing (advanced)"
 /// spoiler with `enabled` and the known `destOverride` checkboxes.
 pub(crate) fn reverse_fields_edit(ui: &mut Ui, id_salt: &str, draft: &mut ReverseDraftFields) {
-    ui.checkbox(&mut draft.enabled, "reverse (VLESS-native reverse proxy)")
-        .on_hover_text(
-            "https://xtls.github.io/en/document/level-2/vless_reverse.html — registers this side \
-             under a local tag routed via routing outboundTag",
-        );
+    ui.horizontal(|ui| {
+        help_button(ui, "reverse", HELP_VLESS_REVERSE);
+        ui.checkbox(&mut draft.enabled, "reverse (VLESS-native reverse proxy)");
+    });
     if !draft.enabled {
         return;
     }
     ui.horizontal(|ui| {
-        ui.label("reverse.tag");
-        ui.add(egui::TextEdit::singleline(&mut draft.tag).desired_width(300.0))
-            .on_hover_text("Local-only identifier; the two sides do not need matching tags");
+        field_label(ui, "reverse.tag", HELP_VLESS_REVERSE_TAG);
+        ui.add(egui::TextEdit::singleline(&mut draft.tag).desired_width(300.0));
     });
     egui::CollapsingHeader::new("Sniffing (advanced)")
         .id_salt(id_salt)
@@ -334,29 +347,25 @@ fn help_language_id() -> egui::Id {
 const HELP_DIALOG_POINTER_GAP: f32 = 12.0;
 
 /// Help text of one field in every supported language (Roadmap §4.4). English is the source
-/// (condensed from the official Xray-core docs); a missing translation falls back to it.
+/// (condensed from the official Xray-core docs). There is deliberately no English-only
+/// constructor: help without its Russian text does not compile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct HelpText {
     en: &'static str,
-    ru: Option<&'static str>,
+    ru: &'static str,
 }
 
 impl HelpText {
-    /// English-only help (not translated yet).
-    pub(crate) const fn en(en: &'static str) -> Self {
-        Self { en, ru: None }
-    }
-
-    /// Help with a Russian translation.
+    /// Help in English and Russian.
     pub(crate) const fn new(en: &'static str, ru: &'static str) -> Self {
-        Self { en, ru: Some(ru) }
+        Self { en, ru }
     }
 
-    /// The text in `language`, or English when there is no translation.
+    /// The text in `language`.
     pub(crate) fn get(self, language: HelpLanguage) -> &'static str {
         match language {
             HelpLanguage::English => self.en,
-            HelpLanguage::Russian => self.ru.unwrap_or(self.en),
+            HelpLanguage::Russian => self.ru,
         }
     }
 }
@@ -680,12 +689,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn help_text_picks_the_language_and_falls_back_to_english() {
+    fn help_text_picks_the_language() {
         let translated = HelpText::new("Port.", "Порт.");
         assert_eq!(translated.get(HelpLanguage::English), "Port.");
         assert_eq!(translated.get(HelpLanguage::Russian), "Порт.");
-        let english_only = HelpText::en("Port.");
-        assert_eq!(english_only.get(HelpLanguage::Russian), "Port.");
     }
 
     #[test]
@@ -696,15 +703,16 @@ mod tests {
         assert_eq!(help_language(&ctx), HelpLanguage::Russian);
     }
 
-    /// Every help pop-up reachable from the Inbounds page has a Russian text (Roadmap §4.4).
+    /// Every page with "h" buttons must render the pop-up they open — otherwise a click is only
+    /// remembered and the window shows up later on another page (the Outbounds page did not,
+    /// Roadmap §4.4).
     #[test]
-    fn inbounds_page_help_is_fully_translated() {
+    fn pages_with_help_buttons_render_the_help_dialog() {
         for (file, source) in [
             ("inbounds.rs", include_str!("inbounds.rs")),
-            ("stream_sockopt.rs", include_str!("stream_sockopt.rs")),
-            ("stream_finalmask.rs", include_str!("stream_finalmask.rs")),
+            ("outbounds.rs", include_str!("outbounds.rs")),
         ] {
-            assert!(!source.contains("HelpText::en("), "{file} has English-only help");
+            assert!(source.contains("super::show_help_dialog(ui)"), "{file}");
         }
     }
 

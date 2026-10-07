@@ -9476,3 +9476,49 @@ Save требует заполнить поле. Три теста, которы
 
 Тест (+1): `default_draft_has_encryption_none_and_empty_encryption_is_refused`. Итог: **1391 passed /
 0 failed**.
+
+# 112	Pop-up help: Outbounds — Outbound Shell и Stream / Security на двух языках (Roadmap §4.4) (0.5.52-0)
+
+## 112.1	Справка Outbound Shell
+
+`gui/pages/outbounds.rs`: 35 констант `HELP_*` (`HelpText::new(en, ru)`). Тексты сверены с
+документацией xtls.github.io (Freedom, DNS, Blackhole) и с `infra/conf/*.go`, если документация
+неполна (`blackhole.go`: `type: custom` + `customResponseData` в base64 со стандартным алфавитом,
+ошибка декодирования валит загрузку). Подписи полей переведены с `ui.label(...).on_hover_text(...)`
+на `super::field_label` / `super::help_button`:
+
+- General: `tag`, `sendThrough`;
+- Freedom: `redirect`, `userLevel`, `proxyProtocol`, `fragment` (+ `packets`, `length`,
+  `interval`), `noises`, `finalRules` (+ `action`, `network`, `port`, `blockDelay` — пример
+  умолчания перенесён в hint поля, `ip`);
+- Blackhole: `response.type`, `response.customResponseData`;
+- DNS: `rewriteNetwork`, `rewriteAddress`, `rewritePort`, `userLevel`, `rules` (+ `action`,
+  `qType`, `rCode`, `domain`);
+- Loopback: `inboundTag`, `sniffing` (поля sniffing — общий редактор Inbounds, уже со справкой);
+- VLESS: `address`, `port`, `id`, `flow`, `encryption` (hint `none`, см. §111), `level`, `email`;
+  общий `reverse_fields_edit` (`gui/pages/mod.rs`, также вкладка Users) — `reverse` и
+  `reverse.tag`.
+
+`on_hover_text` остались только у кнопок действий (Migrate, Remove, Up / Down).
+
+## 112.2	Перевод Stream / Security
+
+`outbound_stream.rs`: 38 текстов получили русский перевод (скрипт подстановки, английский не
+менялся). Sockopt и FinalMask переведены в §105. Справки только на английском в проекте больше
+нет, поэтому `HelpText::en` удалён, а `ru` стал обязательным полем: справка без перевода не
+компилируется. Тесты-проверки `*_page_help_is_fully_translated` (поиск `HelpText::en(` в исходниках)
+удалены — их работу делает компилятор.
+
+## 112.3	Исправление: окно справки на странице Outbounds
+
+Кнопки «h» в разделах Stream / Security, Socket options и FinalMask стояли на странице Outbounds с
+§94–§97, но `outbounds::show` не вызывал `show_help_dialog`. Клик сохранялся в temp-памяти, а окно
+появлялось только при переходе на Inbounds. Теперь `show_help_dialog` вызывается в начале
+`outbounds::show`.
+
+## 112.4	Итог
+
+Тесты: `pages_with_help_buttons_render_the_help_dialog` (страницы с кнопками «h» вызывают
+`show_help_dialog`); `help_text_picks_the_language` вместо теста отката на английский; две
+проверки перевода удалены. Итог: **1391 passed / 0 failed**, clippy lib 65 (без изменений). GUI в
+запущенном приложении не проверялся.
