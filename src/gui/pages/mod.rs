@@ -2,6 +2,8 @@
 
 use egui::{Color32, RichText, Sense, Ui, vec2};
 
+use crate::storage::HelpLanguage;
+
 pub mod api_console;
 pub mod api_settings;
 pub mod backups;
@@ -324,14 +326,77 @@ fn help_dialog_id() -> egui::Id {
     egui::Id::new("field_help_dialog")
 }
 
+fn help_language_id() -> egui::Id {
+    egui::Id::new("field_help_language")
+}
+
 /// Gap between the pointer and the nearest edge of the help window.
 const HELP_DIALOG_POINTER_GAP: f32 = 12.0;
+
+/// Help text of one field in every supported language (Roadmap §4.4). English is the source
+/// (condensed from the official Xray-core docs); a missing translation falls back to it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HelpText {
+    en: &'static str,
+    ru: Option<&'static str>,
+}
+
+impl HelpText {
+    /// English-only help (not translated yet).
+    pub(crate) const fn en(en: &'static str) -> Self {
+        Self { en, ru: None }
+    }
+
+    /// Help with a Russian translation.
+    pub(crate) const fn new(en: &'static str, ru: &'static str) -> Self {
+        Self { en, ru: Some(ru) }
+    }
+
+    /// The text in `language`, or English when there is no translation.
+    pub(crate) fn get(self, language: HelpLanguage) -> &'static str {
+        match language {
+            HelpLanguage::English => self.en,
+            HelpLanguage::Russian => self.ru.unwrap_or(self.en),
+        }
+    }
+}
+
+/// Publishes the help language chosen in Settings for this frame's help buttons and pop-up.
+/// Called by the app shell once per frame, so pages need no extra parameter.
+pub(crate) fn set_help_language(ctx: &egui::Context, language: HelpLanguage) {
+    ctx.data_mut(|d| d.insert_temp(help_language_id(), language));
+}
+
+fn help_language(ctx: &egui::Context) -> HelpLanguage {
+    ctx.data(|d| d.get_temp(help_language_id())).unwrap_or_default()
+}
+
+/// The help pop-up's own wording (window caption, hover, Close button) in the help language.
+struct HelpChrome {
+    caption: &'static str,
+    close: &'static str,
+}
+
+impl HelpChrome {
+    fn of(language: HelpLanguage) -> Self {
+        match language {
+            HelpLanguage::English => Self {
+                caption: "Help",
+                close: "Close",
+            },
+            HelpLanguage::Russian => Self {
+                caption: "Справка",
+                close: "Закрыть",
+            },
+        }
+    }
+}
 
 /// The open help pop-up: what it shows and where it was asked for.
 #[derive(Clone, Copy)]
 struct HelpDialog {
     title: &'static str,
-    text: &'static str,
+    text: HelpText,
     /// Pointer position at the click that opened it.
     anchor: egui::Pos2,
     /// False until the window has been put next to `anchor`; afterwards the user may drag it.
@@ -343,11 +408,12 @@ struct HelpDialog {
 ///
 /// Source: field descriptions come from the official Xray-core config docs
 /// (<https://xtls.github.io/config/>), condensed to what's relevant for the exposed control.
-pub(crate) fn help_button(ui: &mut Ui, title: &'static str, help_text: &'static str) {
+pub(crate) fn help_button(ui: &mut Ui, title: &'static str, help_text: HelpText) {
     let button = egui::Button::new(RichText::new("h").size(10.0).strong())
         .corner_radius(egui::CornerRadius::same(u8::MAX))
         .min_size(vec2(16.0, 16.0));
-    let response = ui.add(button).on_hover_text(format!("Help: {title}"));
+    let caption = HelpChrome::of(help_language(ui.ctx())).caption;
+    let response = ui.add(button).on_hover_text(format!("{caption}: {title}"));
     if response.clicked() {
         let anchor = response
             .interact_pointer_pos()
@@ -387,7 +453,7 @@ fn help_dialog_left_top(anchor: egui::Pos2, size: egui::Vec2, bounds: egui::Rect
 
 /// Label preceded by a [`help_button`] for `help_text` — drop-in replacement for `ui.label(text)`
 /// in a form (Roadmap §3:124).
-pub(crate) fn field_label(ui: &mut Ui, text: &'static str, help_text: &'static str) {
+pub(crate) fn field_label(ui: &mut Ui, text: &'static str, help_text: HelpText) {
     ui.horizontal(|ui| {
         help_button(ui, text, help_text);
         ui.label(text);
@@ -402,8 +468,10 @@ pub(crate) fn show_help_dialog(ui: &mut Ui) {
         return;
     };
 
+    let language = help_language(&ctx);
+    let chrome = HelpChrome::of(language);
     let window_id = egui::Id::new(("field_help_window", dialog.title));
-    let mut window = egui::Window::new(format!("Help — {}", dialog.title))
+    let mut window = egui::Window::new(format!("{} — {}", chrome.caption, dialog.title))
         .id(window_id)
         .collapsible(false)
         .resizable(true)
@@ -427,9 +495,9 @@ pub(crate) fn show_help_dialog(ui: &mut Ui) {
     let mut open = true;
     let mut close_clicked = false;
     window.open(&mut open).show(&ctx, |ui| {
-        ui.label(dialog.text);
+        ui.label(dialog.text.get(language));
         ui.add_space(10.0);
-        if ui.button("Close").clicked() {
+        if ui.button(chrome.close).clicked() {
             close_clicked = true;
         }
     });
@@ -610,6 +678,35 @@ pub(crate) fn persistent_multiline_list_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_text_picks_the_language_and_falls_back_to_english() {
+        let translated = HelpText::new("Port.", "Порт.");
+        assert_eq!(translated.get(HelpLanguage::English), "Port.");
+        assert_eq!(translated.get(HelpLanguage::Russian), "Порт.");
+        let english_only = HelpText::en("Port.");
+        assert_eq!(english_only.get(HelpLanguage::Russian), "Port.");
+    }
+
+    #[test]
+    fn help_language_defaults_to_english_until_published() {
+        let ctx = egui::Context::default();
+        assert_eq!(help_language(&ctx), HelpLanguage::English);
+        set_help_language(&ctx, HelpLanguage::Russian);
+        assert_eq!(help_language(&ctx), HelpLanguage::Russian);
+    }
+
+    /// Every help pop-up reachable from the Inbounds page has a Russian text (Roadmap §4.4).
+    #[test]
+    fn inbounds_page_help_is_fully_translated() {
+        for (file, source) in [
+            ("inbounds.rs", include_str!("inbounds.rs")),
+            ("stream_sockopt.rs", include_str!("stream_sockopt.rs")),
+            ("stream_finalmask.rs", include_str!("stream_finalmask.rs")),
+        ] {
+            assert!(!source.contains("HelpText::en("), "{file} has English-only help");
+        }
+    }
 
     fn screen() -> egui::Rect {
         egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(1000.0, 800.0))

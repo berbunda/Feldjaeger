@@ -17,8 +17,8 @@ use crate::netinfo::{
 };
 use crate::remote::{ConfigBackup, RemoteAdmin};
 use crate::storage::{
-    AppConfig, ConfigManager, ConnectionDraft, ConnectionValidationErrors, StoredConnectionProfile,
-    ThemeMode, UiConfig, WindowPosition, WindowSize,
+    AppConfig, ConfigManager, ConnectionDraft, ConnectionValidationErrors, HelpLanguage,
+    StoredConnectionProfile, ThemeMode, UiConfig, WindowPosition, WindowSize,
 };
 use crate::xray::{DefaultConfigValidator, XrayManager};
 
@@ -9182,6 +9182,15 @@ impl ApplicationService {
         self.save_config();
     }
 
+    /// Updates the field help language and saves when the value changed.
+    pub fn set_help_language(&mut self, language: HelpLanguage) {
+        if self.config.config().ui.help_language == language {
+            return;
+        }
+        self.config.config_mut().ui.help_language = language;
+        self.save_config();
+    }
+
     /// Returns an immutable Status Bar snapshot for the GUI.
     pub fn status_snapshot(&self) -> StatusSnapshot {
         StatusSnapshot {
@@ -11906,6 +11915,20 @@ mod tests {
             draft.auth_method = AuthMethod::Password;
         }
         service.connection_secrets_mut().set_password("secret");
+    }
+
+    #[test]
+    fn help_language_is_saved_and_defaults_to_english() {
+        let mut service = service_with_temp_config("help-language");
+        assert_eq!(service.ui_config().help_language, HelpLanguage::English);
+
+        service.set_help_language(HelpLanguage::Russian);
+
+        let path = service.config.path().to_path_buf();
+        let json = fs::read_to_string(&path).expect("read config");
+        assert!(json.contains("\"help_language\": \"Russian\""), "{json}");
+        let reloaded = ConfigManager::load_from(path).expect("reload");
+        assert_eq!(reloaded.config().ui.help_language, HelpLanguage::Russian);
     }
 
     #[test]

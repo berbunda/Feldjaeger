@@ -23,6 +23,7 @@ use crate::gui::pages::stream_sockopt::{
     tproxy_combo_field,
 };
 use crate::gui::pages::{
+    HelpText,
     danger_sign, danger_warning, optional_string_combo, persistent_list_text_edit, persistent_multiline_list_row,
     resizable_multiline,
 };
@@ -47,312 +48,622 @@ use crate::xray::{
 // `gui::pages::help_button` for the pop-up mechanism.
 
 // General tab.
-const HELP_GENERAL_TAG: &str =
+const HELP_GENERAL_TAG: HelpText = HelpText::new(
     "The identifier of this inbound connection, used to locate it in other parts of the \
      configuration — most importantly, routing rules reference it via `inboundTag`. Must be \
-     unique across the whole config.";
-const HELP_GENERAL_LISTEN: &str =
+     unique across the whole config.",
+    "Идентификатор этого входящего подключения, по которому на него ссылаются другие части \
+     конфигурации — прежде всего правила маршрутизации через `inboundTag`. Должен быть \
+     уникальным во всём конфиге.",
+);
+const HELP_GENERAL_LISTEN: HelpText = HelpText::new(
     "The listening address: an IP address or a Unix domain socket. Default is `0.0.0.0` (all \
      IPv4 interfaces); use `::` for all IPv6 interfaces, or a specific address to restrict \
-     which interface accepts connections.";
-const HELP_GENERAL_PORT: &str =
+     which interface accepts connections.",
+    "Адрес прослушивания: IP-адрес или Unix domain socket. По умолчанию `0.0.0.0` (все \
+     IPv4-интерфейсы); `::` — все IPv6-интерфейсы; конкретный адрес ограничивает, на каком \
+     интерфейсе принимаются подключения.",
+);
+const HELP_GENERAL_PORT: HelpText = HelpText::new(
     "Port this inbound listens on. Accepts a single number, or — for protocols that support \
      port hopping/multiplexing (e.g. Hysteria2) — a range string (\"5000-6000\") or a \
      comma-separated list (\"443,5000-6000\"). Non-scalar shapes are preserved as-is and are \
-     not editable from this shell (Roadmap §3:118); use the raw config file to change them.";
+     not editable from this shell (Roadmap §3:118); use the raw config file to change them.",
+    "Порт, который слушает этот inbound. Принимает одно число, а для протоколов с прыжками по \
+     портам (например, Hysteria2) — диапазон-строку (\"5000-6000\") или список через запятую \
+     (\"443,5000-6000\"). Нескалярные формы сохраняются как есть и не редактируются здесь \
+     (Roadmap §3:118); меняйте их в исходном файле конфига.",
+);
 
 // Sniffing tab.
-const HELP_SNIFFING_ENABLED: &str = "Whether to enable traffic sniffing.";
-const HELP_SNIFFING_DEST_OVERRIDE: &str =
+const HELP_SNIFFING_ENABLED: HelpText = HelpText::new(
+    "Whether to enable traffic sniffing.",
+    "Включить анализ (sniffing) трафика.",
+);
+const HELP_SNIFFING_DEST_OVERRIDE: HelpText = HelpText::new(
     "When sniffed traffic matches one of the checked types (http / tls / quic / fakedns / \
      fakedns+others), the connection's destination is reset to the domain name found inside \
-     the traffic itself, instead of the original IP it was dialed to.";
-const HELP_SNIFFING_METADATA_ONLY: &str =
+     the traffic itself, instead of the original IP it was dialed to.",
+    "Если распознанный трафик совпал с одним из отмеченных типов (http / tls / quic / fakedns / \
+     fakedns+others), адрес назначения подключения заменяется доменным именем, найденным в \
+     самом трафике, вместо исходного IP, на который шло подключение.",
+);
+const HELP_SNIFFING_METADATA_ONLY: HelpText = HelpText::new(
     "When enabled, only connection metadata (e.g. SNI, HTTP Host header) is used to sniff the \
-     destination address — Xray does not need to buffer/inspect payload bytes.";
-const HELP_SNIFFING_ROUTE_ONLY: &str =
+     destination address — Xray does not need to buffer/inspect payload bytes.",
+    "Если включено, для определения адреса назначения используются только метаданные \
+     подключения (например, SNI или заголовок HTTP Host) — Xray не нужно буферизовать и \
+     разбирать полезную нагрузку.",
+);
+const HELP_SNIFFING_ROUTE_ONLY: HelpText = HelpText::new(
     "Use the sniffed domain only for routing decisions; the actual proxy destination address \
-     stays the original IP instead of being replaced by the sniffed domain.";
+     stays the original IP instead of being replaced by the sniffed domain.",
+    "Распознанный домен используется только для решений маршрутизации; фактический адрес \
+     назначения прокси остаётся исходным IP и не заменяется доменом.",
+);
 
 // Protocol tab — VLESS.
-const HELP_VLESS_DECRYPTION: &str =
+const HELP_VLESS_DECRYPTION: HelpText = HelpText::new(
     "VLESS Encryption settings (server-side \"decryption\"). Cannot be left empty; set to \
      \"none\" to disable it. Non-\"none\" values are generated with the remote `xray vlessenc` \
-     command below.";
-const HELP_VLESS_ENCRYPTION: &str =
+     command below.",
+    "Настройки VLESS Encryption на стороне сервера (\"decryption\"). Пустым быть не может; \
+     \"none\" отключает шифрование. Значения, отличные от \"none\", генерируются удалённой \
+     командой `xray vlessenc` кнопкой ниже.",
+);
+const HELP_VLESS_ENCRYPTION: HelpText = HelpText::new(
     "The client-side half of VLESS Encryption produced by the last \"Generate vlessenc\" run — \
      shown here for copying into the client's config; never written into the inbound JSON \
-     itself (only `decryption` is).";
-const HELP_VLESSENC_AUTH: &str =
+     itself (only `decryption` is).",
+    "Клиентская половина VLESS Encryption из последнего запуска \"Generate vlessenc\" — \
+     показана здесь, чтобы скопировать её в конфиг клиента; в JSON самого inbound никогда не \
+     записывается (туда пишется только `decryption`).",
+);
+const HELP_VLESSENC_AUTH: HelpText = HelpText::new(
     "Key-exchange algorithm used by the remote `xray vlessenc` command when generating the \
      decryption/encryption pair: X25519 (classic) or ML-KEM-768 (post-quantum). Feldjäger UI \
-     choice, not a field written to the config.";
+     choice, not a field written to the config.",
+    "Алгоритм обмена ключами, который использует удалённая команда `xray vlessenc` при \
+     генерации пары decryption/encryption: X25519 (классический) или ML-KEM-768 \
+     (постквантовый). Это выбор в интерфейсе Feldjäger, а не поле конфига.",
+);
 
 // Protocol tab — fallbacks (VLESS / Trojan, TCP + TLS/Reality only).
-const HELP_FALLBACK_NAME: &str =
+const HELP_FALLBACK_NAME: HelpText = HelpText::new(
     "Attempts to match TLS SNI (Server Name Indication) of the incoming connection. Empty \
-     means any.";
-const HELP_FALLBACK_ALPN: &str =
+     means any.",
+    "Сопоставление с TLS SNI (Server Name Indication) входящего подключения. Пусто — любое \
+     значение.",
+);
+const HELP_FALLBACK_ALPN: HelpText = HelpText::new(
     "Attempts to match the negotiated TLS ALPN result of the incoming connection. Empty means \
-     any. With REALITY no ALPN is ever negotiated, so only entries with an empty alpn are used.";
-const HELP_FALLBACK_PATH: &str =
+     any. With REALITY no ALPN is ever negotiated, so only entries with an empty alpn are used.",
+    "Сопоставление с согласованным TLS ALPN входящего подключения. Пусто — любое значение. С \
+     REALITY ALPN никогда не согласуется, поэтому используются только записи с пустым alpn.",
+);
+const HELP_FALLBACK_PATH: HelpText = HelpText::new(
     "Attempts to match the HTTP PATH of the first packet. Empty means any; when set it must \
-     start with `/` (h2c is not supported).";
-const HELP_FALLBACK_DEST_KIND: &str =
+     start with `/` (h2c is not supported).",
+    "Сопоставление с HTTP PATH первого пакета. Пусто — любой путь; если задан, должен \
+     начинаться с `/` (h2c не поддерживается).",
+);
+const HELP_FALLBACK_DEST_KIND: HelpText = HelpText::new(
     "Address type for where non-matching traffic is forwarded after TLS decryption: a local \
-     port, a TCP host:port, or a Unix domain socket path.";
-const HELP_FALLBACK_DEST: &str =
+     port, a TCP host:port, or a Unix domain socket path.",
+    "Тип адреса, куда после расшифровки TLS пересылается несовпавший трафик: локальный порт, \
+     TCP host:port или путь к Unix domain socket.",
+);
+const HELP_FALLBACK_DEST: HelpText = HelpText::new(
     "Destination for the fallback traffic after TLS decryption. Mandatory — Xray refuses to \
-     start without it.";
-const HELP_FALLBACK_XVER: &str =
+     start without it.",
+    "Куда пересылается fallback-трафик после расшифровки TLS. Обязательное поле — без него Xray \
+     не запустится.",
+);
+const HELP_FALLBACK_XVER: HelpText = HelpText::new(
     "Sends the PROXY protocol (v1 or v2) to the fallback destination so it can see the real \
      source IP/port. 0 (default) sends nothing; 1 and 2 behave identically, differing only in \
-     wire format (text vs binary).";
+     wire format (text vs binary).",
+    "Отправляет PROXY protocol (v1 или v2) получателю fallback, чтобы тот видел реальные IP и \
+     порт источника. 0 (по умолчанию) — ничего не отправлять; 1 и 2 работают одинаково и \
+     различаются только форматом (текстовый или двоичный).",
+);
 
 // Protocol tab — Hysteria.
-const HELP_HYSTERIA_VERSION: &str =
+const HELP_HYSTERIA_VERSION: HelpText = HelpText::new(
     "Hysteria transport version. Xray-core only implements Hysteria 2, so this is fixed and \
-     not editable.";
+     not editable.",
+    "Версия транспорта Hysteria. Xray-core реализует только Hysteria 2, поэтому значение \
+     фиксировано и не редактируется.",
+);
 
 // Protocol tab — Tunnel (successor to legacy dokodemo-door).
-const HELP_TUNNEL_ALLOWED_NETWORK: &str =
+const HELP_TUNNEL_ALLOWED_NETWORK: HelpText = HelpText::new(
     "Accepted network protocol types for this transparent-proxy inbound — e.g. \"tcp\" accepts \
-     only TCP traffic. Default is \"tcp\".";
-const HELP_TUNNEL_REWRITE_ADDRESS: &str =
-    "Forwards traffic to this address — an IP (\"1.2.3.4\") or a domain name (\"xray.com\").";
-const HELP_TUNNEL_REWRITE_PORT: &str =
+     only TCP traffic. Default is \"tcp\".",
+    "Какие сетевые протоколы принимает этот inbound прозрачного прокси — например, \"tcp\" \
+     принимает только TCP-трафик. По умолчанию \"tcp\".",
+);
+const HELP_TUNNEL_REWRITE_ADDRESS: HelpText = HelpText::new(
+    "Forwards traffic to this address — an IP (\"1.2.3.4\") or a domain name (\"xray.com\").",
+    "Пересылать трафик на этот адрес — IP (\"1.2.3.4\") или доменное имя (\"xray.com\").",
+);
+const HELP_TUNNEL_REWRITE_PORT: HelpText = HelpText::new(
     "Forwards traffic to this port on the rewrite address. If omitted or 0, the inbound's own \
-     listening port is used instead.";
-const HELP_TUNNEL_FOLLOW_REDIRECT: &str =
+     listening port is used instead.",
+    "Пересылать трафик на этот порт адреса rewriteAddress. Если не задан или 0, используется \
+     собственный порт прослушивания inbound.",
+);
+const HELP_TUNNEL_FOLLOW_REDIRECT: HelpText = HelpText::new(
     "When enabled, Tunnel recognizes traffic redirected by iptables and forwards it to the \
-     address it was originally destined for — an Xray-level alternative to OS-level tproxy.";
-const HELP_TUNNEL_USER_LEVEL: &str =
+     address it was originally destined for — an Xray-level alternative to OS-level tproxy.",
+    "Если включено, Tunnel распознаёт трафик, перенаправленный iptables, и пересылает его по \
+     исходному адресу назначения — альтернатива tproxy на уровне Xray, а не ОС.",
+);
+const HELP_TUNNEL_USER_LEVEL: HelpText = HelpText::new(
     "User level for this inbound; connections use the Local Policy configured for this level \
-     (defaults to 0).";
-const HELP_TUNNEL_PORT_MAP: &str =
+     (defaults to 0).",
+    "Уровень пользователя для этого inbound; подключения используют локальную политику (Local \
+     Policy) этого уровня (по умолчанию 0).",
+);
+const HELP_TUNNEL_PORT_MAP: HelpText = HelpText::new(
     "Maps a local port to a specific remote address/port, overriding rewriteAddress/rewritePort \
-     for that one port. Ports not listed here fall back to the rewriteAddress/rewritePort above.";
+     for that one port. Ports not listed here fall back to the rewriteAddress/rewritePort above.",
+    "Сопоставляет локальный порт конкретному удалённому адресу и порту, переопределяя \
+     rewriteAddress/rewritePort для этого порта. Порты, которых здесь нет, используют \
+     rewriteAddress/rewritePort выше.",
+);
 // Stream tab — method selector + TCP.
-const HELP_STREAM_METHOD: &str =
+const HELP_STREAM_METHOD: HelpText = HelpText::new(
     "Transport carrying the proxy protocol on the wire (tcp/raw, WebSocket, mKCP, gRPC, XHTTP, \
      or the protocol-locked Hysteria transport). Which methods are selectable here depends on \
-     the inbound's protocol and — for VLESS — whether Vision flow is in use.";
-const HELP_TCP_ACCEPT_PROXY_PROTOCOL: &str =
+     the inbound's protocol and — for VLESS — whether Vision flow is in use.",
+    "Транспорт, которым протокол прокси передаётся по сети (tcp/raw, WebSocket, mKCP, gRPC, \
+     XHTTP или привязанный к протоколу транспорт Hysteria). Какие методы доступны, зависит от \
+     протокола inbound, а для VLESS — ещё и от того, используется ли flow Vision.",
+);
+const HELP_TCP_ACCEPT_PROXY_PROTOCOL: HelpText = HelpText::new(
     "Inbound-only. When enabled, the peer must send a PROXY protocol v1/v2 header immediately \
      after the TCP connection is established, so Xray can see the real source IP/port (e.g. \
-     behind a load balancer).";
+     behind a load balancer).",
+    "Только для inbound. Если включено, сразу после установки TCP-соединения клиент должен \
+     отправить заголовок PROXY protocol v1/v2, чтобы Xray видел реальные IP и порт источника \
+     (например, за балансировщиком нагрузки).",
+);
 
 // Stream tab — XHTTP (basic fields; advanced knobs get section-level help further below).
-const HELP_XHTTP_HOST: &str =
+const HELP_XHTTP_HOST: HelpText = HelpText::new(
     "Host header the server checks (or the client sends). Empty means the value is not \
-     verified server-side.";
-const HELP_XHTTP_PATH: &str = "Request path for the XHTTP endpoint. Default is \"/\".";
-const HELP_XHTTP_MODE: &str =
+     verified server-side.",
+    "Заголовок Host, который проверяет сервер (или отправляет клиент). Пусто — сервер значение \
+     не проверяет.",
+);
+const HELP_XHTTP_PATH: HelpText = HelpText::new(
+    "Request path for the XHTTP endpoint. Default is \"/\".",
+    "Путь запроса для конечной точки XHTTP. По умолчанию \"/\".",
+);
+const HELP_XHTTP_MODE: HelpText = HelpText::new(
     "Framing mode: \"auto\" negotiates automatically, \"packet-up\" uses chunked POST requests \
      for uplink, \"stream-one\"/\"stream-up\" keep the uplink as a long-lived stream. Affects \
-     latency/compatibility trade-offs, especially behind CDNs.";
-const HELP_XHTTP_HEADERS_SECTION: &str =
+     latency/compatibility trade-offs, especially behind CDNs.",
+    "Режим кадрирования: \"auto\" — согласуется автоматически, \"packet-up\" — исходящий поток \
+     идёт порциями POST-запросов, \"stream-one\"/\"stream-up\" — исходящий поток держится одним \
+     долгоживущим потоком. Влияет на баланс задержки и совместимости, особенно за CDN.",
+);
+const HELP_XHTTP_HEADERS_SECTION: HelpText = HelpText::new(
     "Extra HTTP request headers sent with every XHTTP request — useful for CDN routing rules or \
-     custom Host-like headers beyond the dedicated `host` field.";
-const HELP_XHTTP_PADDING_SECTION: &str =
+     custom Host-like headers beyond the dedicated `host` field.",
+    "Дополнительные заголовки HTTP-запроса, отправляемые с каждым запросом XHTTP, — полезны для \
+     правил маршрутизации CDN или собственных Host-подобных заголовков помимо отдельного поля \
+     `host`.",
+);
+const HELP_XHTTP_PADDING_SECTION: HelpText = HelpText::new(
     "Padding, SSE, and gRPC-Content-Type knobs: `xPaddingBytes` adds random-length padding to \
      header requests (harder to fingerprint by size); `noSSEHeader`/`noGRPCHeader` drop the \
      Content-Type Xray would otherwise send for download/upload framing, useful when a CDN \
-     mishandles those content types.";
-const HELP_XHTTP_SC_SECTION: &str =
+     mishandles those content types.",
+    "Настройки padding, SSE и gRPC Content-Type: `xPaddingBytes` добавляет к запросам \
+     заголовков выравнивание случайной длины (по размеру труднее распознать трафик); \
+     `noSSEHeader`/`noGRPCHeader` отключают Content-Type, который Xray иначе отправляет для \
+     кадрирования загрузки и выгрузки, — полезно, когда CDN неправильно обрабатывает эти типы \
+     содержимого.",
+);
+const HELP_XHTTP_SC_SECTION: HelpText = HelpText::new(
     "Packet-mode (\"packet-up\") tuning: max bytes per POST, minimum interval between POSTs, \
      how many POSTs the server buffers, and how long a stream-up connection is kept padded \
-     before the server closes it. Mostly relevant when CDNs impose per-request limits.";
-const HELP_XHTTP_PLACEMENT_SECTION: &str =
+     before the server closes it. Mostly relevant when CDNs impose per-request limits.",
+    "Тонкая настройка пакетного режима (\"packet-up\"): максимум байт в одном POST, минимальный \
+     интервал между POST, сколько POST буферизует сервер и сколько времени соединение stream-up \
+     поддерживается с выравниванием, прежде чем сервер его закроет. Важно в основном, когда CDN \
+     ограничивает отдельные запросы.",
+);
+const HELP_XHTTP_PLACEMENT_SECTION: HelpText = HelpText::new(
     "Where session id / sequence number / uplink data / padding are placed on the wire (query, \
      header, or cookie) and under what key names — plus the advanced padding obfuscation mode. \
-     Used to blend XHTTP traffic in with ordinary HTTP requests.";
-const HELP_XHTTP_XMUX_SECTION: &str =
+     Used to blend XHTTP traffic in with ordinary HTTP requests.",
+    "Где передаются по сети идентификатор сессии, порядковый номер, данные исходящего потока и \
+     выравнивание (query, заголовок или cookie) и под какими именами ключей, плюс расширенный \
+     режим маскировки выравнивания. Нужно, чтобы трафик XHTTP не отличался от обычных \
+     HTTP-запросов.",
+);
+const HELP_XHTTP_XMUX_SECTION: HelpText = HelpText::new(
     "Connection-pool / multiplexing limits for the client side of XHTTP (max concurrent \
      streams, max connections, connection reuse/lifetime caps, keep-alive period). Written into \
      the inbound only so it can be embedded in the generated client Share URI's `extra=` field \
-     — Xray itself does not read xmux from inbound JSON.";
-const HELP_XHTTP_DOWNLOAD_SECTION: &str =
+     — Xray itself does not read xmux from inbound JSON.",
+    "Ограничения пула соединений и мультиплексирования на стороне клиента XHTTP (максимум \
+     одновременных потоков, максимум соединений, ограничения повторного использования и времени \
+     жизни соединения, период keep-alive). В inbound записывается только для того, чтобы \
+     попасть в поле `extra=` генерируемой клиентской Share URI, — сам Xray не читает xmux из \
+     JSON inbound.",
+);
+const HELP_XHTTP_DOWNLOAD_SECTION: HelpText = HelpText::new(
     "Optional separate downlink connection (`downloadSettings`): dials out to a different \
      address/port — potentially a different XHTTP-capable node — instead of reusing the same \
      connection for both directions. Leave disabled unless you specifically split up/down \
-     traffic.";
+     traffic.",
+    "Необязательное отдельное соединение для входящего потока (`downloadSettings`): подключение \
+     к другому адресу и порту — возможно, к другому узлу с XHTTP — вместо одного соединения на \
+     оба направления. Не включайте, если не разделяете исходящий и входящий трафик намеренно.",
+);
 
 // Stream tab — gRPC.
-const HELP_GRPC_SERVICE_NAME: &str =
+const HELP_GRPC_SERVICE_NAME: HelpText = HelpText::new(
     "gRPC service name, functioning similarly to a Path in HTTP/2 — the client uses this name \
-     to open the stream, and the server verifies it matches.";
-const HELP_GRPC_MULTI_MODE: &str =
+     to open the stream, and the server verifies it matches.",
+    "Имя сервиса gRPC; работает примерно как Path в HTTP/2: клиент открывает поток по этому \
+     имени, сервер проверяет совпадение.",
+);
+const HELP_GRPC_MULTI_MODE: HelpText = HelpText::new(
     "Experimental client-side multiplexing mode that can improve throughput (~20% in Xray's own \
-     benchmarks). Server just needs to accept it; the real effect depends on the client.";
+     benchmarks). Server just needs to accept it; the real effect depends on the client.",
+    "Экспериментальный режим мультиплексирования на стороне клиента, способный повысить \
+     пропускную способность (около 20% в собственных тестах Xray). Сервер должен его лишь \
+     принимать; реальный эффект зависит от клиента.",
+);
 
 // Stream tab — WebSocket.
-const HELP_WS_PATH: &str =
+const HELP_WS_PATH: HelpText = HelpText::new(
     "HTTP path used by the WebSocket upgrade request. Default is \"/\". A client path containing \
-     an `ed` query parameter (e.g. `/mypath?ed=2560`) enables Early Data to shave off a round trip.";
-const HELP_WS_HOST: &str =
+     an `ed` query parameter (e.g. `/mypath?ed=2560`) enables Early Data to shave off a round trip.",
+    "HTTP-путь запроса WebSocket upgrade. По умолчанию \"/\". Если путь клиента содержит \
+     параметр запроса `ed` (например, `/mypath?ed=2560`), включается Early Data, экономящая \
+     один обмен пакетами.",
+);
+const HELP_WS_HOST: HelpText = HelpText::new(
     "Host header expected in the WebSocket upgrade request. Empty means the server does not \
-     verify whatever Host the client sends.";
-const HELP_WS_ACCEPT_PROXY_PROTOCOL: &str =
+     verify whatever Host the client sends.",
+    "Заголовок Host, ожидаемый в запросе WebSocket upgrade. Пусто — сервер не проверяет Host, \
+     присланный клиентом.",
+);
+const HELP_WS_ACCEPT_PROXY_PROTOCOL: HelpText = HelpText::new(
     "Inbound-only. When enabled, the peer must send a PROXY protocol v1/v2 header immediately \
-     after the TCP connection is established.";
-const HELP_WS_ED: &str =
+     after the TCP connection is established.",
+    "Только для inbound. Если включено, сразу после установки TCP-соединения клиент должен \
+     отправить заголовок PROXY protocol v1/v2.",
+);
+const HELP_WS_ED: HelpText = HelpText::new(
     "Early Data threshold appended to `path` as `?ed=N` — the first-packet length (in bytes) \
      that may be carried inside the WebSocket upgrade's `Sec-WebSocket-Protocol` header, saving \
-     a round trip. Leave empty to disable.";
+     a round trip. Leave empty to disable.",
+    "Порог Early Data, добавляемый к `path` как `?ed=N`, — длина первого пакета (в байтах), \
+     которую можно передать в заголовке `Sec-WebSocket-Protocol` запроса WebSocket upgrade, \
+     экономя один обмен пакетами. Пусто — выключено.",
+);
 
 // Stream tab — mKCP.
-const HELP_MKCP_MTU: &str =
+const HELP_MKCP_MTU: HelpText = HelpText::new(
     "Maximum Transmission Unit, in bytes. Default 1350. The docs recommend 576–1460; Xray-core \
-     accepts any value from 21.";
-const HELP_MKCP_TTI: &str =
+     accepts any value from 21.",
+    "Maximum Transmission Unit в байтах. По умолчанию 1350. Документация рекомендует 576–1460; \
+     Xray-core принимает любое значение от 21.",
+);
+const HELP_MKCP_TTI: HelpText = HelpText::new(
     "Transmission Time Interval in milliseconds — how often mKCP sends data. Xray-core accepts \
-     10–1000 ms, default 50 ms; smaller values lower latency at the cost of more overhead.";
-const HELP_MKCP_UPLINK: &str =
-    "Maximum uplink bandwidth this host will use, in MB/s. Default 5; 0 means unlimited.";
-const HELP_MKCP_DOWNLINK: &str =
-    "Maximum downlink bandwidth this host will use, in MB/s. Default 20; 0 means unlimited.";
-const HELP_MKCP_CWND_MULTIPLIER: &str =
+     10–1000 ms, default 50 ms; smaller values lower latency at the cost of more overhead.",
+    "Transmission Time Interval в миллисекундах — как часто mKCP отправляет данные. Xray-core \
+     принимает 10–1000 мс, по умолчанию 50 мс; меньшие значения снижают задержку ценой больших \
+     накладных расходов.",
+);
+const HELP_MKCP_UPLINK: HelpText = HelpText::new(
+    "Maximum uplink bandwidth this host will use, in MB/s. Default 5; 0 means unlimited.",
+    "Максимальная исходящая полоса этого узла в МБ/с. По умолчанию 5; 0 — без ограничений.",
+);
+const HELP_MKCP_DOWNLINK: HelpText = HelpText::new(
+    "Maximum downlink bandwidth this host will use, in MB/s. Default 20; 0 means unlimited.",
+    "Максимальная входящая полоса этого узла в МБ/с. По умолчанию 20; 0 — без ограничений.",
+);
+const HELP_MKCP_CWND_MULTIPLIER: HelpText = HelpText::new(
     "Congestion-window multiplier for mKCP sending. Leave empty for the Xray-core default (1); \
-     must be at least 1.";
-const HELP_MKCP_MAX_SENDING_WINDOW: &str =
+     must be at least 1.",
+    "Множитель окна перегрузки при отправке mKCP. Пусто — значение Xray-core по умолчанию (1); \
+     не меньше 1.",
+);
+const HELP_MKCP_MAX_SENDING_WINDOW: HelpText = HelpText::new(
     "Upper bound of the sending buffer, in bytes — the buffer holds maxSendingWindow / mtu \
-     packets. Leave empty for the Xray-core default (2097152 = 2 MiB); must be at least mtu.";
+     packets. Leave empty for the Xray-core default (2097152 = 2 MiB); must be at least mtu.",
+    "Верхняя граница буфера отправки в байтах — буфер вмещает maxSendingWindow / mtu пакетов. \
+     Пусто — значение Xray-core по умолчанию (2097152 = 2 МиБ); не меньше mtu.",
+);
 
 // Security tab — mode selector.
-const HELP_SECURITY_MODE: &str =
+const HELP_SECURITY_MODE: HelpText = HelpText::new(
     "Transport security applied on top of the chosen Stream method: none (plaintext), tls \
      (standard TLS with your own certificate), or reality (camouflages the handshake as a real \
      site's TLS, no certificate of your own needed). Which modes are selectable depends on the \
-     protocol and transport.";
+     protocol and transport.",
+    "Защита транспорта поверх выбранного метода Stream: none (открытый текст), tls (обычный TLS \
+     с вашим сертификатом) или reality (маскирует рукопожатие под TLS реального сайта, \
+     собственный сертификат не нужен). Какие режимы доступны, зависит от протокола и \
+     транспорта.",
+);
 
 // Security tab — TLS.
-const HELP_TLS_ALPN: &str =
+const HELP_TLS_ALPN: HelpText = HelpText::new(
     "ALPN values offered during the TLS handshake. Default is [\"h2\", \"http/1.1\"]. Required \
      to be non-empty when fallbacks are configured on the Protocol tab: [\"http/1.1\"], or \
-     [\"h2\", \"http/1.1\"] when a fallback matches alpn h2.";
-const HELP_TLS_SERVER_NAME: &str =
+     [\"h2\", \"http/1.1\"] when a fallback matches alpn h2.",
+    "Значения ALPN, предлагаемые при TLS-рукопожатии. По умолчанию [\"h2\", \"http/1.1\"]. Если \
+     на вкладке Protocol настроены fallbacks, список не может быть пустым: [\"http/1.1\"] или \
+     [\"h2\", \"http/1.1\"], когда fallback сопоставляется с alpn h2.",
+);
+const HELP_TLS_SERVER_NAME: HelpText = HelpText::new(
     "Server name Xray presents/expects for SNI. The server certificate's SAN must cover this \
-     value.";
-const HELP_TLS_VERIFY_PEER_CERT_BY_NAME: &str =
+     value.",
+    "Имя сервера, которое Xray предъявляет или ожидает в SNI. SAN сертификата сервера должен \
+     покрывать это значение.",
+);
+const HELP_TLS_VERIFY_PEER_CERT_BY_NAME: HelpText = HelpText::new(
     "Overrides the name used to verify the peer certificate, independent of the SNI/serverName \
-     sent on the wire. Advanced use only — leave empty unless you specifically need this split.";
-const HELP_TLS_REJECT_UNKNOWN_SNI: &str =
+     sent on the wire. Advanced use only — leave empty unless you specifically need this split.",
+    "Переопределяет имя, по которому проверяется сертификат собеседника, независимо от \
+     SNI/serverName, передаваемого по сети. Только для особых случаев — оставьте пустым, если \
+     такое разделение вам не нужно.",
+);
+const HELP_TLS_REJECT_UNKNOWN_SNI: HelpText = HelpText::new(
     "When enabled, the server rejects the TLS handshake if the client's SNI doesn't match any \
-     configured certificate domain. Default false.";
-const HELP_TLS_ALLOW_INSECURE: &str =
+     configured certificate domain. Default false.",
+    "Если включено, сервер отклоняет TLS-рукопожатие, когда SNI клиента не совпадает ни с одним \
+     доменом настроенных сертификатов. По умолчанию false.",
+);
+const HELP_TLS_ALLOW_INSECURE: HelpText = HelpText::new(
     "Skips TLS certificate verification. Only meaningful client-side; on a server inbound this \
-     essentially never has any effect and should stay off.";
-const HELP_TLS_MIN_VERSION: &str = "Minimum TLS version Xray will accept during the handshake.";
-const HELP_TLS_MAX_VERSION: &str = "Maximum TLS version Xray will accept during the handshake.";
-const HELP_TLS_CIPHER_SUITES: &str =
+     essentially never has any effect and should stay off.",
+    "Отключает проверку TLS-сертификата. Имеет смысл только на стороне клиента; на серверном \
+     inbound практически ни на что не влияет и должно оставаться выключенным.",
+);
+const HELP_TLS_MIN_VERSION: HelpText = HelpText::new(
+    "Minimum TLS version Xray will accept during the handshake.",
+    "Минимальная версия TLS, которую Xray принимает при рукопожатии.",
+);
+const HELP_TLS_MAX_VERSION: HelpText = HelpText::new(
+    "Maximum TLS version Xray will accept during the handshake.",
+    "Максимальная версия TLS, которую Xray принимает при рукопожатии.",
+);
+const HELP_TLS_CIPHER_SUITES: HelpText = HelpText::new(
     "Colon-separated list of allowed cipher suites. Not normally needed — only for locking down \
-     or working around a specific client/middlebox.";
-const HELP_TLS_DISABLE_SYSTEM_ROOT: &str =
+     or working around a specific client/middlebox.",
+    "Список разрешённых наборов шифров через двоеточие. Обычно не нужен — только чтобы \
+     ужесточить настройки или обойти проблему конкретного клиента или промежуточного \
+     устройства.",
+);
+const HELP_TLS_DISABLE_SYSTEM_ROOT: HelpText = HelpText::new(
     "When enabled, Xray does not trust the OS's root CA store for outgoing verification — \
-     irrelevant for a plain inbound listener, kept here since it lives on the same TLSObject.";
-const HELP_TLS_ENABLE_SESSION_RESUMPTION: &str =
+     irrelevant for a plain inbound listener, kept here since it lives on the same TLSObject.",
+    "Если включено, Xray не доверяет системному хранилищу корневых сертификатов при исходящей \
+     проверке. Для обычного inbound не имеет значения; оставлено здесь, потому что относится к \
+     тому же TLSObject.",
+);
+const HELP_TLS_ENABLE_SESSION_RESUMPTION: HelpText = HelpText::new(
     "Enables TLS session resumption (session tickets), letting repeat clients skip a full \
-     handshake.";
-const HELP_TLS_FINGERPRINT: &str =
+     handshake.",
+    "Включает возобновление TLS-сессий (session tickets), чтобы повторно подключающиеся клиенты \
+     пропускали полное рукопожатие.",
+);
+const HELP_TLS_FINGERPRINT: HelpText = HelpText::new(
     "Client TLS fingerprint to emulate (e.g. chrome, firefox, safari) — a client-side setting \
-     kept here for convenience when building Share URIs; the server itself does not use it.";
-const HELP_TLS_PINNED_PEER_CERT_SHA256: &str =
+     kept here for convenience when building Share URIs; the server itself does not use it.",
+    "Отпечаток TLS-клиента, который нужно имитировать (например, chrome, firefox, safari), — \
+     клиентская настройка, оставленная здесь для удобства при сборке Share URI; сам сервер её \
+     не использует.",
+);
+const HELP_TLS_PINNED_PEER_CERT_SHA256: HelpText = HelpText::new(
     "Pins the expected peer certificate's SHA-256 fingerprint. Rarely used on a server inbound \
-     (that's a client-side anti-MITM setting) — kept here since it's part of TLSObject.";
-const HELP_TLS_CURVE_PREFERENCES: &str =
+     (that's a client-side anti-MITM setting) — kept here since it's part of TLSObject.",
+    "Закрепляет ожидаемый SHA-256-отпечаток сертификата собеседника. На серверном inbound \
+     используется редко (это клиентская защита от MITM) — оставлено, потому что входит в \
+     TLSObject.",
+);
+const HELP_TLS_CURVE_PREFERENCES: HelpText = HelpText::new(
     "Preferred elliptic curves for the TLS key exchange, in priority order. Leave empty for \
-     Xray's defaults; only override for compatibility with a specific client stack.";
-const HELP_TLS_MASTER_KEY_LOG: &str =
+     Xray's defaults; only override for compatibility with a specific client stack.",
+    "Предпочитаемые эллиптические кривые для обмена ключами TLS в порядке приоритета. Пусто — \
+     значения Xray по умолчанию; переопределяйте только ради совместимости с конкретным \
+     клиентским стеком.",
+);
+const HELP_TLS_MASTER_KEY_LOG: HelpText = HelpText::new(
     "Path to write the TLS master secret log for debugging with tools like Wireshark. Leave \
-     empty in production — this weakens confidentiality of the traffic.";
-const HELP_TLS_ENABLE_ECH: &str =
+     empty in production — this weakens confidentiality of the traffic.",
+    "Путь к файлу журнала мастер-секретов TLS для отладки в инструментах вроде Wireshark. В \
+     рабочей среде оставляйте пустым — это ослабляет конфиденциальность трафика.",
+);
+const HELP_TLS_ENABLE_ECH: HelpText = HelpText::new(
     "Enables Encrypted Client Hello (ECH), which hides the SNI from network observers. Requires \
-     echServerKeys/echConfigList below.";
-const HELP_TLS_ECH_SERVER_KEYS: &str =
+     echServerKeys/echConfigList below.",
+    "Включает Encrypted Client Hello (ECH), скрывающий SNI от наблюдателей в сети. Требует \
+     echServerKeys/echConfigList ниже.",
+);
+const HELP_TLS_ECH_SERVER_KEYS: HelpText = HelpText::new(
     "Server-side ECH keys (matching the published echConfigList) used to decrypt the encrypted \
-     ClientHello.";
-const HELP_TLS_ECH_CONFIG_LIST: &str =
+     ClientHello.",
+    "Серверные ключи ECH (соответствующие опубликованному echConfigList) для расшифровки \
+     зашифрованного ClientHello.",
+);
+const HELP_TLS_ECH_CONFIG_LIST: HelpText = HelpText::new(
     "The ECHConfigList published for clients to use when constructing an encrypted ClientHello \
-     for this server.";
-const HELP_TLS_ECH_SOCKOPT: &str =
+     for this server.",
+    "ECHConfigList, публикуемый для клиентов, чтобы они могли построить зашифрованный \
+     ClientHello для этого сервера.",
+);
+const HELP_TLS_ECH_SOCKOPT: HelpText = HelpText::new(
     "Advanced socket options specific to the ECH DNS/config-fetch path — raw JSON object. \
-     Leave empty unless you need to tune this specifically.";
+     Leave empty unless you need to tune this specifically.",
+    "Расширенные параметры сокета для пути DNS-запроса и получения конфигурации ECH — \
+     JSON-объект как есть. Оставьте пустым, если не нужно настраивать именно это.",
+);
 
 // Security tab — TLS certificate entries.
-const HELP_CERT_CERTIFICATE_FILE: &str =
+const HELP_CERT_CERTIFICATE_FILE: HelpText = HelpText::new(
     "Path to the certificate file (e.g. a .crt). Takes precedence over the inline PEM \
-     `certificate` field below when both are set.";
-const HELP_CERT_KEY_FILE: &str =
+     `certificate` field below when both are set.",
+    "Путь к файлу сертификата (например, .crt). Если заданы оба, имеет приоритет над полем \
+     `certificate` с PEM ниже.",
+);
+const HELP_CERT_KEY_FILE: HelpText = HelpText::new(
     "Path to the private-key file (e.g. a .key). Password-protected keys are not supported. \
-     Takes precedence over the inline PEM `key` field below when both are set.";
-const HELP_CERT_CERTIFICATE_PEM: &str =
+     Takes precedence over the inline PEM `key` field below when both are set.",
+    "Путь к файлу закрытого ключа (например, .key). Ключи с паролем не поддерживаются. Если \
+     заданы оба, имеет приоритет над полем `key` с PEM ниже.",
+);
+const HELP_CERT_CERTIFICATE_PEM: HelpText = HelpText::new(
     "Certificate contents inline, as PEM text, instead of a file path. Ignored when \
-     certificateFile is set. A full chain is recommended.";
-const HELP_CERT_KEY_PEM: &str =
+     certificateFile is set. A full chain is recommended.",
+    "Содержимое сертификата прямо в конфиге, текстом PEM, вместо пути к файлу. Игнорируется, \
+     если задан certificateFile. Рекомендуется полная цепочка.",
+);
+const HELP_CERT_KEY_PEM: HelpText = HelpText::new(
     "Private key contents inline, as PEM text, instead of a file path. Ignored when keyFile is \
-     set.";
-const HELP_CERT_USAGE: &str =
+     set.",
+    "Содержимое закрытого ключа прямо в конфиге, текстом PEM, вместо пути к файлу. \
+     Игнорируется, если задан keyFile.",
+);
+const HELP_CERT_USAGE: HelpText = HelpText::new(
     "What this certificate is used for: \"encipherment\" (default; normal TLS termination), \
      \"verify\" (verify remote client certs — key optional), or \"issue\"/\"verifyClient\" for \
-     the more advanced dynamic-issuance workflows.";
-const HELP_CERT_BUILD_CHAIN: &str =
+     the more advanced dynamic-issuance workflows.",
+    "Назначение сертификата: \"encipherment\" (по умолчанию; обычное завершение TLS), \
+     \"verify\" (проверка сертификатов удалённых клиентов — ключ необязателен) или \
+     \"issue\"/\"verifyClient\" для более сложных сценариев динамического выпуска.",
+);
+const HELP_CERT_BUILD_CHAIN: HelpText = HelpText::new(
     "When usage is \"issue\", builds a full certificate chain automatically instead of using \
-     only the leaf certificate as configured.";
-const HELP_CERT_ONE_TIME_LOADING: &str =
+     only the leaf certificate as configured.",
+    "При usage \"issue\" автоматически строит полную цепочку сертификатов вместо того, чтобы \
+     использовать только конечный сертификат из конфига.",
+);
+const HELP_CERT_ONE_TIME_LOADING: HelpText = HelpText::new(
     "Loads the certificate/key once at startup instead of watching the files for changes and \
      reloading — use when the files are static and you want to avoid the extra file-watch \
-     overhead.";
-const HELP_CERT_OCSP_STAPLING: &str =
+     overhead.",
+    "Загружает сертификат и ключ один раз при запуске вместо отслеживания изменений файлов и \
+     перезагрузки — используйте, когда файлы не меняются и лишние расходы на наблюдение за ними \
+     не нужны.",
+);
+const HELP_CERT_OCSP_STAPLING: HelpText = HelpText::new(
     "Refresh interval, in seconds, for OCSP stapling. Leave empty to disable OCSP stapling for \
-     this certificate.";
+     this certificate.",
+    "Интервал обновления OCSP stapling в секундах. Пусто — OCSP stapling для этого сертификата \
+     выключен.",
+);
 
 // Security tab — REALITY.
-const HELP_REALITY_DEST: &str =
+const HELP_REALITY_DEST: HelpText = HelpText::new(
     "Required. The real TLS server REALITY connects to and camouflages as — same format as a \
-     VLESS fallback `dest` (host:port). Should normally match one of `serverNames`.";
-const HELP_REALITY_SHOW: &str = "When enabled, prints REALITY debug information to the log.";
-const HELP_REALITY_XVER: &str =
+     VLESS fallback `dest` (host:port). Should normally match one of `serverNames`.",
+    "Обязательное. Реальный TLS-сервер, к которому подключается REALITY и под который \
+     маскируется, — в том же формате, что `dest` у fallback VLESS (host:port). Обычно должен \
+     соответствовать одному из `serverNames`.",
+);
+const HELP_REALITY_SHOW: HelpText = HelpText::new(
+    "When enabled, prints REALITY debug information to the log.",
+    "Если включено, REALITY выводит отладочную информацию в журнал.",
+);
+const HELP_REALITY_XVER: HelpText = HelpText::new(
     "Sends the PROXY protocol (v1 or v2) to the camouflaged destination on the fallback path — \
-     same semantics as a VLESS fallback `xver`. 0 (default) sends nothing.";
-const HELP_REALITY_SERVER_NAMES: &str =
+     same semantics as a VLESS fallback `xver`. 0 (default) sends nothing.",
+    "Отправляет PROXY protocol (v1 или v2) маскировочному адресу на пути fallback — так же, как \
+     `xver` у fallback VLESS. 0 (по умолчанию) — ничего не отправлять.",
+);
+const HELP_REALITY_SERVER_NAMES: HelpText = HelpText::new(
     "Required. The SNI values REALITY accepts from clients (no wildcards). Should normally stay \
-     consistent with `dest`.";
-const HELP_REALITY_IGNORED_ALPN: &str =
+     consistent with `dest`.",
+    "Обязательное. Значения SNI, которые REALITY принимает от клиентов (без подстановочных \
+     знаков). Обычно должны соответствовать `dest`.",
+);
+const HELP_REALITY_IGNORED_ALPN: HelpText = HelpText::new(
     "realitySettings.alpn is not part of REALITY: neither the docs nor Xray-core's REALITYConfig \
      have it, and the REALITY server negotiates no ALPN (NextProtos is nil). The key on disk has no \
-     effect; Feldjäger keeps it until you remove it.";
-const HELP_REALITY_PRIVATE_KEY: &str =
+     effect; Feldjäger keeps it until you remove it.",
+    "realitySettings.alpn не относится к REALITY: его нет ни в документации, ни в REALITYConfig \
+     Xray-core, а сервер REALITY не согласует ALPN (NextProtos равен nil). Ключ в файле ни на \
+     что не влияет; Feldjäger хранит его, пока вы его не удалите.",
+);
+const HELP_REALITY_PRIVATE_KEY: HelpText = HelpText::new(
     "Required. Server private key for REALITY's key exchange — generate with the \"Generate \
-     x25519\" button (runs the remote `xray x25519`).";
-const HELP_REALITY_PUBLIC_KEY: &str =
+     x25519\" button (runs the remote `xray x25519`).",
+    "Обязательное. Закрытый ключ сервера для обмена ключами REALITY — сгенерируйте кнопкой \
+     \"Generate x25519\" (выполняет удалённую команду `xray x25519`).",
+);
+const HELP_REALITY_PUBLIC_KEY: HelpText = HelpText::new(
     "The client-side public key (`pbk`) derived from the private key above — copy this into \
-     client configs / Share URIs. Never written into the inbound JSON itself.";
-const HELP_REALITY_SHORT_IDS: &str =
+     client configs / Share URIs. Never written into the inbound JSON itself.",
+    "Клиентский открытый ключ (`pbk`), полученный из закрытого ключа выше, — скопируйте его в \
+     конфиги клиентов или Share URI. В JSON самого inbound никогда не записывается.",
+);
+const HELP_REALITY_SHORT_IDS: HelpText = HelpText::new(
     "Required. The `shortId` values clients may present, used to distinguish different clients \
-     — each up to 16 hex characters (8 bytes).";
-const HELP_REALITY_MLDSA65_SEED: &str =
+     — each up to 16 hex characters (8 bytes).",
+    "Обязательное. Значения `shortId`, которые могут предъявлять клиенты, — по ним различают \
+     клиентов; каждое не длиннее 16 шестнадцатеричных символов (8 байт).",
+);
+const HELP_REALITY_MLDSA65_SEED: HelpText = HelpText::new(
     "Optional post-quantum signature seed (ML-DSA-65) added to the certificate REALITY presents \
-     to clients — generate with the \"Generate mldsa65\" button.";
-const HELP_REALITY_MLDSA65_VERIFY: &str =
+     to clients — generate with the \"Generate mldsa65\" button.",
+    "Необязательный seed постквантовой подписи (ML-DSA-65), добавляемой к сертификату, который \
+     REALITY предъявляет клиентам, — сгенерируйте кнопкой \"Generate mldsa65\".",
+);
+const HELP_REALITY_MLDSA65_VERIFY: HelpText = HelpText::new(
     "The client-side verify string matching the seed above — copy into client configs. Never \
-     written into the inbound JSON itself.";
-const HELP_REALITY_MIN_CLIENT_VER: &str =
-    "Optional minimum Xray client version (x.y.z) REALITY will accept.";
-const HELP_REALITY_MAX_CLIENT_VER: &str =
-    "Optional maximum Xray client version (x.y.z) REALITY will accept.";
-const HELP_REALITY_MAX_TIME_DIFF: &str =
+     written into the inbound JSON itself.",
+    "Клиентская строка проверки, соответствующая seed выше, — скопируйте её в конфиги клиентов. \
+     В JSON самого inbound никогда не записывается.",
+);
+const HELP_REALITY_MIN_CLIENT_VER: HelpText = HelpText::new(
+    "Optional minimum Xray client version (x.y.z) REALITY will accept.",
+    "Необязательная минимальная версия клиента Xray (x.y.z), которую принимает REALITY.",
+);
+const HELP_REALITY_MAX_CLIENT_VER: HelpText = HelpText::new(
+    "Optional maximum Xray client version (x.y.z) REALITY will accept.",
+    "Необязательная максимальная версия клиента Xray (x.y.z), которую принимает REALITY.",
+);
+const HELP_REALITY_MAX_TIME_DIFF: HelpText = HelpText::new(
     "Optional maximum allowed clock difference between client and server, in milliseconds, \
-     before REALITY rejects the connection.";
-const HELP_REALITY_LIMIT_FALLBACK: &str =
+     before REALITY rejects the connection.",
+    "Необязательная максимальная разница часов клиента и сервера в миллисекундах, при \
+     превышении которой REALITY отклоняет подключение.",
+);
+const HELP_REALITY_LIMIT_FALLBACK: HelpText = HelpText::new(
     "Rate-limits connections that fail REALITY verification and get routed to the fallback \
      destination, using a token-bucket: an initial allowance (afterBytes), a sustained rate \
      (bytesPerSec), and a burst rate (burstBytesPerSec). Leave disabled unless you're seeing \
-     fallback traffic used as an amplification/probing vector.";
-const HELP_REALITY_LIMIT_AFTER_BYTES: &str =
-    "Byte count after which rate limiting kicks in for this fallback direction.";
-const HELP_REALITY_LIMIT_BYTES_PER_SEC: &str = "Sustained rate limit, in bytes/second.";
-const HELP_REALITY_LIMIT_BURST_BYTES_PER_SEC: &str = "Burst rate limit, in bytes/second.";
+     fallback traffic used as an amplification/probing vector.",
+    "Ограничивает скорость подключений, не прошедших проверку REALITY и отправленных на \
+     маскировочный адрес, по алгоритму token bucket: начальный объём без ограничений \
+     (afterBytes), постоянная скорость (bytesPerSec) и пиковая скорость (burstBytesPerSec). Не \
+     включайте, если не видите, что fallback-трафик используют для усиления атак или \
+     зондирования.",
+);
+const HELP_REALITY_LIMIT_AFTER_BYTES: HelpText = HelpText::new(
+    "Byte count after which rate limiting kicks in for this fallback direction.",
+    "Число байт, после которого для этого направления fallback включается ограничение скорости.",
+);
+const HELP_REALITY_LIMIT_BYTES_PER_SEC: HelpText = HelpText::new(
+    "Sustained rate limit, in bytes/second.",
+    "Постоянное ограничение скорости, байт/с.",
+);
+const HELP_REALITY_LIMIT_BURST_BYTES_PER_SEC: HelpText = HelpText::new(
+    "Burst rate limit, in bytes/second.",
+    "Пиковое ограничение скорости, байт/с.",
+);
 
 // ─── Tab enum ────────────────────────────────────────────────────────────────
 
@@ -5248,7 +5559,7 @@ fn xhttp_spoiler_header(
     ui: &mut Ui,
     id_salt: &str,
     title: &'static str,
-    help_text: &'static str,
+    help_text: HelpText,
     default_open: bool,
 ) -> bool {
     let id = ui.make_persistent_id(("xhttp_spoiler", id_salt));

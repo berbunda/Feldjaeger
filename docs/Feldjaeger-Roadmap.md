@@ -269,7 +269,14 @@ Pop-up help / field documentation overlays (§3:124) shipped scoped to the Inbou
 - [ ] Pop-up help: Log Settings page
 - [ ] Pop-up help: Outbounds Shell editor (Freedom / Blackhole / DNS)
 - [ ] Pop-up help: operational pages (Config Files / Backups / Service / API Console / Statistics / Metrics)
-- [ ] Pop-up help language setting — §3:124's help text is English-only (quoted/condensed from https://xtls.github.io/config/); needs a language setting and localized/translated text before other locales are meaningful
+- [x] Pop-up help language setting — §3:124's help text is English-only (quoted/condensed from https://xtls.github.io/config/); needs a language setting and localized/translated text before other locales are meaningful ✅ 2026-10-07 Реализация (Architecture §105, 0.5.50-0) — разбито на подзадачи:
+  - [x] Настройка языка: `HelpLanguage` (English / Russian) в `UiConfig.help_language` (`config.json`, по умолчанию English), `ApplicationService::set_help_language`, страница Settings (была заглушкой) с выбором «Help language». Тип `HelpText { en, ru }` вместо `&str` у всех 228 констант справки; без перевода показывается английский. Язык публикуется в egui-контекст раз в кадр (`set_help_language`), поэтому страницам не нужен новый параметр; заголовок окна, подсказка кнопки и «Close» тоже локализованы ✅ 2026-10-07
+  - [x] Русская справка Inbounds: `inbounds.rs` — 90 текстов (General, Sniffing, Protocol, Stream, Security/TLS/REALITY) ✅ 2026-10-07
+  - [x] Русская справка Inbounds: общий редактор Sockopt (`stream_sockopt.rs`) — 23 текста; действует и в Outbound Shell «Socket options» ✅ 2026-10-07
+  - [x] Русская справка Inbounds: общий редактор FinalMask/QUIC (`stream_finalmask.rs`) — 77 текстов; действует и в Outbounds ✅ 2026-10-07
+  - Тест `inbounds_page_help_is_fully_translated` не даст добавить на странице Inbounds справку без перевода. Тесты: +4, 1381 passed / 0 failed, clippy lib 66
+- [ ] Русская справка: Outbound stream/security (`outbound_stream.rs`, 38 текстов) — пока только английский ➕ 2026-10-07
+- [ ] Русская справка для остальных страниц — по мере появления на них справки (пункты «Pop-up help: … page» выше): новые тексты сразу писать через `HelpText::new(en, ru)` ➕ 2026-10-07
 
 ## 4.5	Сопровождение
 

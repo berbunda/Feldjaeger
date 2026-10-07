@@ -9,6 +9,7 @@
 use egui::{Color32, RichText, Ui};
 
 use super::{
+    HelpText,
     load_text_buffer, persistent_multiline_list_row, resizable_multiline, store_text_buffer,
 };
 use crate::xray::{
@@ -42,316 +43,610 @@ use crate::xray::{
 
 // Field help (Roadmap §3:124).
 // Stream tab — finalmask.quicParams (Roadmap §2.6 stage 3.1; `QuicParamsConfig` of the core).
-const HELP_QUIC_SECTION: &str =
+const HELP_QUIC_SECTION: HelpText = HelpText::new(
     "QUIC tuning for QUIC-based transports (Hysteria; XHTTP over HTTP/3). Every field is \
-     optional — an empty field or 0 means the core's default.";
-const HELP_QUIC_CONGESTION: &str =
+     optional — an empty field or 0 means the core's default.",
+    "Тонкая настройка QUIC для транспортов на основе QUIC (Hysteria; XHTTP поверх HTTP/3). Все \
+     поля необязательны — пустое поле или 0 означает значение ядра по умолчанию.",
+);
+const HELP_QUIC_CONGESTION: HelpText = HelpText::new(
     "Congestion control. bbr — adapts to measured bandwidth (bbrProfile tunes it). reno — \
      classic loss-based. brutal (the default) — sends at a fixed rate regardless of loss: on the \
      server at min(brutalUp, the client's brutalDown), falling back to bbr when either is 0. \
      force-brutal — always brutalUp, whatever the peer advertises; requires brutalUp. Case does \
-     not matter.";
-const HELP_QUIC_BBR_PROFILE: &str =
+     not matter.",
+    "Управление перегрузкой. bbr — подстраивается под измеренную полосу (настраивается через \
+     bbrProfile). reno — классический алгоритм по потерям. brutal (по умолчанию) — отправляет с \
+     фиксированной скоростью независимо от потерь: на сервере min(brutalUp, brutalDown \
+     клиента), а если одно из них 0, откатывается на bbr. force-brutal — всегда brutalUp, что \
+     бы ни объявлял собеседник; требует brutalUp. Регистр не важен.",
+);
+const HELP_QUIC_BBR_PROFILE: HelpText = HelpText::new(
     "How aggressively bbr probes for bandwidth: conservative, standard (the default) or \
-     aggressive. Also used when brutal falls back to bbr.";
-const HELP_QUIC_BRUTAL_UP: &str =
+     aggressive. Also used when brutal falls back to bbr.",
+    "Насколько агрессивно bbr зондирует полосу: conservative, standard (по умолчанию) или \
+     aggressive. Используется и тогда, когда brutal откатывается на bbr.",
+);
+const HELP_QUIC_BRUTAL_UP: HelpText = HelpText::new(
     "This side's sending rate for brutal / force-brutal: a number with an optional unit — bps, \
      kbps, mbps, gbps, tbps (or b, k, m, g, t), bits per second in powers of 1024, e.g. \
      \"100 mbps\". Must be at least 512 kbps (65536 bytes/s) when set. Must be a JSON string — \
-     a bare number fails the config.";
-const HELP_QUIC_BRUTAL_DOWN: &str =
+     a bare number fails the config.",
+    "Скорость отправки этой стороны для brutal / force-brutal: число с необязательной единицей \
+     — bps, kbps, mbps, gbps, tbps (или b, k, m, g, t), биты в секунду со степенями 1024, \
+     например \"100 mbps\". Если задано, не меньше 512 kbps (65536 байт/с). Должно быть \
+     JSON-строкой — голое число ломает конфиг.",
+);
+const HELP_QUIC_BRUTAL_DOWN: HelpText = HelpText::new(
     "This side's receiving rate, advertised to the peer during the Hysteria handshake so its \
-     brutal sender does not exceed it. Same format and minimum as brutalUp.";
-const HELP_QUIC_BRUTAL_LOSS: &str =
+     brutal sender does not exceed it. Same format and minimum as brutalUp.",
+    "Скорость приёма этой стороны, сообщаемая собеседнику при рукопожатии Hysteria, чтобы его \
+     отправитель brutal её не превышал. Формат и минимум те же, что у brutalUp.",
+);
+const HELP_QUIC_BRUTAL_LOSS: HelpText = HelpText::new(
     "Brutal normally raises its send rate to make up for measured packet loss. When on, it keeps \
-     the configured rate exactly.";
-const HELP_QUIC_DEBUG: &str =
+     the configured rate exactly.",
+    "Обычно brutal повышает скорость отправки, чтобы компенсировать измеренные потери пакетов. \
+     Если включено, держит ровно заданную скорость.",
+);
+const HELP_QUIC_DEBUG: HelpText = HelpText::new(
     "Sets HYSTERIA_BBR_DEBUG and HYSTERIA_BRUTAL_DEBUG for the whole Xray process: every QUIC \
-     connection then logs congestion-control internals. Diagnostics only.";
-const HELP_QUIC_STREAM_WINDOWS: &str =
+     connection then logs congestion-control internals. Diagnostics only.",
+    "Задаёт HYSTERIA_BBR_DEBUG и HYSTERIA_BRUTAL_DEBUG для всего процесса Xray: каждое \
+     QUIC-соединение начинает писать в журнал внутренние данные управления перегрузкой. Только \
+     для диагностики.",
+);
+const HELP_QUIC_STREAM_WINDOWS: HelpText = HelpText::new(
     "Per-stream flow-control window in bytes: the initial value and the ceiling it may grow to. \
-     At least 16384 when set; the default is 8 MiB (8388608).";
-const HELP_QUIC_CONN_WINDOWS: &str =
+     At least 16384 when set; the default is 8 MiB (8388608).",
+    "Окно управления потоком для одного потока в байтах: начальное значение и предел, до \
+     которого оно может расти. Если задано, не меньше 16384; по умолчанию 8 МиБ (8388608).",
+);
+const HELP_QUIC_CONN_WINDOWS: HelpText = HelpText::new(
     "Per-connection flow-control window in bytes (all streams together): the initial value and \
-     the ceiling. At least 16384 when set; the default is 20 MiB (20971520).";
-const HELP_QUIC_MAX_IDLE_TIMEOUT: &str =
+     the ceiling. At least 16384 when set; the default is 20 MiB (20971520).",
+    "Окно управления потоком для соединения в байтах (все потоки вместе): начальное значение и \
+     предел. Если задано, не меньше 16384; по умолчанию 20 МиБ (20971520).",
+);
+const HELP_QUIC_MAX_IDLE_TIMEOUT: HelpText = HelpText::new(
     "Seconds without any traffic before the connection is closed: 4–120, or 0 for the default \
-     (30).";
-const HELP_QUIC_KEEP_ALIVE: &str =
+     (30).",
+    "Сколько секунд без трафика проходит до закрытия соединения: 4–120 или 0 для значения по \
+     умолчанию (30).",
+);
+const HELP_QUIC_KEEP_ALIVE: HelpText = HelpText::new(
     "Client-only: seconds between keep-alive pings that hold the connection (and NAT mappings) \
-     open: 2–60, or 0 for the transport's default.";
-const HELP_QUIC_MAX_INCOMING_STREAMS: &str =
+     open: 2–60, or 0 for the transport's default.",
+    "Только клиент: интервал в секундах между keep-alive пингами, удерживающими соединение (и \
+     NAT-сопоставления) открытым: 2–60 или 0 для значения транспорта по умолчанию.",
+);
+const HELP_QUIC_MAX_INCOMING_STREAMS: HelpText = HelpText::new(
     "How many concurrent streams the peer may open on one connection: at least 8, or 0 for the \
-     default (1024). The Hysteria client ignores it.";
-const HELP_QUIC_DISABLE_PMTUD: &str =
+     default (1024). The Hysteria client ignores it.",
+    "Сколько одновременных потоков собеседник может открыть в одном соединении: не меньше 8 или \
+     0 для значения по умолчанию (1024). Клиент Hysteria это поле игнорирует.",
+);
+const HELP_QUIC_DISABLE_PMTUD: HelpText = HelpText::new(
     "Turns off path-MTU discovery, so packets stay at the minimal QUIC size. Always off on \
-     platforms other than Linux, Windows and macOS.";
-const HELP_QUIC_DISABLE_CHROME_PARROT: &str =
+     platforms other than Linux, Windows and macOS.",
+    "Отключает определение MTU пути, и пакеты остаются минимального для QUIC размера. На \
+     платформах, кроме Linux, Windows и macOS, всегда выключено.",
+);
+const HELP_QUIC_DISABLE_CHROME_PARROT: HelpText = HelpText::new(
     "Client-only: by default the client shapes its QUIC handshake like Chrome's. When on, it \
-     uses the plain QUIC library handshake.";
-const HELP_QUIC_DISABLE_GSO: &str =
+     uses the plain QUIC library handshake.",
+    "Только клиент: по умолчанию клиент формирует QUIC-рукопожатие как Chrome. Если включено, \
+     используется обычное рукопожатие библиотеки QUIC.",
+);
+const HELP_QUIC_DISABLE_GSO: HelpText = HelpText::new(
     "Turns off UDP generic segmentation offload (batching packets in the kernel). Try it when a \
-     NIC or virtual network driver mishandles GSO.";
-const HELP_QUIC_DISABLE_STATELESS_RESET: &str =
+     NIC or virtual network driver mishandles GSO.",
+    "Отключает UDP generic segmentation offload (пакетирование пакетов в ядре). Попробуйте, \
+     если сетевая карта или драйвер виртуальной сети неправильно обрабатывают GSO.",
+);
+const HELP_QUIC_DISABLE_STATELESS_RESET: HelpText = HelpText::new(
     "Server-only: by default the listener generates a random stateless-reset key so clients \
-     learn quickly that a connection is gone after a restart. When on, no key is used.";
+     learn quickly that a connection is gone after a restart. When on, no key is used.",
+    "Только сервер: по умолчанию слушатель генерирует случайный ключ stateless reset, чтобы \
+     клиенты после перезапуска быстро узнавали, что соединения больше нет. Если включено, ключ \
+     не используется.",
+);
 
 // Stream tab — FinalMask (streamSettings.finalmask; VLESS/Trojan: tcp + udp, Hysteria: udp).
-const HELP_FINALMASK_SECTION: &str =
+const HELP_FINALMASK_SECTION: HelpText = HelpText::new(
     "The final layer of traffic camouflage, applied after transport-layer encryption (TLS/\
      REALITY) has already been processed. `tcp[]` and `udp[]` are ordered chains of masking \
      layers — the first entry is the innermost. Hysteria runs over UDP, so only `udp[]` applies \
      to it. A Tunnel uses `tcp[]` for its TCP listener and `udp[]` for its UDP listener \
      (settings.allowedNetwork). `salamander` (udp) is the same obfuscation algorithm as Hysteria2's \
      `obfs=salamander`: a Hysteria share link carries it as obfs when it is the only layer the \
-     client must mirror (`noise` needs no client layer) and has no packetSize (Gecko).";
+     client must mirror (`noise` needs no client layer) and has no packetSize (Gecko).",
+    "Последний слой маскировки трафика, применяемый после того, как шифрование транспортного \
+     уровня (TLS/REALITY) уже обработано. `tcp[]` и `udp[]` — упорядоченные цепочки маскирующих \
+     слоёв; первый элемент — самый внутренний. Hysteria работает поверх UDP, поэтому к ней \
+     применим только `udp[]`. Tunnel использует `tcp[]` для TCP-слушателя и `udp[]` для \
+     UDP-слушателя (settings.allowedNetwork). `salamander` (udp) — тот же алгоритм обфускации, \
+     что `obfs=salamander` у Hysteria2: share-ссылка Hysteria передаёт его как obfs, если это \
+     единственный слой, который клиент должен повторить (`noise` не требует слоя у клиента), и \
+     у него нет packetSize (Gecko).",
+);
 
 // What each FinalMask layer type does (help next to the layer's type, Roadmap §2.6 stage 2.5).
-const HELP_TYPE_FRAGMENT: &str =
+const HELP_TYPE_FRAGMENT: HelpText = HelpText::new(
     "Splits what this side writes into smaller pieces, so DPI that needs a whole message (the TLS \
      ClientHello with its SNI) sees only fragments. packets picks the writes: tlshello — the \
      first TLS handshake record, re-cut into several TLS records; FROM-TO — writes FROM to TO, \
      cut into separate TCP writes; empty — every write. Works on either side; the peer needs no \
-     matching layer.";
-const HELP_TYPE_SUDOKU: &str =
+     matching layer.",
+    "Разбивает то, что пишет эта сторона, на части поменьше, чтобы DPI, которому нужно \
+     сообщение целиком (TLS ClientHello с его SNI), видел только фрагменты. packets выбирает, \
+     какие записи резать: tlshello — первую запись TLS-рукопожатия, перерезанную на несколько \
+     TLS-записей; FROM-TO — записи с FROM по TO, разрезанные на отдельные TCP-записи; пусто — \
+     каждую запись. Работает на любой стороне; собеседнику парный слой не нужен.",
+);
+const HELP_TYPE_SUDOKU: HelpText = HelpText::new(
     "Re-encodes every byte as Sudoku-grid clue patterns keyed by password, so the stream looks \
      like random bytes (entropy) or printable text (ascii), with optional random padding. Both \
-     sides need the identical layer. Available in tcp and udp.";
-const HELP_TYPE_XMC: &str =
+     sides need the identical layer. Available in tcp and udp.",
+    "Перекодирует каждый байт в узоры подсказок сетки судоку, зависящие от password, так что \
+     поток выглядит как случайные байты (entropy) или печатный текст (ascii), с необязательным \
+     случайным заполнением. Обеим сторонам нужен одинаковый слой. Доступен в tcp и udp.",
+);
+const HELP_TYPE_XMC: HelpText = HelpText::new(
     "Disguises the connection as a Minecraft online-mode login: handshake, encryption request \
      and a signed profile, then the data inside the encrypted game stream. Both sides need the \
-     same password and profiles.";
-const HELP_TYPE_HEADER_CUSTOM_TCP: &str =
+     same password and profiles.",
+    "Маскирует соединение под вход в Minecraft в режиме online-mode: рукопожатие, запрос \
+     шифрования и подписанный профиль, а затем данные внутри зашифрованного игрового потока. \
+     Обеим сторонам нужны одинаковые password и profiles.",
+);
+const HELP_TYPE_HEADER_CUSTOM_TCP: HelpText = HelpText::new(
     "A scripted handshake before the data: client and server exchange the byte sequences defined \
      here (fixed bytes, random bytes, echoed values) and check what they receive. Both sides need \
-     the identical layer.";
-const HELP_TYPE_HEADER_CUSTOM_UDP: &str =
+     the identical layer.",
+    "Заданное сценарием рукопожатие перед данными: клиент и сервер обмениваются описанными \
+     здесь последовательностями байт (фиксированные байты, случайные байты, отражённые \
+     значения) и проверяют полученное. Обеим сторонам нужен одинаковый слой.",
+);
+const HELP_TYPE_HEADER_CUSTOM_UDP: HelpText = HelpText::new(
     "A custom header in front of every UDP packet (prefix) or a one-time handshake packet per \
      destination (standalone), built from fixed, random and echoed bytes. Both sides need the \
-     identical layer.";
-const HELP_TYPE_MKCP_LEGACY: &str =
+     identical layer.",
+    "Собственный заголовок перед каждым UDP-пакетом (prefix) или однократный пакет рукопожатия \
+     на каждого получателя (standalone), собранный из фиксированных, случайных и отражённых \
+     байт. Обеим сторонам нужен одинаковый слой.",
+);
+const HELP_TYPE_MKCP_LEGACY: HelpText = HelpText::new(
     "The former mKCP obfuscation (kcpSettings.header / seed) as a mask: a fake packet header \
      (DNS, DTLS, SRTP, uTP, WeChat video, WireGuard) or AES-128-GCM with a password. Both sides \
-     need the same layer.";
-const HELP_TYPE_NOISE: &str =
+     need the same layer.",
+    "Прежняя обфускация mKCP (kcpSettings.header / seed) в виде маски: поддельный заголовок \
+     пакета (DNS, DTLS, SRTP, uTP, видео WeChat, WireGuard) или AES-128-GCM с паролем. Обеим \
+     сторонам нужен одинаковый слой.",
+);
+const HELP_TYPE_NOISE: HelpText = HelpText::new(
     "Sends junk datagrams before the first packet to each destination address, and again every \
      reset seconds, to confuse UDP DPI. Only the sending side acts — the peer needs no matching \
-     layer.";
-const HELP_TYPE_SALAMANDER: &str =
+     layer.",
+    "Отправляет мусорные датаграммы перед первым пакетом на каждый адрес назначения и повторно \
+     каждые reset секунд, чтобы запутать UDP DPI. Действует только отправляющая сторона — \
+     собеседнику парный слой не нужен.",
+);
+const HELP_TYPE_SALAMANDER: HelpText = HelpText::new(
     "Hysteria2's obfuscation: every UDP packet is XORed with a BLAKE2b-256 keystream from the \
      password and a random 8-byte salt, so nothing in it is recognizable. With packetSize it is \
      Gecko: QUIC handshake packets are also split and padded to random sizes. Both sides need \
-     the same password and mode.";
-const HELP_TYPE_XDNS: &str =
+     the same password and mode.",
+    "Обфускация Hysteria2: каждый UDP-пакет складывается по XOR с ключевым потоком BLAKE2b-256 \
+     из password и случайной 8-байтовой соли, так что в нём ничего нельзя распознать. С \
+     packetSize это Gecko: пакеты QUIC-рукопожатия ещё и разбиваются и дополняются до случайных \
+     размеров. Обеим сторонам нужны одинаковые password и режим.",
+);
+const HELP_TYPE_XDNS: HelpText = HelpText::new(
     "Tunnels the UDP traffic through DNS queries and answers for a domain the server is \
-     authoritative for — for networks where only DNS gets out.";
-const HELP_TYPE_XICMP: &str =
+     authoritative for — for networks where only DNS gets out.",
+    "Туннелирует UDP-трафик через DNS-запросы и ответы для домена, на котором сервер \
+     авторитетен, — для сетей, откуда наружу выпускают только DNS.",
+);
+const HELP_TYPE_XICMP: HelpText = HelpText::new(
     "Carries the UDP traffic inside ICMP echo (ping) packets — for networks that let ping \
-     through. The server needs raw ICMP sockets (root or CAP_NET_RAW).";
-const HELP_TYPE_REALM: &str =
+     through. The server needs raw ICMP sockets (root or CAP_NET_RAW).",
+    "Передаёт UDP-трафик внутри пакетов ICMP echo (ping) — для сетей, пропускающих ping. \
+     Серверу нужны сырые ICMP-сокеты (root или CAP_NET_RAW).",
+);
+const HELP_TYPE_REALM: HelpText = HelpText::new(
     "NAT hole punching: both peers register with a realm server, learn their public addresses \
-     via STUN and then connect directly — a server behind NAT without an open port.";
-const HELP_TYPE_UDPHOP: &str =
+     via STUN and then connect directly — a server behind NAT without an open port.",
+    "Пробивание NAT: оба участника регистрируются на realm-сервере, узнают свои публичные \
+     адреса через STUN и затем соединяются напрямую — сервер за NAT без открытого порта.",
+);
+const HELP_TYPE_UDPHOP: HelpText = HelpText::new(
     "Client-only UDP port hopping: the client switches its local socket or the server port / \
-     address on a timer or per connection, so a single blocked port does not stop the traffic.";
+     address on a timer or per connection, so a single blocked port does not stop the traffic.",
+    "Прыжки по UDP-портам только на стороне клиента: клиент по таймеру или на каждое соединение \
+     меняет свой локальный сокет либо порт / адрес сервера, так что блокировка одного порта не \
+     останавливает трафик.",
+);
 
 // FinalMask `fragment` layer (Roadmap §2.6 stage 2.5, `fragment/conn.go`).
-const HELP_FRAGMENT_PACKETS: &str =
+const HELP_FRAGMENT_PACKETS: HelpText = HelpText::new(
     "Which writes to split. tlshello — only the first write, and only if it is a whole TLS \
      handshake record (the ClientHello on the client, the server's first record on the server); \
      its body is re-cut into several TLS records. FROM-TO or N — the writes numbered FROM to TO \
      since the connection opened (1 = the first), each cut into separate TCP writes; FROM must \
-     not be 0. Empty — every write.";
-const HELP_FRAGMENT_LENGTHS: &str =
+     not be 0. Empty — every write.",
+    "Какие записи разбивать. tlshello — только первую запись и только если это целая запись \
+     TLS-рукопожатия (ClientHello на клиенте, первая запись сервера на сервере); её тело \
+     перерезается на несколько TLS-записей. FROM-TO или N — записи с номерами от FROM до TO с \
+     момента открытия соединения (1 — первая), каждая режется на отдельные TCP-записи; FROM не \
+     может быть 0. Пусто — каждую запись.",
+);
+const HELP_FRAGMENT_LENGTHS: HelpText = HelpText::new(
     "Piece sizes in bytes, by position: lengths[0] for the first piece, lengths[1] for the \
      second, …; the last entry repeats for the rest. Each N or MIN-MAX (a random value in it). \
      The last entry must not start at 0. length is the single form, used only while lengths is \
-     empty.";
-const HELP_FRAGMENT_DELAYS: &str =
+     empty.",
+    "Размеры частей в байтах по позиции: lengths[0] — для первой части, lengths[1] — для \
+     второй, …; последний элемент повторяется для остальных. Каждый — N или MIN-MAX (случайное \
+     значение из диапазона). Последний элемент не может начинаться с 0. length — одиночная \
+     форма, используется, только пока lengths пуст.",
+);
+const HELP_FRAGMENT_DELAYS: HelpText = HelpText::new(
     "Pause in milliseconds after each piece, by position like lengths (the last repeats); 0 = \
      none. delay is the single form, used only while delays is empty. With tlshello, a single \
      delay of 0 (or none at all) sends the re-cut records together in one write — TLS records \
-     are split, TCP writes are not.";
-const HELP_FRAGMENT_MAX_SPLIT: &str =
+     are split, TCP writes are not.",
+    "Пауза в миллисекундах после каждой части, по позиции, как у lengths (последний \
+     повторяется); 0 — без паузы. delay — одиночная форма, используется, только пока delays \
+     пуст. С tlshello одна задержка 0 (или её отсутствие) отправляет перерезанные записи вместе \
+     одной записью — TLS-записи разделены, TCP-записи нет.",
+);
+const HELP_FRAGMENT_MAX_SPLIT: HelpText = HelpText::new(
     "Most pieces per write: the piece that reaches this count takes the rest. N or MIN-MAX (a \
-     random value per write); empty or 0 = no limit.";
+     random value per write); empty or 0 = no limit.",
+    "Наибольшее число частей на одну запись: часть, достигшая этого числа, забирает остаток. N \
+     или MIN-MAX (случайное значение на каждую запись); пусто или 0 — без ограничения.",
+);
 
 // FinalMask `salamander` layer.
-const HELP_SALAMANDER_PASSWORD: &str =
+const HELP_SALAMANDER_PASSWORD: HelpText = HelpText::new(
     "Pre-shared key, identical on both sides — the obfs-password of a Hysteria2 share link. At \
      least 4 bytes: a shorter one fails when the layer starts, and xray run -test does not catch \
-     it.";
-const HELP_SALAMANDER_PACKET_SIZE: &str =
+     it.",
+    "Общий ключ, одинаковый на обеих сторонах, — obfs-password в share-ссылке Hysteria2. Не \
+     короче 4 байт: более короткий ломает слой при запуске, а xray run -test этого не ловит.",
+);
+const HELP_SALAMANDER_PACKET_SIZE: HelpText = HelpText::new(
     "Empty — plain Salamander. N or MIN-MAX within 1–2048 — Gecko: every QUIC long-header \
      (handshake) packet is split into 2–8 fragments, each padded so the datagram size falls in \
      this range where it can; data packets are only obfuscated. Both sides must use the same \
-     mode.";
+     mode.",
+    "Пусто — обычный Salamander. N или MIN-MAX в пределах 1–2048 — Gecko: каждый QUIC-пакет с \
+     длинным заголовком (рукопожатие) разбивается на 2–8 фрагментов, каждый дополняется так, \
+     чтобы размер датаграммы по возможности попадал в этот диапазон; пакеты данных только \
+     обфусцируются. Обе стороны должны использовать один режим.",
+);
 
 // FinalMask `sudoku` layer (`sudoku/table.go`).
-const HELP_SUDOKU_PASSWORD: &str =
-    "Key that shuffles the encoding tables; identical on both sides. Empty is allowed.";
-const HELP_SUDOKU_ASCII: &str =
+const HELP_SUDOKU_PASSWORD: HelpText = HelpText::new(
+    "Key that shuffles the encoding tables; identical on both sides. Empty is allowed.",
+    "Ключ, перемешивающий таблицы кодирования; одинаковый на обеих сторонах. Может быть пустым.",
+);
+const HELP_SUDOKU_ASCII: HelpText = HelpText::new(
     "Output layout. entropy (default, also prefer_entropy) — bytes look random; ascii (also \
      prefer_ascii) — printable characters only, custom tables are not used. Any other value \
-     fails every connection, and xray run -test does not catch it.";
-const HELP_SUDOKU_CUSTOM_TABLE: &str =
+     fails every connection, and xray run -test does not catch it.",
+    "Вид вывода. entropy (по умолчанию, также prefer_entropy) — байты выглядят случайными; \
+     ascii (также prefer_ascii) — только печатные символы, собственные таблицы не используются. \
+     Любое другое значение ломает каждое соединение, а xray run -test этого не ловит.",
+);
+const HELP_SUDOKU_CUSTOM_TABLE: HelpText = HelpText::new(
     "Bit layout of each output byte, highest bit first: 8 characters, exactly 2 x, 2 p and 4 v \
      (case and spaces ignored), e.g. xpxvvpvv. Empty = the built-in layout. customTables — several layouts, one \
      per line, used instead of customTable. A wrong pattern fails every connection, and xray \
-     run -test does not catch it.";
-const HELP_SUDOKU_PADDING: &str =
+     run -test does not catch it.",
+    "Раскладка битов каждого выходного байта, от старшего бита: 8 символов, ровно 2 x, 2 p и 4 \
+     v (регистр и пробелы не важны), например xpxvvpvv. Пусто — встроенная раскладка. \
+     customTables — несколько раскладок, по одной на строку, используются вместо customTable. \
+     Неверный шаблон ломает каждое соединение, а xray run -test этого не ловит.",
+);
+const HELP_SUDOKU_PADDING: HelpText = HelpText::new(
     "Random padding, in percent: every connection picks a chance between paddingMin and \
      paddingMax, then pads each encoded unit with that chance. Values above 100 count as 100; a \
-     paddingMax below paddingMin is raised to it. Empty = 0.";
+     paddingMax below paddingMin is raised to it. Empty = 0.",
+    "Случайное заполнение в процентах: каждое соединение выбирает вероятность между paddingMin \
+     и paddingMax и с этой вероятностью дополняет каждую закодированную единицу. Значения \
+     больше 100 считаются как 100; paddingMax меньше paddingMin поднимается до него. Пусто — 0.",
+);
 
 // FinalMask `noise` layer (`noise/conn.go`).
-const HELP_NOISE_RESET: &str =
+const HELP_NOISE_RESET: HelpText = HelpText::new(
     "Seconds after which the junk is sent again to the same address, before its next packet: N \
-     or MIN-MAX (random). Empty or 0 = only once per address.";
-const HELP_NOISE_PACKET: &str =
+     or MIN-MAX (random). Empty or 0 = only once per address.",
+    "Через сколько секунд мусор снова отправляется на тот же адрес перед его следующим пакетом: \
+     N или MIN-MAX (случайно). Пусто или 0 — только один раз на адрес.",
+);
+const HELP_NOISE_PACKET: HelpText = HelpText::new(
     "The datagram's content, decoded by type: array (default) — byte list \"22, 3, 1\"; str — \
      the text (written here with escapes \\r \\n \\t \\\\ \\xHH); hex; base64; exp — an \
      expression of segments: <b HEX> bytes, <r N> random, <rc N> random letters, <rd N> random \
      digits (N or MIN-MAX, 0–65535), <t> 4-byte Unix time, <c> 4-byte counter, <n> 8-byte \
-     nonce. exp needs Xray-core v26.9.30+. Set either packet or rand.";
-const HELP_NOISE_RAND: &str =
+     nonce. exp needs Xray-core v26.9.30+. Set either packet or rand.",
+    "Содержимое датаграммы, декодируемое по type: array (по умолчанию) — список байт \"22, 3, \
+     1\"; str — текст (здесь записывается с экранированием \\r \\n \\t \\\\ \\xHH); hex; \
+     base64; exp — выражение из сегментов: <b HEX> байты, <r N> случайные, <rc N> случайные \
+     буквы, <rd N> случайные цифры (N или MIN-MAX, 0–65535), <t> 4-байтовое Unix-время, <c> \
+     4-байтовый счётчик, <n> 8-байтовый nonce. exp требует Xray-core v26.9.30+. Задайте либо \
+     packet, либо rand.",
+);
+const HELP_NOISE_RAND: HelpText = HelpText::new(
     "rand — a datagram of N or MIN-MAX random bytes, instead of packet. randRange — FROM-TO for \
-     the byte values, within 0–255 (empty = 0-255). Not used with type exp.";
-const HELP_NOISE_DELAY: &str =
+     the byte values, within 0–255 (empty = 0-255). Not used with type exp.",
+    "rand — датаграмма из N или MIN-MAX случайных байт вместо packet. randRange — FROM-TO для \
+     значений байт, в пределах 0–255 (пусто — 0-255). С type exp не используется.",
+);
+const HELP_NOISE_DELAY: HelpText = HelpText::new(
     "Pause in milliseconds after this datagram, before the next one (or the real packet): N or \
-     MIN-MAX (random).";
+     MIN-MAX (random).",
+    "Пауза в миллисекундах после этой датаграммы перед следующей (или настоящим пакетом): N или \
+     MIN-MAX (случайно).",
+);
 
 /// `type` presets for a `noise` item: the `packet` encodings plus the `exp` expression.
 const NOISE_PACKET_KINDS: &[&str] = &["array", "str", "hex", "base64", NOISE_EXP_KIND];
 
 // FinalMask `xicmp` layer (`xicmp/client.go`, `server.go`).
-const HELP_XICMP_DGRAM: &str =
+const HELP_XICMP_DGRAM: HelpText = HelpText::new(
     "Client side: send the pings through unprivileged ICMP sockets (Linux ping_group_range) \
      instead of raw ones that need root or CAP_NET_RAW. The server always uses raw sockets and \
-     ignores it.";
-const HELP_XICMP_IPS: &str =
+     ignores it.",
+    "Сторона клиента: отправлять пинги через непривилегированные ICMP-сокеты (Linux \
+     ping_group_range) вместо сырых, которым нужны root или CAP_NET_RAW. Сервер всегда \
+     использует сырые сокеты и этот параметр игнорирует.",
+);
+const HELP_XICMP_IPS: HelpText = HelpText::new(
     "Plain IP addresses, one per line (no CIDR). Client: the server addresses to ping, one \
      picked at random — empty = the outbound's address, which then must be an IP. Server: only \
-     pings from these addresses are accepted — empty = from anyone.";
+     pings from these addresses are accepted — empty = from anyone.",
+    "Обычные IP-адреса, по одному на строку (без CIDR). Клиент: адреса сервера для пинга, один \
+     выбирается случайно; пусто — адрес outbound, который тогда должен быть IP. Сервер: \
+     принимаются только пинги с этих адресов; пусто — от кого угодно.",
+);
 
 // FinalMask `udphop` layer (client-only UDP port hopping, XTLS/Xray-core#6327).
-const HELP_UDPHOP_MODE: &str =
+const HELP_UDPHOP_MODE: HelpText = HelpText::new(
     "Required, at least one. intervalLocal — every interval, dial a fresh local socket (new local \
      port). intervalRemote — every interval, switch to a random IP/port from remoteIPs / \
      remotePorts. perConnRemote — pick a random IP/port from remoteIPs / remotePorts once, when \
-     the connection opens. Written comma-separated without spaces.";
-const HELP_UDPHOP_INTERVAL: &str =
+     the connection opens. Written comma-separated without spaces.",
+    "Обязательно, хотя бы один. intervalLocal — каждые interval открывать новый локальный сокет \
+     (новый локальный порт). intervalRemote — каждые interval переключаться на случайный \
+     IP/порт из remoteIPs / remotePorts. perConnRemote — выбрать случайный IP/порт из remoteIPs \
+     / remotePorts один раз при открытии соединения. Записывается через запятую без пробелов.",
+);
+const HELP_UDPHOP_INTERVAL: HelpText = HelpText::new(
     "Seconds between hops: a number or a FROM-TO range (a random value in it each time). Empty or \
-     0 = 30; the lower bound must be at least 5.";
-const HELP_UDPHOP_REMOTE_PORTS: &str =
+     0 = 30; the lower bound must be at least 5.",
+    "Секунды между прыжками: число или диапазон FROM-TO (каждый раз случайное значение из \
+     него). Пусто или 0 — 30; нижняя граница не меньше 5.",
+);
+const HELP_UDPHOP_REMOTE_PORTS: HelpText = HelpText::new(
     "Ports to hop between: a port, a FROM-TO range or a comma list (\"20000-50000\", \
-     \"443,8443\"). Empty = keep the outbound's port.";
-const HELP_UDPHOP_REMOTE_IPS: &str =
+     \"443,8443\"). Empty = keep the outbound's port.",
+    "Порты для прыжков: порт, диапазон FROM-TO или список через запятую (\"20000-50000\", \
+     \"443,8443\"). Пусто — оставить порт outbound.",
+);
+const HELP_UDPHOP_REMOTE_IPS: HelpText = HelpText::new(
     "Addresses to hop between: IPs or CIDR prefixes (a random address inside the prefix is used). \
-     Empty = keep the outbound's address.";
+     Empty = keep the outbound's address.",
+    "Адреса для прыжков: IP или CIDR-префиксы (используется случайный адрес внутри префикса). \
+     Пусто — оставить адрес outbound.",
+);
 
 // FinalMask `realm` layer (NAT hole punching through a realm server, both sides).
-const HELP_REALM_URL: &str =
+const HELP_REALM_URL: HelpText = HelpText::new(
     "Realm server both peers register with: realm://TOKEN@HOST[:PORT]/ID over HTTPS (default port \
      443) or realm+http://… over plain HTTP (port 80). TOKEN authorizes with the server, ID names \
-     the realm — both sides must use the same one. Edit the URL or the fields below.";
-const HELP_REALM_STUN: &str =
+     the realm — both sides must use the same one. Edit the URL or the fields below.",
+    "Realm-сервер, на котором регистрируются оба участника: realm://TOKEN@HOST[:PORT]/ID по \
+     HTTPS (порт по умолчанию 443) или realm+http://… по обычному HTTP (порт 80). TOKEN — \
+     авторизация на сервере, ID — имя realm; обе стороны должны использовать одно и то же. \
+     Редактируйте URL или поля ниже.",
+);
+const HELP_REALM_STUN: HelpText = HelpText::new(
     "STUN servers used to discover the public address, one host:port per line (at least one; \
-     IPv6 in brackets). An entry whose port is not a number is skipped by Xray-core.";
-const HELP_REALM_IP_MODE: &str =
+     IPv6 in brackets). An entry whose port is not a number is skipped by Xray-core.",
+    "STUN-серверы для определения публичного адреса, по одному host:port на строку (хотя бы \
+     один; IPv6 в квадратных скобках). Запись с нечисловым портом Xray-core пропускает.",
+);
+const HELP_REALM_IP_MODE: HelpText = HelpText::new(
     "Address family for STUN and hole punching: dual (default), v4 or v6. Any other value also \
-     means dual.";
-const HELP_REALM_PORT_MAPPING: &str =
+     means dual.",
+    "Семейство адресов для STUN и пробивания NAT: dual (по умолчанию), v4 или v6. Любое другое \
+     значение тоже означает dual.",
+);
+const HELP_REALM_PORT_MAPPING: HelpText = HelpText::new(
     "Map the local UDP port on the home gateway via UPnP / NAT-PMP. timeout — seconds for gateway \
      discovery and each request (empty/0 = 10); lifetime — mapping lease in seconds (empty/0 = \
-     600). A failed mapping is only logged.";
-const HELP_REALM_TLS: &str =
+     600). A failed mapping is only logged.",
+    "Пробросить локальный UDP-порт на домашнем шлюзе через UPnP / NAT-PMP. timeout — секунды на \
+     поиск шлюза и на каждый запрос (пусто/0 — 10); lifetime — срок аренды проброса в секундах \
+     (пусто/0 — 600). Неудачный проброс только записывается в журнал.",
+);
+const HELP_REALM_TLS: HelpText = HelpText::new(
     "Client TLS settings for the HTTPS connection to the realm server (a tlsSettings-style object: \
-     serverName, fingerprint, pinnedPeerCertSha256, …). Absent = system defaults.";
+     serverName, fingerprint, pinnedPeerCertSha256, …). Absent = system defaults.",
+    "Клиентские настройки TLS для HTTPS-соединения с realm-сервером (объект в стиле \
+     tlsSettings: serverName, fingerprint, pinnedPeerCertSha256, …). Нет — системные значения \
+     по умолчанию.",
+);
 
 // FinalMask `xdns` layer (DNS tunnelling, v26.9.30 schema).
-const HELP_XDNS_DOMAINS: &str =
+const HELP_XDNS_DOMAINS: HelpText = HelpText::new(
     "Tunnel domains, needed on both sides. name — a domain the server is authoritative for; types \
      — DNS record types to carry data (TXT holds the most); lenLimit / labelLimit — maximum query \
      name / label length (empty = 255 / 63; the name must leave at least 17 payload bytes); edns0 \
-     — EDNS0 UDP payload size, 0 = off, 512–4096.";
-const HELP_XDNS_RESOLVERS: &str =
+     — EDNS0 UDP payload size, 0 = off, 512–4096.",
+    "Домены туннеля, нужны на обеих сторонах. name — домен, на котором сервер авторитетен; \
+     types — типы DNS-записей для передачи данных (больше всего вмещает TXT); lenLimit / \
+     labelLimit — максимальная длина имени запроса / метки (пусто — 255 / 63; имя должно \
+     оставлять не меньше 17 байт полезной нагрузки); edns0 — размер полезной нагрузки EDNS0 \
+     UDP, 0 — выключено, 512–4096.",
+);
+const HELP_XDNS_RESOLVERS: HelpText = HelpText::new(
     "DNS resolvers the client sends its queries through: udp or tcp, address host:port (IPv6 in \
-     brackets). Required on the client (outbound) side, ignored by the server.";
-const HELP_XDNS_EXTRA_POLL: &str =
-    "Additional polling queries the client keeps in flight, 0–3 (empty = 0).";
+     brackets). Required on the client (outbound) side, ignored by the server.",
+    "DNS-резолверы, через которые клиент отправляет запросы: udp или tcp, адрес host:port (IPv6 \
+     в квадратных скобках). Обязательно на стороне клиента (outbound), сервер игнорирует.",
+);
+const HELP_XDNS_EXTRA_POLL: HelpText = HelpText::new(
+    "Additional polling queries the client keeps in flight, 0–3 (empty = 0).",
+    "Дополнительные опрашивающие запросы, которые клиент держит в работе, 0–3 (пусто — 0).",
+);
 
 // FinalMask `mkcp-legacy` layer (the former kcpSettings.header / seed, Roadmap §2.6 stage 2.1).
-const HELP_MKCP_LEGACY_HEADER: &str =
+const HELP_MKCP_LEGACY_HEADER: HelpText = HelpText::new(
     "Fake packet header prepended to every UDP packet: dns, dtls, srtp, utp, wechat or wireguard \
      (case-insensitive). Empty = no header — then value selects the obfuscation: empty = the \
      original mKCP obfuscation, set = AES-128-GCM with value as the password. The old \
-     kcpSettings names \"none\" and \"wechat-video\" are not accepted here.";
-const HELP_MKCP_LEGACY_VALUE: &str =
+     kcpSettings names \"none\" and \"wechat-video\" are not accepted here.",
+    "Поддельный заголовок перед каждым UDP-пакетом: dns, dtls, srtp, utp, wechat или wireguard \
+     (регистр не важен). Пусто — без заголовка, и тогда обфускацию выбирает value: пусто — \
+     исходная обфускация mKCP, задано — AES-128-GCM с value в качестве пароля. Старые имена \
+     kcpSettings \"none\" и \"wechat-video\" здесь не принимаются.",
+);
+const HELP_MKCP_LEGACY_VALUE: HelpText = HelpText::new(
     "Meaning depends on header: no header — AES-128-GCM password (empty = original obfuscation); \
      dns — the domain written into the fake DNS query (empty = www.baidu.com); any other header \
-     ignores it. Used byte for byte (spaces count). Both sides need the same layer and value.";
+     ignores it. Used byte for byte (spaces count). Both sides need the same layer and value.",
+    "Смысл зависит от header: без заголовка — пароль AES-128-GCM (пусто — исходная обфускация); \
+     dns — домен, записываемый в поддельный DNS-запрос (пусто — www.baidu.com); любой другой \
+     заголовок его игнорирует. Используется байт в байт (пробелы учитываются). Обеим сторонам \
+     нужны одинаковые слой и value.",
+);
 
 // FinalMask `xmc` layer (the connection disguised as a Minecraft login, Roadmap §2.6 stage 2.4).
-const HELP_XMC_PASSWORD: &str =
+const HELP_XMC_PASSWORD: HelpText = HelpText::new(
     "Required pre-shared secret, identical on both sides. Both derive the same RSA key from it \
      (the fake online-mode encryption); the client sends the password inside the encrypted login \
      and the server compares it. Used byte for byte; at most 113 bytes fit the RSA block — a \
-     longer one fails every connection, and xray run -test does not catch it.";
-const HELP_XMC_HOSTNAME: &str =
+     longer one fails every connection, and xray run -test does not catch it.",
+    "Обязательный общий секрет, одинаковый на обеих сторонах. Обе стороны выводят из него один \
+     и тот же RSA-ключ (поддельное шифрование online-mode); клиент отправляет пароль внутри \
+     зашифрованного входа, сервер его сравнивает. Используется байт в байт; в RSA-блок \
+     помещается не больше 113 байт — более длинный ломает каждое соединение, а xray run -test \
+     этого не ловит.",
+);
+const HELP_XMC_HOSTNAME: HelpText = HelpText::new(
     "Server address the client writes into the Minecraft handshake, like a real client joining \
-     mc.example.com (empty = the IP it dials). Client side only: the server reads and ignores it.";
-const HELP_XMC_PROFILES: &str =
+     mc.example.com (empty = the IP it dials). Client side only: the server reads and ignores it.",
+    "Адрес сервера, который клиент пишет в рукопожатие Minecraft, как настоящий клиент, \
+     заходящий на mc.example.com (пусто — IP, к которому идёт подключение). Только сторона \
+     клиента: сервер читает и игнорирует его.",
+);
+const HELP_XMC_PROFILES: HelpText = HelpText::new(
     "Signed Minecraft profiles. The client picks one at random for every connection and logs in \
      with its username and UUID; the server accepts only a listed profile and answers with its \
      stored textures, which the client compares — both sides need the identical list. To get a \
      profile: look up the UUID by username (api.mojang.com/users/profiles/minecraft/NAME), then \
      fetch sessionserver.mojang.com/session/minecraft/profile/UUID?unsigned=false and copy the \
-     value and signature of its \"textures\" property.";
-const HELP_XMC_USERNAME: &str = "Minecraft username of the profile: 3–16 letters, digits or _.";
-const HELP_XMC_UUID: &str = "The profile's UUID, with or without hyphens.";
-const HELP_XMC_TEXTURES: &str =
+     value and signature of its \"textures\" property.",
+    "Подписанные профили Minecraft. Клиент для каждого соединения выбирает один случайно и \
+     входит с его username и UUID; сервер принимает только профиль из списка и отвечает \
+     сохранёнными текстурами, которые клиент сравнивает, — обеим сторонам нужен одинаковый \
+     список. Чтобы получить профиль: найдите UUID по имени \
+     (api.mojang.com/users/profiles/minecraft/NAME), затем запросите \
+     sessionserver.mojang.com/session/minecraft/profile/UUID?unsigned=false и скопируйте value \
+     и signature его свойства \"textures\".",
+);
+const HELP_XMC_USERNAME: HelpText = HelpText::new(
+    "Minecraft username of the profile: 3–16 letters, digits or _.",
+    "Имя пользователя Minecraft в профиле: 3–16 букв, цифр или _.",
+);
+const HELP_XMC_UUID: HelpText = HelpText::new(
+    "The profile's UUID, with or without hyphens.",
+    "UUID профиля, с дефисами или без.",
+);
+const HELP_XMC_TEXTURES: HelpText = HelpText::new(
     "value and signature of the \"textures\" property of the signed session profile \
-     (unsigned=false), copied as they are. Both are required, at most 4096 bytes each.";
+     (unsigned=false), copied as they are. Both are required, at most 4096 bytes each.",
+    "value и signature свойства \"textures\" подписанного профиля сессии (unsigned=false), \
+     скопированные как есть. Оба обязательны, каждый не больше 4096 байт.",
+);
 
 // FinalMask `header-custom` TCP layer (scripted handshake, Roadmap §2.6 stage 2.2).
-const HELP_HC_CLIENTS: &str =
+const HELP_HC_CLIENTS: HelpText = HelpText::new(
     "Sequences the client sends. The client writes clients[0], reads servers[0], writes clients[1], \
      … The server reads each one and checks it item by item; a mismatch refuses the connection \
-     (after sending errors[i], if set). Both sides need the identical layer.";
-const HELP_HC_SERVERS: &str =
+     (after sending errors[i], if set). Both sides need the identical layer.",
+    "Последовательности, которые отправляет клиент. Клиент пишет clients[0], читает servers[0], \
+     пишет clients[1], … Сервер читает каждую и проверяет поэлементно; при несовпадении \
+     соединение отклоняется (после отправки errors[i], если задано). Обеим сторонам нужен \
+     одинаковый слой.",
+);
+const HELP_HC_SERVERS: HelpText = HelpText::new(
     "Sequences the server answers with: servers[i] follows clients[i]; extra ones are sent after \
-     the last client sequence. The client checks them like the server checks clients.";
-const HELP_HC_ERRORS: &str =
+     the last client sequence. The client checks them like the server checks clients.",
+    "Последовательности, которыми отвечает сервер: servers[i] следует за clients[i]; лишние \
+     отправляются после последней последовательности клиента. Клиент проверяет их так же, как \
+     сервер проверяет clients.",
+);
+const HELP_HC_ERRORS: HelpText = HelpText::new(
     "Sent by the server when clients[i] does not match, just before it refuses the connection \
-     (errors[i] belongs to clients[i]). Only the server side uses errors.";
-const HELP_HC_DELAY: &str =
+     (errors[i] belongs to clients[i]). Only the server side uses errors.",
+    "Отправляется сервером, когда clients[i] не совпал, непосредственно перед отказом в \
+     соединении (errors[i] относится к clients[i]). errors использует только сторона сервера.",
+);
+const HELP_HC_DELAY: HelpText = HelpText::new(
     "Pause in milliseconds before this item is written: a number or a FROM-TO range (a random \
-     value in it). Earlier items are flushed first. Ignored when the sequence is received.";
-const HELP_HC_PACKET: &str =
+     value in it). Earlier items are flushed first. Ignored when the sequence is received.",
+    "Пауза в миллисекундах перед записью этого элемента: число или диапазон FROM-TO (случайное \
+     значение из него). Предыдущие элементы сначала сбрасываются в сеть. При приёме \
+     последовательности игнорируется.",
+);
+const HELP_HC_PACKET: HelpText = HelpText::new(
     "Fixed bytes, decoded by type: array (default) — byte list \"22, 3, 1\"; str — the text itself \
      (written here with escapes: \\r \\n \\t \\\\ \\xHH); hex — even-length hex; base64. When \
-     received, the bytes must match exactly.";
-const HELP_HC_RAND: &str =
+     received, the bytes must match exactly.",
+    "Фиксированные байты, декодируемые по type: array (по умолчанию) — список байт \"22, 3, \
+     1\"; str — сам текст (здесь записывается с экранированием: \\r \\n \\t \\\\ \\xHH); hex — \
+     шестнадцатеричная строка чётной длины; base64. При приёме байты должны совпасть точно.",
+);
+const HELP_HC_RAND: HelpText = HelpText::new(
     "rand — number of random bytes (only > 0 makes this a rand item). randRange — FROM-TO for \
      the byte values, 0–255 (empty = 0-255). When received, rand bytes of any content are \
-     accepted.";
-const HELP_HC_REUSE: &str =
+     accepted.",
+    "rand — число случайных байт (элементом rand его делает только значение > 0). randRange — \
+     FROM-TO для значений байт, 0–255 (пусто — 0-255). При приёме rand-байты принимаются с \
+     любым содержимым.",
+);
+const HELP_HC_REUSE: HelpText = HelpText::new(
     "This item is the bytes saved earlier under this name (capture). When received, they must \
-     match. Letters, digits and _, not starting with a digit.";
-const HELP_HC_CAPTURE: &str =
+     match. Letters, digits and _, not starting with a digit.",
+    "Этот элемент — байты, ранее сохранённые под этим именем (capture). При приёме должны \
+     совпасть. Буквы, цифры и _, не начиная с цифры.",
+);
+const HELP_HC_CAPTURE: HelpText = HelpText::new(
     "Save this item's bytes (sent or received) under a name, for a later reuse or transform — \
-     e.g. echo back a random nonce. Needs a kind (packet, rand, reuse or transform).";
-const HELP_HC_TRANSFORM: &str =
+     e.g. echo back a random nonce. Needs a kind (packet, rand, reuse or transform).",
+    "Сохранить байты этого элемента (отправленные или полученные) под именем для последующего \
+     reuse или transform — например, чтобы отразить случайный nonce. Требует вид элемента \
+     (packet, rand, reuse или transform).",
+);
+const HELP_HC_TRANSFORM: HelpText = HelpText::new(
     "Computed bytes: {\"op\": NAME, \"args\": [...]}, each argument exactly one of bytes (+ type), \
      u64, reuse, metadata or a nested transform. Ops include concat, slice, xor16/xor32, \
-     be16/be32, le16/le32/le64, pad, truncate, add, sub, and, or, shl, shr.";
+     be16/be32, le16/le32/le64, pad, truncate, add, sub, and, or, shl, shr.",
+    "Вычисляемые байты: {\"op\": NAME, \"args\": [...]}, каждый аргумент — ровно одно из: bytes \
+     (+ type), u64, reuse, metadata или вложенный transform. Операции: concat, slice, \
+     xor16/xor32, be16/be32, le16/le32/le64, pad, truncate, add, sub, and, or, shl, shr.",
+);
 
 /// `type` presets for a `header-custom` packet (empty = `array`).
 const HEADER_CUSTOM_PACKET_KINDS: &[&str] = &["array", "str", "hex", "base64"];
 
 // FinalMask `header-custom` UDP layer (Roadmap §2.6 stage 2.3).
-const HELP_HC_UDP_MODE: &str =
+const HELP_HC_UDP_MODE: HelpText = HelpText::new(
     "prefix (default) — client and server are a header in front of every packet the respective \
      side sends; the receiver checks and strips it, a packet that does not match is dropped. \
      standalone — client is a separate handshake packet the client sends once per destination \
@@ -359,15 +654,33 @@ const HELP_HC_UDP_MODE: &str =
      Xray-core works out the header size when the listener (inbound) or dialer (outbound) is \
      created: every reuse must name an earlier capture — in client, or in client or server for \
      server — and a transform must have a fixed size (no metadata, no u64 inside concat). \
-     Otherwise it fails to start, and xray run -test does not catch it.";
-const HELP_HC_UDP_CLIENT: &str =
+     Otherwise it fails to start, and xray run -test does not catch it.",
+    "prefix (по умолчанию) — client и server задают заголовок перед каждым пакетом, который \
+     отправляет соответствующая сторона; получатель проверяет и снимает его, несовпавший пакет \
+     отбрасывается. standalone — client задаёт отдельный пакет рукопожатия, который клиент \
+     отправляет один раз на каждого получателя (и ждёт ответа), server — ответ на него; затем \
+     пакеты данных идут без изменений. Только в нижнем регистре. Xray-core вычисляет размер \
+     заголовка при создании слушателя (inbound) или dialer (outbound): каждый reuse должен \
+     ссылаться на более ранний capture — в client, а для server в client или server, — а \
+     transform должен иметь фиксированный размер (без metadata, без u64 внутри concat). Иначе \
+     запуск не удаётся, а xray run -test этого не ловит.",
+);
+const HELP_HC_UDP_CLIENT: HelpText = HelpText::new(
     "Items the client sends: the header of each of its packets (prefix) or its one-time \
      handshake packet (standalone). The server checks them item by item. A capture here can be \
-     reused in server.";
-const HELP_HC_UDP_SERVER: &str =
+     reused in server.",
+    "Элементы, которые отправляет клиент: заголовок каждого его пакета (prefix) или его \
+     однократный пакет рукопожатия (standalone). Сервер проверяет их поэлементно. capture \
+     отсюда можно использовать в server через reuse.",
+);
+const HELP_HC_UDP_SERVER: HelpText = HelpText::new(
     "Items the server sends: the header of each of its packets (prefix) or its reply to the \
      handshake (standalone). The client checks them item by item; it may reuse what client \
-     captured.";
+     captured.",
+    "Элементы, которые отправляет сервер: заголовок каждого его пакета (prefix) или его ответ \
+     на рукопожатие (standalone). Клиент проверяет их поэлементно; можно использовать через \
+     reuse то, что сохранил client.",
+);
 
 /// Orange text for problems Save will reject or the user should act on.
 const WARNING_COLOR: Color32 = Color32::from_rgb(220, 160, 60);
@@ -864,7 +1177,7 @@ fn show_finalmask_layers_edit(
 }
 
 /// Help for a layer type of `chain` (title, text); `None` for a type the chain does not know.
-fn finalmask_type_help(chain: FinalMaskChain, layer_type: &str) -> Option<(&'static str, &'static str)> {
+fn finalmask_type_help(chain: FinalMaskChain, layer_type: &str) -> Option<(&'static str, HelpText)> {
     let help = match (chain, layer_type.trim().to_ascii_lowercase().as_str()) {
         (FinalMaskChain::Tcp, "fragment") => ("fragment", HELP_TYPE_FRAGMENT),
         (FinalMaskChain::Tcp, "header-custom") => ("header-custom (tcp)", HELP_TYPE_HEADER_CUSTOM_TCP),

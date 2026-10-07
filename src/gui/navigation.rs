@@ -185,7 +185,7 @@ impl Page {
             Page::GeoData => pages::geodata::show(ui, service),
             Page::Warp => pages::warp::show(ui, service),
             Page::TargetLookup => pages::target_lookup::show(ui, service),
-            Page::Settings => pages::settings::show(ui),
+            Page::Settings => pages::settings::show(ui, service),
         }
     }
 }

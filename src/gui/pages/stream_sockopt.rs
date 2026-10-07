@@ -10,76 +10,149 @@ use std::str::FromStr;
 
 use egui::{Color32, RichText, Ui};
 
-use super::{optional_string_combo, persistent_list_text_edit, resizable_multiline};
+use super::{HelpText, optional_string_combo, persistent_list_text_edit, resizable_multiline};
 use crate::xray::{
     ADDRESS_PORT_STRATEGIES, DOMAIN_STRATEGIES, HappyEyeballsDraft, INBOUND_ONLY_SOCKOPT_FIELDS, SockoptDraft,
     StreamDirection, TCP_CONGESTION_PRESETS, TPROXY_MODES, TcpFastOpenDraft, sockopt_field_applies,
 };
 
 // Field help (Roadmap §3:124).
-pub(crate) const HELP_SOCKOPT_TPROXY: &str =
+pub(crate) const HELP_SOCKOPT_TPROXY: HelpText = HelpText::new(
     "Enables OS-level transparent proxying via iptables (Linux only): \"redirect\" or \"tproxy\" \
-     mode, or off. An alternative to Xray-level followRedirect — usually only one is needed.";
+     mode, or off. An alternative to Xray-level followRedirect — usually only one is needed.",
+    "Включает прозрачное проксирование на уровне ОС через iptables (только Linux): режим \
+     \"redirect\" или \"tproxy\", либо выключено. Альтернатива followRedirect на уровне Xray — \
+     обычно нужно что-то одно.",
+);
 
 // Stream tab — Sockopt (streamSettings.sockopt; method-independent).
-const HELP_SOCKOPT_TCP_FAST_OPEN: &str =
+const HELP_SOCKOPT_TCP_FAST_OPEN: HelpText = HelpText::new(
     "Enables TCP Fast Open. `true`/`false`, or a positive integer to also set the accept queue \
-     length. Availability depends on OS support.";
-const HELP_SOCKOPT_ACCEPT_PROXY_PROTOCOL: &str =
+     length. Availability depends on OS support.",
+    "Включает TCP Fast Open. `true`/`false` или положительное целое — тогда оно задаёт ещё и \
+     длину очереди приёма. Доступность зависит от поддержки в ОС.",
+);
+const HELP_SOCKOPT_ACCEPT_PROXY_PROTOCOL: HelpText = HelpText::new(
     "Inbound-only. When enabled, the peer must send a PROXY protocol v1/v2 header immediately \
-     after the TCP connection is established, so Xray can see the real source IP/port.";
-const HELP_SOCKOPT_V6ONLY: &str =
+     after the TCP connection is established, so Xray can see the real source IP/port.",
+    "Только для inbound. Если включено, сразу после установки TCP-соединения клиент должен \
+     отправить заголовок PROXY protocol v1/v2, чтобы Xray видел реальные IP и порт источника.",
+);
+const HELP_SOCKOPT_V6ONLY: HelpText = HelpText::new(
     "Linux only. When enabled, a listener bound to `::` accepts IPv6 connections only (no \
-     IPv4-mapped addresses).";
-const HELP_SOCKOPT_TCP_MAX_SEG: &str = "Sets the maximum segment size (MSS) of TCP packets.";
-const HELP_SOCKOPT_TCP_KEEP_ALIVE_IDLE: &str =
-    "Seconds a TCP connection must be idle before Keep-Alive probes start.";
-const HELP_SOCKOPT_TCP_KEEP_ALIVE_INTERVAL: &str =
-    "Seconds between Keep-Alive probes once a TCP connection has entered the Keep-Alive state.";
-const HELP_SOCKOPT_TCP_USER_TIMEOUT: &str =
+     IPv4-mapped addresses).",
+    "Только Linux. Если включено, слушатель на `::` принимает только IPv6-подключения (без \
+     IPv4-mapped адресов).",
+);
+const HELP_SOCKOPT_TCP_MAX_SEG: HelpText = HelpText::new(
+    "Sets the maximum segment size (MSS) of TCP packets.",
+    "Задаёт максимальный размер сегмента (MSS) TCP-пакетов.",
+);
+const HELP_SOCKOPT_TCP_KEEP_ALIVE_IDLE: HelpText = HelpText::new(
+    "Seconds a TCP connection must be idle before Keep-Alive probes start.",
+    "Сколько секунд TCP-соединение должно простаивать, прежде чем начнутся пробы Keep-Alive.",
+);
+const HELP_SOCKOPT_TCP_KEEP_ALIVE_INTERVAL: HelpText = HelpText::new(
+    "Seconds between Keep-Alive probes once a TCP connection has entered the Keep-Alive state.",
+    "Интервал в секундах между пробами Keep-Alive после того, как TCP-соединение перешло в \
+     состояние Keep-Alive.",
+);
+const HELP_SOCKOPT_TCP_USER_TIMEOUT: HelpText = HelpText::new(
     "TCP user timeout in milliseconds (RFC 5482) — how long unacknowledged data may sit before \
-     the connection is force-closed.";
-const HELP_SOCKOPT_TCP_WINDOW_CLAMP: &str =
+     the connection is force-closed.",
+    "TCP user timeout в миллисекундах (RFC 5482) — сколько неподтверждённые данные могут ждать, \
+     прежде чем соединение будет принудительно закрыто.",
+);
+const HELP_SOCKOPT_TCP_WINDOW_CLAMP: HelpText = HelpText::new(
     "Caps the advertised TCP receive window size. The kernel uses the larger of this value and \
-     its own minimum.";
-const HELP_SOCKOPT_TRUSTED_X_FORWARDED_FOR: &str =
+     its own minimum.",
+    "Ограничивает объявляемый размер окна приёма TCP. Ядро использует большее из этого значения \
+     и собственного минимума.",
+);
+const HELP_SOCKOPT_TRUSTED_X_FORWARDED_FOR: HelpText = HelpText::new(
     "For HTTP-based transports: source IP ranges allowed to set a trusted X-Forwarded-For \
-     header (e.g. a reverse proxy in front of Xray). One CIDR/IP per line.";
-const HELP_SOCKOPT_CUSTOM_SOCKOPT: &str =
+     header (e.g. a reverse proxy in front of Xray). One CIDR/IP per line.",
+    "Для транспортов на основе HTTP: диапазоны IP источников, которым разрешено задавать \
+     доверенный заголовок X-Forwarded-For (например, обратный прокси перед Xray). Один CIDR или \
+     IP на строку.",
+);
+const HELP_SOCKOPT_CUSTOM_SOCKOPT: HelpText = HelpText::new(
     "Escape hatch for socket options not exposed as dedicated fields above — a raw JSON array, \
-     platform-specific (Linux/Windows/Darwin). Advanced use only.";
+     platform-specific (Linux/Windows/Darwin). Advanced use only.",
+    "Обходной путь для параметров сокета, у которых нет отдельных полей выше, — JSON-массив как \
+     есть, зависит от платформы (Linux/Windows/Darwin). Только для опытных пользователей.",
+);
 
 // Outbound-only fields (Roadmap §4.2), checked against `infra/conf/transport_sockopt.go` and
 // `transport/internet/dialer.go` of XTLS/Xray-core.
-const HELP_SOCKOPT_DIALER_PROXY: &str =
+const HELP_SOCKOPT_DIALER_PROXY: HelpText = HelpText::new(
     "Tag of another outbound that carries this outbound's connections — the way to chain \
      outbounds (e.g. through a local Tor SOCKS outbound); it replaced the removed proxySettings. \
-     While it is set, sendThrough and happyEyeballs are not used.";
-const HELP_SOCKOPT_DOMAIN_STRATEGY: &str =
+     While it is set, sendThrough and happyEyeballs are not used.",
+    "Тег другого outbound, через который идут подключения этого outbound, — способ строить \
+     цепочки outbound (например, через локальный SOCKS outbound для Tor); заменил удалённый \
+     proxySettings. Пока он задан, sendThrough и happyEyeballs не используются.",
+);
+const HELP_SOCKOPT_DOMAIN_STRATEGY: HelpText = HelpText::new(
     "How a domain target is resolved before dialing. AsIs (default): the operating system \
      resolves it. UseIP*: Xray's DNS, falling back to AsIs when the lookup fails. ForceIP*: \
      Xray's DNS, the connection fails when the lookup fails. v4 / v6 / v4v6 / v6v4 choose the \
-     address family and its preference.";
-const HELP_SOCKOPT_INTERFACE: &str =
-    "Bind outgoing connections to this network interface (e.g. eth1, wg0). Linux and macOS.";
-const HELP_SOCKOPT_MARK: &str =
+     address family and its preference.",
+    "Как разрешается доменный адрес назначения перед подключением. AsIs (по умолчанию) — \
+     разрешает операционная система. UseIP* — DNS Xray, при неудачном запросе откат на AsIs. \
+     ForceIP* — DNS Xray, при неудачном запросе подключение не устанавливается. v4 / v6 / v4v6 \
+     / v6v4 выбирают семейство адресов и его приоритет.",
+);
+const HELP_SOCKOPT_INTERFACE: HelpText = HelpText::new(
+    "Bind outgoing connections to this network interface (e.g. eth1, wg0). Linux and macOS.",
+    "Привязать исходящие подключения к этому сетевому интерфейсу (например, eth1, wg0). Linux и \
+     macOS.",
+);
+const HELP_SOCKOPT_MARK: HelpText = HelpText::new(
     "SO_MARK of outgoing packets, for policy routing with ip rule / iptables (Linux; needs \
-     CAP_NET_ADMIN). A 32-bit integer.";
-const HELP_SOCKOPT_TCP_CONGESTION: &str =
-    "TCP congestion control algorithm (Linux), e.g. bbr; the kernel must have it available.";
-const HELP_SOCKOPT_TCP_MPTCP: &str = "Multipath TCP (Linux 5.6+); the server has to support it too.";
-const HELP_SOCKOPT_ADDRESS_PORT_STRATEGY: &str =
+     CAP_NET_ADMIN). A 32-bit integer.",
+    "SO_MARK исходящих пакетов для маршрутизации по политикам с ip rule / iptables (Linux; \
+     нужна CAP_NET_ADMIN). 32-битное целое.",
+);
+const HELP_SOCKOPT_TCP_CONGESTION: HelpText = HelpText::new(
+    "TCP congestion control algorithm (Linux), e.g. bbr; the kernel must have it available.",
+    "Алгоритм управления перегрузкой TCP (Linux), например bbr; он должен быть доступен в ядре.",
+);
+const HELP_SOCKOPT_TCP_MPTCP: HelpText = HelpText::new(
+    "Multipath TCP (Linux 5.6+); the server has to support it too.",
+    "Multipath TCP (Linux 5.6+); сервер тоже должен его поддерживать.",
+);
+const HELP_SOCKOPT_ADDRESS_PORT_STRATEGY: HelpText = HelpText::new(
     "Look up the real address and/or port of the target in DNS SRV or TXT records before \
-     dialing. Freedom refuses it from Xray-core v26.9.8 (Save is blocked).";
-const HELP_SOCKOPT_HAPPY_EYEBALLS: &str =
+     dialing. Freedom refuses it from Xray-core v26.9.8 (Save is blocked).",
+    "Перед подключением искать реальный адрес и/или порт назначения в DNS-записях SRV или TXT. \
+     Freedom отвергает этот параметр начиная с Xray-core v26.9.8 (Save блокируется).",
+);
+const HELP_SOCKOPT_HAPPY_EYEBALLS: HelpText = HelpText::new(
     "RFC 8305 connection racing over the resolved addresses. Used only for TCP, when \
      domainStrategy makes Xray resolve the domain (UseIP* / ForceIP*), the lookup returns at \
-     least two addresses, tryDelayMs and maxConcurrentTry are above 0, and dialerProxy is empty.";
-const HELP_SOCKOPT_HE_TRY_DELAY: &str = "Milliseconds before the next address is tried; 0 = racing off (default).";
-const HELP_SOCKOPT_HE_PRIORITIZE_IPV6: &str = "Start with an IPv6 address (default: IPv4 first).";
-const HELP_SOCKOPT_HE_INTERLEAVE: &str =
-    "How many addresses of one family are tried before switching to the other; default 1.";
-const HELP_SOCKOPT_HE_MAX_CONCURRENT: &str = "Maximum attempts in flight at once; default 4.";
+     least two addresses, tryDelayMs and maxConcurrentTry are above 0, and dialerProxy is empty.",
+    "Параллельные попытки подключения к разрешённым адресам по RFC 8305. Используется только \
+     для TCP, когда domainStrategy заставляет Xray разрешать домен (UseIP* / ForceIP*), запрос \
+     вернул не меньше двух адресов, tryDelayMs и maxConcurrentTry больше 0, а dialerProxy пуст.",
+);
+const HELP_SOCKOPT_HE_TRY_DELAY: HelpText = HelpText::new(
+    "Milliseconds before the next address is tried; 0 = racing off (default).",
+    "Миллисекунды до попытки следующего адреса; 0 — параллельные попытки выключены (по \
+     умолчанию).",
+);
+const HELP_SOCKOPT_HE_PRIORITIZE_IPV6: HelpText = HelpText::new(
+    "Start with an IPv6 address (default: IPv4 first).",
+    "Начинать с IPv6-адреса (по умолчанию сначала IPv4).",
+);
+const HELP_SOCKOPT_HE_INTERLEAVE: HelpText = HelpText::new(
+    "How many addresses of one family are tried before switching to the other; default 1.",
+    "Сколько адресов одного семейства пробуется перед переключением на другое; по умолчанию 1.",
+);
+const HELP_SOCKOPT_HE_MAX_CONCURRENT: HelpText = HelpText::new(
+    "Maximum attempts in flight at once; default 4.",
+    "Максимум одновременных попыток; по умолчанию 4.",
+);
 
 /// `sockopt.tproxy` combo (documented presets) + free-text fallback. Shared by the Stream tab's
 /// full Sockopt editor and the Tunnel Protocol tab's narrow tproxy field (Roadmap §2.3:88).

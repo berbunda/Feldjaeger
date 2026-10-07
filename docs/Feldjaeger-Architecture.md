@@ -9223,3 +9223,52 @@ DNS, Observatory, BurstObservatory) тоже пересобираются из �
 края, у нижнего края и в углу; прижатие к краю, когда не помещается ни с одной стороны, и окно
 шире области. Итог: **1377 passed / 0 failed**, clippy lib 66 (без изменений). GUI в запущенном
 приложении не проверялся.
+
+# 105	Язык справки: настройка в Settings и русская справка Inbounds (Roadmap §4.4) (0.5.50-0)
+
+## 105.1	Настройка
+
+- `storage/app_config.rs`: `HelpLanguage { English (по умолчанию), Russian }`, сериализуется как
+  `"English"` / `"Russian"`, `ALL` и `native_name()` («English», «Русский»). Поле
+  `UiConfig.help_language` с `#[serde(default)]`, поэтому старый `config.json` без поля читается
+  как English.
+- `ApplicationService::set_help_language` устроен как остальные UI-сеттеры: сохраняет конфиг, только
+  если значение изменилось.
+- `gui/pages/settings.rs`: страница Settings (раньше заглушка) — раздел Help, ComboBox «Help
+  language» и пояснение. Сама страница остаётся на английском.
+
+## 105.2	Механизм
+
+- `gui/pages/mod.rs`: `HelpText { en, ru: Option }` с `const fn en(en)` / `const fn new(en, ru)`
+  и `get(language)`; если русского текста нет, `get` возвращает английский.
+  `help_button` / `field_label` принимают `HelpText` вместо `&'static str`. Все 228 констант
+  `HELP_*` (inbounds 90, sockopt 23, finalmask 77, outbound_stream 38) переведены на этот тип.
+- Язык не передаётся параметром через все страницы. `gui/app.rs` раз в кадр вызывает
+  `pages::set_help_language(ctx, ui_config().help_language)`, значение лежит в temp-памяти
+  egui, а `help_button` / `show_help_dialog` читают его оттуда (`help_language`, по умолчанию
+  English). Источник истины — `UiConfig` в `ApplicationService`, в egui только копия на кадр.
+- В `HelpDialog` хранится `HelpText`, а не готовая строка, и язык выбирается при отрисовке. Если
+  сменить язык при открытом окне справки, текст переключится сразу.
+- `HelpChrome` локализует обвязку окна: заголовок «Help — x» / «Справка — x», подсказку кнопки и
+  «Close» / «Закрыть». Имена полей Xray (`title`) не переводятся.
+
+## 105.3	Переводы
+
+Русские тексты стоят рядом с английскими в тех же константах (`HelpText::new(en, ru)`), поэтому
+при правке одного языка второй виден сразу. Переведено всё, что открывается со страницы Inbounds:
+`inbounds.rs` (90), `stream_sockopt.rs` (23) и `stream_finalmask.rs` (77). Два последних
+редактора общие, так что их справка по-русски показывается и в Outbounds. Английский текст при
+переводе не менялся: подстановку делал скрипт, а не ручная правка. Имена полей, значения и
+команды (`inboundTag`, "none", `xray x25519`, tlshello, …) оставлены как есть.
+
+Не переведено: `outbound_stream.rs` (38 текстов, Outbound Shell stream/security) — отдельный
+открытый пункт Roadmap §4.4.
+
+## 105.4	Итог
+
+Тесты (+4): `help_language_is_saved_and_defaults_to_english` (сервис: по умолчанию English,
+сохранение и повторное чтение `config.json`), `help_text_picks_the_language_and_falls_back_to_english`,
+`help_language_defaults_to_english_until_published` и `inbounds_page_help_is_fully_translated`
+(через `include_str!` проверяет, что в трёх файлах страницы Inbounds нет `HelpText::en(`).
+Итог: **1381 passed / 0 failed**, clippy lib 66 (без изменений). GUI в запущенном приложении не
+проверялся.

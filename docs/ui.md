@@ -81,6 +81,13 @@ UI preferences must be persisted in the application config file.
 The config file may store non-secret UI state only.
 Secrets must never be stored in the UI config.
 
+# Settings
+Page title: Settings. Application preferences stored in the local `config.json` (`UiConfig`).
+- Help language (Roadmap §4.4): English (default) / Русский — the language of the field help
+  pop-ups ("h" buttons), including their caption and Close button. The rest of the UI and every
+  Xray field name stay in English. Help without a Russian text is shown in English; the Inbounds
+  page (incl. the shared Sockopt and FinalMask editors) is fully translated.
+
 # Notifications
 - Success
 - Info

@@ -36,6 +36,9 @@ pub struct UiConfig {
     /// Preferred color theme. Only [`ThemeMode::System`] is applied in MVP.
     #[serde(default, alias = "theme_mode")]
     pub theme: ThemeMode,
+    /// Language of the field help pop-ups (Roadmap §4.4).
+    #[serde(default)]
+    pub help_language: HelpLanguage,
 }
 
 impl Default for UiConfig {
@@ -46,6 +49,7 @@ impl Default for UiConfig {
             window_position: None,
             last_page: default_last_page(),
             theme: ThemeMode::System,
+            help_language: HelpLanguage::English,
         }
     }
 }
@@ -99,4 +103,29 @@ pub enum ThemeMode {
     Light,
     /// Force a dark theme (not applied yet).
     Dark,
+}
+
+/// Language of the field help pop-ups. Only the help text is localized; the rest of the UI and
+/// all Xray field names stay in English.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum HelpLanguage {
+    /// English — the original text, condensed from the official Xray-core docs.
+    #[default]
+    English,
+    /// Russian; falls back to English for help that has no translation yet.
+    Russian,
+}
+
+impl HelpLanguage {
+    /// Every language, in the order offered in Settings.
+    pub const ALL: [Self; 2] = [Self::English, Self::Russian];
+
+    /// Name of the language in that language.
+    pub fn native_name(self) -> &'static str {
+        match self {
+            Self::English => "English",
+            Self::Russian => "Русский",
+        }
+    }
 }

@@ -80,6 +80,7 @@ impl eframe::App for FeldjaegerApp {
             });
 
         about::show(ui);
+        super::pages::set_help_language(ui.ctx(), self.service.ui_config().help_language);
 
         let sidebar_width = self.service.ui_config().sidebar_width;
         let previous_page = self.page;
