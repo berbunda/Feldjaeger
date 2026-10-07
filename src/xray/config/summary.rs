@@ -449,8 +449,12 @@ fn extract_burst_ping_config(
     warnings: &mut Vec<String>,
 ) -> Option<BurstPingConfigSummary> {
     let ping = match value.get("pingConfig") {
-        None => {
-            warnings.push("`pingConfig` is missing.".to_owned());
+        // Xray-core treats `null` like an absent key and rejects both (Architecture §117).
+        None | Some(Value::Null) => {
+            warnings.push(
+                "`pingConfig` is missing — Xray-core refuses to load burstObservatory without it."
+                    .to_owned(),
+            );
             return None;
         }
         Some(Value::Object(object)) => object,

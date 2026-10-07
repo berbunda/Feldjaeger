@@ -11,13 +11,12 @@
 //! added one field, `enableConcurrency`, beyond its summary) there is no coverage gap to close
 //! here.
 //!
-//! `pingConfig` is documented as required at the `BurstObservatoryObject` level, but every one of
-//! its own fields has a documented Xray-side default — so an empty `pingConfig: {}` is a
-//! structurally complete, if maximally-defaulted, value. Mirrors the "prefer compatibility over
-//! convenience" choice already made for the sibling `observatory` editor (§54.2): this module does
-//! not hard-require `pingConfig`'s presence on save, matching the already-lenient read-only page,
-//! which treats a missing ping configuration as an informational, non-blocking state
-//! (`NoPingConfigurations`) rather than an error.
+//! `pingConfig` is required: Xray-core's `BurstObservatoryConfig.Build()` rejects a
+//! `burstObservatory` object without it (or with `null`) — "BurstObservatory requires a valid
+//! pingConfig" — and the whole config fails to load (checked with `xray run -test` 26.9.30,
+//! Architecture §117). Every one of its own fields has a core default, so an empty
+//! `pingConfig: {}` is enough. Save therefore requires `pingConfig`
+//! ([`validate_burst_observatory_settings`]); reading stays lenient and reports the gap.
 
 use serde_json::{Map, Value};
 
@@ -112,6 +111,16 @@ impl BurstObservatorySettings {
             source_file: None,
             warnings: Vec::new(),
         }
+    }
+
+    /// These settings as the start of an edit draft: a section that does not exist yet starts
+    /// with the `pingConfig` Xray-core requires (blank, every field defaulted by the core). An
+    /// existing section without it is left as is — Save explains what is missing.
+    pub fn into_edit_draft(mut self) -> Self {
+        if !self.section_present {
+            self.ping_config.get_or_insert_with(BurstPingConfigEntry::blank);
+        }
+        self
     }
 }
 
@@ -283,21 +292,28 @@ fn display_ping_presence(ping_config: &Option<BurstPingConfigEntry>) -> &'static
 
 /// Validates draft settings before they are written remotely.
 ///
-/// Deliberately lenient (`rules.md`: "prefer compatibility over convenience") — only control
-/// characters are rejected; an empty `subjectSelector` and an absent `pingConfig` are both
-/// allowed to be saved (see module docs), and duration/URL grammars are not re-validated here
+/// Otherwise lenient (`rules.md`: "prefer compatibility over convenience") — besides the
+/// required `pingConfig` (see module docs) only control characters are rejected; an empty
+/// `subjectSelector` is allowed, and duration/URL grammars are not re-validated here
 /// (`xray run -test` already runs after every save).
 pub fn validate_burst_observatory_settings(settings: &BurstObservatorySettings) -> ConfigModifyResult<()> {
     for (index, selector) in settings.subject_selectors.iter().enumerate() {
         validate_control_chars(selector, &format!("subjectSelector entry {}", index + 1))?;
     }
-    if let Some(ping_config) = &settings.ping_config {
-        validate_optional_control_chars(&ping_config.destination, "pingConfig.destination")?;
-        validate_optional_control_chars(&ping_config.connectivity, "pingConfig.connectivity")?;
-        validate_optional_control_chars(&ping_config.interval, "pingConfig.interval")?;
-        validate_optional_control_chars(&ping_config.timeout, "pingConfig.timeout")?;
-        validate_optional_control_chars(&ping_config.http_method, "pingConfig.httpMethod")?;
-    }
+    let Some(ping_config) = &settings.ping_config else {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::ValidationFailed,
+            "pingConfig is required: Xray-core refuses to load a burstObservatory section without \
+             it (\"BurstObservatory requires a valid pingConfig\"). Enable pingConfig — left empty, \
+             every field uses the core default."
+                .to_owned(),
+        ));
+    };
+    validate_optional_control_chars(&ping_config.destination, "pingConfig.destination")?;
+    validate_optional_control_chars(&ping_config.connectivity, "pingConfig.connectivity")?;
+    validate_optional_control_chars(&ping_config.interval, "pingConfig.interval")?;
+    validate_optional_control_chars(&ping_config.timeout, "pingConfig.timeout")?;
+    validate_optional_control_chars(&ping_config.http_method, "pingConfig.httpMethod")?;
     Ok(())
 }
 
@@ -497,8 +513,12 @@ mod tests {
     }
 
     #[test]
-    fn validation_accepts_defaults_and_full_settings() {
-        assert!(validate_burst_observatory_settings(&BurstObservatorySettings::defaults()).is_ok());
+    fn validation_accepts_blank_ping_config_and_full_settings() {
+        let blank = BurstObservatorySettings {
+            ping_config: Some(BurstPingConfigEntry::blank()),
+            ..BurstObservatorySettings::defaults()
+        };
+        assert!(validate_burst_observatory_settings(&blank).is_ok());
         let settings = BurstObservatorySettings {
             subject_selectors: vec!["proxy".to_owned()],
             ping_config: Some(BurstPingConfigEntry {
@@ -515,8 +535,43 @@ mod tests {
     }
 
     #[test]
-    fn validation_accepts_empty_selectors_and_absent_ping_config() {
-        let settings = BurstObservatorySettings::defaults();
+    fn validation_requires_ping_config() {
+        // Xray-core v26.9.30 `BurstObservatoryConfig.Build()`: "BurstObservatory requires a valid
+        // pingConfig" — confirmed with `xray run -test` (Architecture §117).
+        let without_ping = BurstObservatorySettings {
+            subject_selectors: vec!["proxy".to_owned()],
+            ..BurstObservatorySettings::defaults()
+        };
+        let error = validate_burst_observatory_settings(&without_ping).unwrap_err();
+        assert!(error.message().contains("pingConfig is required"), "{}", error.message());
+        assert!(validate_burst_observatory_settings(&BurstObservatorySettings::defaults()).is_err());
+
+    }
+
+    #[test]
+    fn edit_draft_of_new_section_starts_with_ping_config() {
+        let draft = burst_observatory_settings_from_section(None).into_edit_draft();
+        assert_eq!(draft.ping_config, Some(BurstPingConfigEntry::blank()));
+        assert!(validate_burst_observatory_settings(&draft).is_ok());
+        let mut value = Value::Null;
+        apply_burst_observatory_settings_to_value(&mut value, &draft).unwrap();
+        assert_eq!(value, json!({"pingConfig": {}}));
+
+        // An existing section is not silently changed: Save reports the missing pingConfig.
+        let existing = burst_observatory_settings_from_section(Some(&section(json!({
+            "subjectSelector": ["proxy"]
+        }))))
+        .into_edit_draft();
+        assert!(existing.ping_config.is_none());
+        assert!(validate_burst_observatory_settings(&existing).is_err());
+    }
+
+    #[test]
+    fn validation_accepts_empty_selectors_with_ping_config() {
+        let settings = BurstObservatorySettings {
+            ping_config: Some(BurstPingConfigEntry::blank()),
+            ..BurstObservatorySettings::defaults()
+        };
         assert!(validate_burst_observatory_settings(&settings).is_ok());
     }
 
@@ -524,9 +579,11 @@ mod tests {
     fn validation_rejects_control_characters_in_selector() {
         let settings = BurstObservatorySettings {
             subject_selectors: vec!["bad\nselector".to_owned()],
+            ping_config: Some(BurstPingConfigEntry::blank()),
             ..BurstObservatorySettings::defaults()
         };
-        assert!(validate_burst_observatory_settings(&settings).is_err());
+        let error = validate_burst_observatory_settings(&settings).unwrap_err();
+        assert!(error.message().contains("subjectSelector"), "{}", error.message());
     }
 
     #[test]

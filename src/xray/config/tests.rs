@@ -803,6 +803,20 @@ fn burst_observatory_summary_missing_and_empty_section() {
             .is_none()
     );
 
+    // `null` is rejected by Xray-core like an absent key (Architecture §117).
+    let outcome = parser.parse_str(r#"{"burstObservatory":{"pingConfig":null}}"#);
+    let summary = outcome
+        .sections()
+        .burst_observatory_summary()
+        .expect("BurstObservatory with null pingConfig");
+    assert!(summary.ping_config.is_none());
+    assert!(
+        summary
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("`pingConfig` is missing"))
+    );
+
     let outcome = parser.parse_str(r#"{"burstObservatory":{}}"#);
     let summary = outcome
         .sections()

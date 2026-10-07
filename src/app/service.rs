@@ -3540,7 +3540,7 @@ impl ApplicationService {
             let Some(editable) = self.loaded_config.editable() else {
                 return Err("Configuration not loaded.".to_owned());
             };
-            editable.burst_observatory_settings()
+            editable.burst_observatory_settings().into_edit_draft()
         };
         if self.is_any_remote_busy() {
             return Err("Another operation is already running.".to_owned());

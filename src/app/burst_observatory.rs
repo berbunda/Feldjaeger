@@ -22,7 +22,8 @@ pub enum BurstObservatoryPageState {
     BurstObservatorySectionMissing,
     /// The section has no usable subject selectors.
     NoSubjectSelectors,
-    /// The section has no usable ping configuration.
+    /// The section has no usable `pingConfig` — Xray-core refuses to load such a config
+    /// (Architecture §117).
     NoPingConfigurations,
     /// Supported configuration loaded without warnings.
     ConfigurationLoaded,
@@ -57,7 +58,11 @@ impl BurstObservatoryPageState {
             }
             Self::BurstObservatorySectionMissing => "BurstObservatory section is not configured.",
             Self::NoSubjectSelectors => "No subject selectors configured.",
-            Self::NoPingConfigurations => "No ping configurations configured.",
+            Self::NoPingConfigurations => {
+                "pingConfig is missing: Xray-core refuses to load a burstObservatory section \
+                 without it. Click Edit and enable pingConfig (left empty, it uses the core \
+                 defaults)."
+            }
             Self::ConfigurationLoaded => "BurstObservatory configuration loaded.",
             Self::ConfigurationContainsWarnings => {
                 "Configuration loaded with warnings. Review the details below."
@@ -137,10 +142,12 @@ pub fn derive_burst_observatory_page_state(
                 let Some(summary) = burst_observatory else {
                     return BurstObservatoryPageState::BurstObservatorySectionMissing;
                 };
-                if summary.subject_selectors.is_empty() {
-                    BurstObservatoryPageState::NoSubjectSelectors
-                } else if summary.ping_config.is_none() {
+                // A missing pingConfig breaks the whole config, so it outranks the merely
+                // idle "no subject selectors" state.
+                if summary.ping_config.is_none() {
                     BurstObservatoryPageState::NoPingConfigurations
+                } else if summary.subject_selectors.is_empty() {
+                    BurstObservatoryPageState::NoSubjectSelectors
                 } else if !warnings.is_empty() || !summary.warnings.is_empty() {
                     BurstObservatoryPageState::ConfigurationContainsWarnings
                 } else {
@@ -387,6 +394,15 @@ mod tests {
                 SshStatus::Connected,
                 &succeeded(),
                 &loaded(Some(summary(&["proxy"], false))),
+            ),
+            BurstObservatoryPageState::NoPingConfigurations
+        );
+        // Without pingConfig Xray-core does not load the config at all, so that state wins.
+        assert_eq!(
+            derive_burst_observatory_page_state(
+                SshStatus::Connected,
+                &succeeded(),
+                &loaded(Some(summary(&[], false))),
             ),
             BurstObservatoryPageState::NoPingConfigurations
         );

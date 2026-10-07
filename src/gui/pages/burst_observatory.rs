@@ -5,6 +5,7 @@
 
 use egui::{Color32, RichText, Sense, TextEdit, Ui};
 
+use super::HelpText;
 use crate::app::{
     ApplicationService, BurstObservatoryPageState, MISSING_FIELD,
     burst_observatory_general_display, burst_ping_config_display,
@@ -19,9 +20,85 @@ const WARN_COLOR: Color32 = Color32::from_rgb(210, 170, 40);
 /// itself accepts any HTTP method string.
 const HTTP_METHOD_PRESETS: &[&str] = &["HEAD", "GET"];
 
+// ─── Field help text (Roadmap §4.4) ──────────────────────────────────────────
+//
+// Condensed from https://xtls.github.io/config/observatory.html; behaviour and defaults are
+// Xray-core's (`app/observatory/burst/healthping.go`, `ping.go`, `healthping_result.go`,
+// `burstobserver.go`, `infra/conf/observatory.go`, `router_strategy.go` v26.9.30).
+
+const HELP_SUBJECT_SELECTORS: HelpText = HelpText::new(
+    "Outbound tag prefixes, one per line: every outbound whose tag starts with one of them is \
+     probed (\"proxy\" matches proxy-a and proxy-b). With an empty list BurstObservatory does not \
+     run at all. The results are used by balancers with the leastLoad / leastPing strategy \
+     (Routing → Balancers).",
+    "Префиксы тегов outbound, по одному на строку: проверяется каждый outbound, тег которого \
+     начинается с одного из них (\"proxy\" подходит к proxy-a и proxy-b). При пустом списке \
+     BurstObservatory не запускается вовсе. Результаты используют балансировщики со стратегией \
+     leastLoad / leastPing (Routing → Balancers).",
+);
+const HELP_PING_CONFIG: HelpText = HelpText::new(
+    "Probe settings. Xray-core requires this object: without it the config fails to load \
+     (\"BurstObservatory requires a valid pingConfig\"); an empty {} is enough, every field has a \
+     default. Probing runs in rounds of interval × sampling: within a round each outbound is \
+     probed sampling times at random moments; one extra round runs right after start.",
+    "Настройки проверок. Xray-core требует этот объект: без него конфиг не загружается \
+     («BurstObservatory requires a valid pingConfig»); достаточно пустого {}, у каждого поля есть \
+     значение по умолчанию. Проверки идут кругами длиной interval × sampling: за круг каждый \
+     outbound проверяется sampling раз в случайные моменты; сразу после запуска выполняется ещё \
+     один круг.",
+);
+const HELP_DESTINATION: HelpText = HelpText::new(
+    "URL requested through each selected outbound; the time to the response (with GET — until \
+     the body is read) is the latency. Any HTTP response counts as success — the status code is \
+     not checked and redirects are not followed. Empty = \
+     https://connectivitycheck.gstatic.com/generate_204.",
+    "URL, который запрашивается через каждый выбранный outbound; время до ответа (с GET — до \
+     конца чтения тела) — задержка. Успехом считается любой HTTP-ответ — код ответа не \
+     проверяется, перенаправления не выполняются. Пусто — \
+     https://connectivitycheck.gstatic.com/generate_204.",
+);
+const HELP_CONNECTIVITY: HelpText = HelpText::new(
+    "URL requested directly from the server, not through an outbound, each time a probe fails. \
+     If it fails too, the network is considered down and the failure is not counted against the \
+     outbound. Empty = no check: every failed probe counts.",
+    "URL, который запрашивается напрямую с сервера, а не через outbound, при каждой неудачной \
+     проверке. Если он тоже недоступен, сеть считается упавшей, и неудача outbound не \
+     засчитывается. Пусто — без проверки: засчитывается каждая неудачная проверка.",
+);
+const HELP_INTERVAL: HelpText = HelpText::new(
+    "Average time between two probes of one outbound, a number with a unit: ns, us, ms, s, m, h \
+     (e.g. 30s, 1m); a bare number is rejected by Xray-core. Values below 10s are raised to 10s. \
+     Empty or 0 = 1m.",
+    "Среднее время между двумя проверками одного outbound — число с единицей: ns, us, ms, s, m, h \
+     (например, 30s, 1m); число без единицы Xray-core отвергает. Значения меньше 10s \
+     поднимаются до 10s. Пусто или 0 — 1m.",
+);
+const HELP_SAMPLING: HelpText = HelpText::new(
+    "How many latest results of each outbound are kept for its statistics (average, deviation, \
+     failures) — also the number of probes per round. Results older than 2 × interval × sampling \
+     are ignored. Unchecked or 0 = 10.",
+    "Сколько последних результатов каждого outbound хранится для его статистики (среднее, \
+     отклонение, неудачи) — это же число проверок за круг. Результаты старше \
+     2 × interval × sampling не учитываются. Без отметки или 0 — 10.",
+);
+const HELP_TIMEOUT: HelpText = HelpText::new(
+    "Time limit of one probe and of the connectivity check, a number with a unit (e.g. 5s); a \
+     probe that runs out of time counts as failed. Empty or 0 = 5s.",
+    "Предельное время одной проверки и проверки connectivity — число с единицей (например, 5s); \
+     проверка, не уложившаяся в него, считается неудачной. Пусто или 0 — 5s.",
+);
+const HELP_HTTP_METHOD: HelpText = HelpText::new(
+    "HTTP method of the probe requests (destination and connectivity). HEAD (default) fetches \
+     only the headers; GET also downloads the body, and its download time counts toward the \
+     latency.",
+    "HTTP-метод запросов проверки (destination и connectivity). HEAD (по умолчанию) получает \
+     только заголовки; GET скачивает и тело, и время его загрузки входит в задержку.",
+);
+
 /// Renders the Burst Observatory page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     service.tick_burst_observatory_page_status();
+    super::show_help_dialog(ui);
 
     ui.heading("BurstObservatory");
     ui.add_space(8.0);
@@ -147,7 +224,6 @@ fn show_state_message(ui: &mut Ui, state: BurstObservatoryPageState) {
         | BurstObservatoryPageState::Saved => WARN_COLOR,
         BurstObservatoryPageState::BurstObservatorySectionMissing
         | BurstObservatoryPageState::NoSubjectSelectors
-        | BurstObservatoryPageState::NoPingConfigurations
         | BurstObservatoryPageState::ConfigurationLoaded
         | BurstObservatoryPageState::EditMode => MUTED_COLOR,
         BurstObservatoryPageState::Saving => Color32::from_rgb(100, 140, 200),
@@ -235,7 +311,11 @@ fn show_ping_configurations(ui: &mut Ui, summary: &BurstObservatorySummary) {
     ui.strong("Ping configurations");
     ui.add_space(4.0);
     let Some(config) = summary.ping_config.as_ref() else {
-        muted(ui, "No ping configurations configured.");
+        ui.label(
+            RichText::new("pingConfig is missing — required by Xray-core.")
+                .size(14.0)
+                .color(ERROR_COLOR),
+        );
         return;
     };
 
@@ -388,7 +468,10 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
         return;
     };
 
-    ui.strong(format!("Subject selectors ({})", draft.subject_selectors.len()));
+    ui.horizontal(|ui| {
+        super::help_button(ui, "subjectSelector", HELP_SUBJECT_SELECTORS);
+        ui.strong(format!("Subject selectors ({})", draft.subject_selectors.len()));
+    });
     ui.add_space(4.0);
     super::persistent_list_text_edit(
         ui,
@@ -407,7 +490,13 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
     ui.separator();
 
     let mut enabled = draft.ping_config.is_some();
-    if ui.checkbox(&mut enabled, "pingConfig").changed() {
+    let toggled = ui
+        .horizontal(|ui| {
+            super::help_button(ui, "pingConfig", HELP_PING_CONFIG);
+            ui.checkbox(&mut enabled, "pingConfig").changed()
+        })
+        .inner;
+    if toggled {
         draft.ping_config = if enabled {
             Some(draft.ping_config.take().unwrap_or_else(BurstPingConfigEntry::blank))
         } else {
@@ -415,6 +504,14 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
         };
     }
     let Some(ping_config) = draft.ping_config.as_mut() else {
+        ui.label(
+            RichText::new(
+                "Required: Xray-core refuses to load burstObservatory without pingConfig. Save \
+                 stays blocked until it is enabled.",
+            )
+            .size(12.0)
+            .color(ERROR_COLOR),
+        );
         return;
     };
 
@@ -426,27 +523,50 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
                 "destination",
                 &mut ping_config.destination,
                 "https://connectivitycheck.gstatic.com/generate_204 (default)",
+                HELP_DESTINATION,
             );
             optional_text_row(
                 ui,
                 "connectivity",
                 &mut ping_config.connectivity,
                 "(default: no check)",
+                HELP_CONNECTIVITY,
             );
-            optional_text_row(ui, "interval", &mut ping_config.interval, "1m (default, min 10s)");
-            optional_u64_row(ui, "sampling", &mut ping_config.sampling, 10, "burst_ping_sampling");
-            optional_text_row(ui, "timeout", &mut ping_config.timeout, "5s (default)");
+            optional_text_row(
+                ui,
+                "interval",
+                &mut ping_config.interval,
+                "1m (default, min 10s)",
+                HELP_INTERVAL,
+            );
+            optional_u64_row(
+                ui,
+                "sampling",
+                &mut ping_config.sampling,
+                10,
+                "burst_ping_sampling",
+                HELP_SAMPLING,
+            );
+            optional_text_row(ui, "timeout", &mut ping_config.timeout, "5s (default)", HELP_TIMEOUT);
 
             ui.horizontal(|ui| {
+                super::help_button(ui, "httpMethod", HELP_HTTP_METHOD);
                 ui.label("httpMethod");
                 http_method_combo(ui, "burst_ping_http_method", &mut ping_config.http_method);
             });
         });
 }
 
-fn optional_text_row(ui: &mut Ui, label: &str, value: &mut Option<String>, hint: &str) {
+fn optional_text_row(
+    ui: &mut Ui,
+    label: &'static str,
+    value: &mut Option<String>,
+    hint: &str,
+    help: HelpText,
+) {
     let mut text = value.clone().unwrap_or_default();
     ui.horizontal(|ui| {
+        super::help_button(ui, label, help);
         ui.label(label);
         if ui
             .add(TextEdit::singleline(&mut text).desired_width(280.0).hint_text(hint))
@@ -464,15 +584,17 @@ fn optional_text_row(ui: &mut Ui, label: &str, value: &mut Option<String>, hint:
 
 fn optional_u64_row(
     ui: &mut Ui,
-    label: &str,
+    label: &'static str,
     value: &mut Option<u64>,
     default: u64,
     id: impl std::hash::Hash + std::fmt::Debug,
+    help: HelpText,
 ) {
     let mut enabled = value.is_some();
     let mut number = value.unwrap_or(default);
     ui.push_id(id, |ui| {
         ui.horizontal(|ui| {
+            super::help_button(ui, label, help);
             ui.checkbox(&mut enabled, format!("{label} (default {default})"));
             ui.add_enabled(enabled, egui::DragValue::new(&mut number));
         });

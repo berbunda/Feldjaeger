@@ -9635,3 +9635,94 @@ clippy lib 65 (без изменений). GUI в запущенном прил�
 
 Страница вызывает `show_help_dialog`, тест `pages_with_help_buttons_render_the_help_dialog`
 проверяет и её. Итог: **1391 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не проверялся.
+
+# 116	Pop-up help: BurstObservatory на двух языках (Roadmap §4.4) (0.5.56-0)
+
+## 116.1	Тексты (`gui/pages/burst_observatory.rs`, 8 текстов)
+
+Как и у Observatory (§115), справка есть только в режиме редактирования. Источник поведения и
+умолчаний — ядро v26.9.30:
+- `HELP_SUBJECT_SELECTORS` — префиксы тегов (`outbound.Manager.Select`); при пустом списке
+  `burstobserver.go` `Start()` планировщик не запускает.
+- `HELP_PING_CONFIG` — `infra/conf/observatory.go`: `BurstObservatoryConfig.Build()` без
+  `pingConfig` возвращает ошибку «BurstObservatory requires a valid pingConfig», пустого `{}`
+  достаточно. `healthping.go` `StartScheduler`: период тикера = `interval × sampling`, в каждом
+  периоде `doCheck` ставит `sampling` проверок на каждый outbound в случайные моменты
+  (`dice.RollInt63n`), плюс один немедленный круг при старте (`Check`).
+- `HELP_DESTINATION` — `ping.go` `MeasureDelay`: запрос через `tagged.Dialer`, код ответа не
+  проверяется, перенаправления не выполняются; при `GET` тело читается до конца и входит в
+  задержку. Умолчание `https://connectivitycheck.gstatic.com/generate_204`.
+- `HELP_CONNECTIVITY` — `checkConnectivity()`: прямой HTTP-клиент без outbound, вызывается только
+  после неудачной проверки; если он тоже не прошёл, в канал уходит `0`, и `doCheck` результат не
+  записывает (`rtt.value > 0`). Пусто — каждая неудача записывается как `rttFailed`.
+- `HELP_INTERVAL` — `NewHealthPing`: 0 → 1 мин, меньше 10 с → 10 с (с предупреждением в логе
+  ядра); формат — строка `time.ParseDuration` (`cfgcommon/duration`).
+- `HELP_SAMPLING` — `≤ 0` → 10; это и ёмкость кольцевого буфера результатов
+  (`HealthPingRTTS`), и число проверок за круг; срок годности результата —
+  `2 × interval × sampling` (`PutResult`).
+- `HELP_TIMEOUT` — `≤ 0` → 5 с; тот же таймаут у проверки `connectivity`.
+- `HELP_HTTP_METHOD` — пусто → `HEAD`; метод общий для `destination` и `connectivity`.
+
+## 116.2	Форма
+
+`optional_text_row` и `optional_u64_row` получили параметр `help` (метка — `&'static str`).
+Флажок `pingConfig` и строка `httpMethod` получили кнопку справки; заголовок «Subject
+selectors (N)» — кнопку с заголовком окна `subjectSelector`.
+
+## 116.3	Найдено: `pingConfig` обязателен для ядра
+
+Модуль `burst_observatory_settings.rs` (§55) намеренно разрешал сохранить `burstObservatory` без
+`pingConfig`, ссылаясь на документацию («у всех полей есть умолчания»). Но `Build()` ядра такой
+конфиг отвергает, и ошибку ловил только `xray run -test` после записи. Справка предупреждает об
+этом; исправлено следующей версией (§117).
+
+## 116.4	Итог
+
+Страница вызывает `show_help_dialog`, тест `pages_with_help_buttons_render_the_help_dialog`
+проверяет и её. Итог: **1391 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном
+приложении не проверялся.
+
+# 117	Багфикс: BurstObservatory без `pingConfig` (Roadmap §4.5) (0.5.56-1)
+
+## 117.1	Проблема
+
+`infra/conf/xray.go` (v26.9.30) вызывает `BurstObservatoryConfig.Build()` для любого не-`null`
+значения `burstObservatory`, а `Build()` при `pingConfig == nil` возвращает «BurstObservatory
+requires a valid pingConfig» — весь конфиг не загружается. Проверено `xray run -test` 26.9.30
+(`xray-bin/xray.exe`) на конфиге с одним freedom-outbound `proxy-a`:
+
+| `burstObservatory` | результат |
+|---|---|
+| `{}` | отказ |
+| `{"subjectSelector":["proxy"]}` | отказ |
+| `{"subjectSelector":["proxy"],"pingConfig":null}` | отказ |
+| `{"subjectSelector":["proxy"],"pingConfig":{}}` | OK |
+| `{"pingConfig":{}}` | OK |
+| `null` | OK (секция пропускается) |
+
+Feldjäger (§55) считал `pingConfig` необязательным: Save без него проходил, а Save на сервере без
+секции писал `"burstObservatory": {}` — черновик брался из `BurstObservatorySettings::defaults()`
+с `ping_config: None`. Read-only страница показывала отсутствие `pingConfig` серым
+информационным состоянием.
+
+## 117.2	Исправление
+
+- `validate_burst_observatory_settings` требует `pingConfig` (ошибка объясняет, что пустого
+  достаточно). Проверка общая для Save, Preview changes и `update_burst_observatory_settings`.
+- `BurstObservatorySettings::into_edit_draft` — черновик **новой** секции
+  (`section_present == false`) начинается с пустого `pingConfig`, поэтому Save сразу пишет
+  `{"pingConfig": {}}`, который ядро принимает. Существующая секция без `pingConfig` молча не
+  меняется: Save блокируется с объяснением, под снятым флажком `pingConfig` — красная подсказка.
+- Read-only: состояние `NoPingConfigurations` получило сообщение об ошибке и красный цвет и
+  проверяется раньше `NoSubjectSelectors` (секция `{}` ломает конфиг, а не просто бездействует).
+  Предупреждение summary «`pingConfig` is missing» теперь объясняет последствия, `null`
+  трактуется как отсутствие (как в ядре), а не как «unsupported type».
+
+## 117.3	Итог
+
+Тесты: `validation_requires_ping_config`, `edit_draft_of_new_section_starts_with_ping_config`
+(новые), `validation_accepts_blank_ping_config_and_full_settings` и
+`validation_accepts_empty_selectors_with_ping_config` (переписаны), случаи `pingConfig: null` и
+«нет ни селекторов, ни `pingConfig`» в существующих тестах summary / состояния страницы. Итог:
+**1393 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не
+проверялся.
