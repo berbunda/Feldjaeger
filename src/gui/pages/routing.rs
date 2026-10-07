@@ -15,11 +15,181 @@ use crate::app::{
     ApplicationService, MISSING_FIELD, RoutingPageState, RoutingSortColumn, display_routing_list,
     routing_general_display, routing_rule_row_display,
 };
-use crate::gui::pages::{persistent_list_text_edit, persistent_multiline_list_row};
+use crate::gui::pages::{HelpText, field_label, help_button, help_multiline_list_row, persistent_list_text_edit};
 use crate::xray::{
     BalancerEntry, BalancerStrategyType, CostEntry, DomainStrategy, NetworkKind, RoutingRuleEntry,
     RoutingRuleSummary, RoutingSummary, StrategyEntry, WebhookEntry,
 };
+
+// ─── Field help text (Roadmap §4.4) ──────────────────────────────────────────
+//
+// Condensed from https://xtls.github.io/config/routing.html and checked against Xray-core
+// (`infra/conf/router.go`, `router_strategy.go`; `app/router/condition.go` for attrs).
+
+const HELP_DOMAIN_STRATEGY: HelpText = HelpText::new(
+    "How a domain target meets ip rules. AsIs (default) — never resolved; IPIfNonMatch — if no \
+     rule matched the domain, it is resolved and the rules are checked again with its IPs; \
+     IPOnDemand — resolved as soon as a rule with an ip condition is reached.",
+    "Как доменный адрес сопоставляется с правилами по ip. AsIs (по умолчанию) — никогда не \
+     разрешается; IPIfNonMatch — если ни одно правило не совпало с доменом, он разрешается и \
+     правила проверяются заново по его IP; IPOnDemand — разрешается, как только встречается \
+     правило с условием ip.",
+);
+
+// Rule: conditions. All conditions set in one rule must match together.
+const HELP_RULE_TAG: HelpText = HelpText::new(
+    "Optional name of the rule; when it matches, Xray logs it at Info level. Empty = unnamed.",
+    "Необязательное имя правила; при совпадении Xray пишет его в журнал на уровне Info. Пусто — \
+     без имени.",
+);
+const HELP_RULE_DOMAIN: HelpText = HelpText::new(
+    "Target domains, one per line: plain text = substring; domain: — the domain and its \
+     subdomains; full: — exact; keyword: — substring; regexp: — regular expression; dotless: — \
+     names without dots; geosite:… and ext:file:tag — lists. All conditions of a rule must match \
+     together.",
+    "Целевые домены, по одному на строку: обычный текст — подстрока; domain: — домен и его \
+     поддомены; full: — точное совпадение; keyword: — подстрока; regexp: — регулярное выражение; \
+     dotless: — имена без точек; geosite:… и ext:file:tag — списки. Все условия правила должны \
+     совпасть одновременно.",
+);
+const HELP_RULE_IP: HelpText = HelpText::new(
+    "Target IPs, one per line: an IP or CIDR, geoip:cn, geoip:private, ext:file:tag; a leading ! \
+     inverts an entry. A domain target needs routing domainStrategy to be matched here.",
+    "Целевые IP, по одному на строку: IP или CIDR, geoip:cn, geoip:private, ext:file:tag; ! в \
+     начале инвертирует запись. Доменный адрес сопоставляется здесь только при подходящем \
+     domainStrategy.",
+);
+const HELP_RULE_PORT: HelpText = HelpText::new(
+    "Target port: a number, a range a-b or a comma list such as 53,443,1000-2000.",
+    "Порт назначения: число, диапазон a-b или список через запятую вроде 53,443,1000-2000.",
+);
+const HELP_RULE_SOURCE_PORT: HelpText = HelpText::new(
+    "Client's source port, same syntax as port.",
+    "Исходный порт клиента, тот же синтаксис, что у port.",
+);
+const HELP_RULE_LOCAL_PORT: HelpText = HelpText::new(
+    "Local port the inbound accepted the connection on, same syntax as port.",
+    "Локальный порт, на котором inbound принял подключение, тот же синтаксис, что у port.",
+);
+const HELP_RULE_NETWORK: HelpText = HelpText::new(
+    "tcp, udp or tcp,udp; (any) = no network condition.",
+    "tcp, udp или tcp,udp; (any) — без условия по сети.",
+);
+const HELP_RULE_SOURCE_IP: HelpText = HelpText::new(
+    "Client's source IP, same syntax as ip (CIDR, geoip:…, !).",
+    "Исходный IP клиента, тот же синтаксис, что у ip (CIDR, geoip:…, !).",
+);
+const HELP_RULE_LOCAL_IP: HelpText = HelpText::new(
+    "Local IP the inbound accepted the connection on, same syntax as ip.",
+    "Локальный IP, на котором inbound принял подключение, тот же синтаксис, что у ip.",
+);
+const HELP_RULE_USER: HelpText = HelpText::new(
+    "User emails, one per line; regexp: for a regular expression.",
+    "Email пользователей, по одному на строку; regexp: — регулярное выражение.",
+);
+const HELP_RULE_VLESS_ROUTE: HelpText = HelpText::new(
+    "Matches the route number a VLESS client puts into bytes 7–8 of its UUID, in port syntax \
+     (e.g. 1000-2000) — one server user can be routed differently per client config.",
+    "Совпадает с номером маршрута, который клиент VLESS записывает в байты 7–8 своего UUID, в \
+     синтаксисе портов (например, 1000-2000), — один пользователь сервера может маршрутизироваться \
+     по-разному в зависимости от конфига клиента.",
+);
+const HELP_RULE_INBOUND_TAG: HelpText = HelpText::new(
+    "Tags of the inbounds the traffic came from (or the tag of the built-in DNS / a Loopback \
+     outbound), one per line.",
+    "Теги inbound, из которых пришёл трафик (или тег встроенного DNS / Loopback outbound), по \
+     одному на строку.",
+);
+const HELP_RULE_PROTOCOL: HelpText = HelpText::new(
+    "Protocol detected by sniffing: http, tls, quic, bittorrent. Needs sniffing on the inbound.",
+    "Протокол, определённый sniffing: http, tls, quic, bittorrent. Требует sniffing на inbound.",
+);
+const HELP_RULE_ATTRS: HelpText = HelpText::new(
+    "HTTP request headers to match (e.g. from an HTTP inbound): header name (case does not \
+     matter; :method and :path work too) → regular expression for its value. All pairs must \
+     match.",
+    "Заголовки HTTP-запроса для сопоставления (например, от HTTP inbound): имя заголовка (регистр \
+     не важен; работают и :method, :path) → регулярное выражение для значения. Должны совпасть \
+     все пары.",
+);
+const HELP_RULE_PROCESS: HelpText = HelpText::new(
+    "Local process that opened the connection (traffic from this machine, e.g. through TUN): a \
+     name, an absolute path or a folder; self/ and xray/ refer to Xray itself.",
+    "Локальный процесс, открывший подключение (трафик с этой машины, например через TUN): имя, \
+     абсолютный путь или папка; self/ и xray/ обозначают сам Xray.",
+);
+const HELP_RULE_LOCAL_OS: HelpText = HelpText::new(
+    "The rule applies only when Xray runs on one of these systems (linux, windows, darwin, \
+     android, ios, …) — handy for one config shared between devices.",
+    "Правило действует, только если Xray запущен на одной из этих систем (linux, windows, darwin, \
+     android, ios, …), — удобно для одного конфига на несколько устройств.",
+);
+
+// Rule: target.
+const HELP_RULE_OUTBOUND_TAG: HelpText = HelpText::new(
+    "Outbound the matching traffic goes to. Set this or balancerTag; outboundTag wins when both \
+     are set.",
+    "Outbound, в который уходит совпавший трафик. Задайте его или balancerTag; если заданы оба, \
+     действует outboundTag.",
+);
+const HELP_RULE_BALANCER_TAG: HelpText = HelpText::new(
+    "Balancer (below) that picks the outbound for the matching traffic; used when outboundTag is \
+     empty.",
+    "Балансировщик (ниже), выбирающий outbound для совпавшего трафика; используется, если \
+     outboundTag пуст.",
+);
+const HELP_RULE_WEBHOOK: HelpText = HelpText::new(
+    "Sends an HTTP POST notification when the rule matches.",
+    "Отправляет уведомление HTTP POST при совпадении правила.",
+);
+const HELP_WEBHOOK_URL: HelpText = HelpText::new(
+    "Address the notification is POSTed to.",
+    "Адрес, на который отправляется уведомление.",
+);
+const HELP_WEBHOOK_DEDUPLICATION: HelpText = HelpText::new(
+    "Seconds during which the same notification is not sent again; unchecked = every match.",
+    "Сколько секунд одинаковое уведомление не отправляется повторно; без отметки — при каждом \
+     совпадении.",
+);
+const HELP_WEBHOOK_HEADERS: HelpText = HelpText::new(
+    "Extra HTTP headers of the notification request (e.g. Authorization).",
+    "Дополнительные HTTP-заголовки запроса уведомления (например, Authorization).",
+);
+
+// Balancers.
+const HELP_BALANCER_TAG: HelpText = HelpText::new(
+    "Name of the balancer; rules refer to it with balancerTag.",
+    "Имя балансировщика; правила ссылаются на него через balancerTag.",
+);
+const HELP_BALANCER_SELECTOR: HelpText = HelpText::new(
+    "Outbound tag prefixes, one per line: every outbound whose tag starts with one of them is a \
+     candidate.",
+    "Префиксы тегов outbound, по одному на строку: кандидатом становится каждый outbound, чей тег \
+     начинается с одного из них.",
+);
+const HELP_BALANCER_FALLBACK_TAG: HelpText = HelpText::new(
+    "Outbound used when no candidate is available (e.g. all failed the observatory checks).",
+    "Outbound, который используется, когда нет доступных кандидатов (например, все не прошли \
+     проверки observatory).",
+);
+const HELP_BALANCER_STRATEGY: HelpText = HelpText::new(
+    "How a candidate is picked: random (default); roundRobin — in turn; leastPing — lowest \
+     latency; leastLoad — most stable. leastPing and leastLoad need Observatory or \
+     BurstObservatory.",
+    "Как выбирается кандидат: random (по умолчанию); roundRobin — по очереди; leastPing — с \
+     наименьшей задержкой; leastLoad — самый стабильный. leastPing и leastLoad требуют \
+     Observatory или BurstObservatory.",
+);
+const HELP_LEAST_LOAD_SETTINGS: HelpText = HelpText::new(
+    "Tuning of leastLoad: expected — how many of the best outbounds to spread the traffic over; \
+     maxRTT — slower outbounds are skipped (e.g. 1s); tolerance — accepted failure rate (0.01 = \
+     1%); baselines — RTT deviation steps used to group outbounds (e.g. 100ms); costs — weights \
+     that make some outbounds (tag or regexp) look slower or faster.",
+    "Настройка leastLoad: expected — между сколькими лучшими outbound распределять трафик; maxRTT \
+     — более медленные outbound пропускаются (например, 1s); tolerance — допустимая доля сбоев \
+     (0.01 = 1%); baselines — шаги отклонения RTT для группировки outbound (например, 100ms); \
+     costs — веса, делающие отдельные outbound (по тегу или regexp) медленнее или быстрее.",
+);
 
 const MUTED_COLOR: Color32 = Color32::from_rgb(140, 140, 140);
 const ERROR_COLOR: Color32 = Color32::from_rgb(200, 60, 60);
@@ -33,6 +203,7 @@ const KNOWN_PROTOCOLS: &[&str] = &["http", "tls", "quic", "bittorrent"];
 /// Renders the Routing page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     service.tick_routing_page_status();
+    super::show_help_dialog(ui);
 
     ui.heading("Routing");
     ui.add_space(8.0);
@@ -416,7 +587,7 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
     ui.strong("General information");
     ui.add_space(4.0);
     ui.horizontal(|ui| {
-        ui.label("domainStrategy");
+        field_label(ui, "domainStrategy", HELP_DOMAIN_STRATEGY);
         domain_strategy_combo(ui, "routing_domain_strategy", &mut draft.domain_strategy);
     });
     ui.label(
@@ -520,57 +691,60 @@ fn show_rule_edit_form(
     egui::CollapsingHeader::new(rule_title(rule))
         .id_salt(("routing_rule_edit", index))
         .show(ui, |ui| {
-            optional_text_row(ui, "ruleTag", &mut rule.rule_tag, "my-rule");
+            optional_text_row(ui, "ruleTag", HELP_RULE_TAG, &mut rule.rule_tag, "my-rule");
 
             ui.add_space(6.0);
             ui.label(RichText::new("Matching Conditions").strong());
-            persistent_multiline_list_row(ui, "domain (one per line)", &mut rule.domain, ("routing_rule_domain", index));
-            persistent_multiline_list_row(ui, "ip (one per line)", &mut rule.ip, ("routing_rule_ip", index));
-            optional_text_row(ui, "port", &mut rule.port, "443 or 1000-2000");
-            optional_text_row(ui, "sourcePort", &mut rule.source_port, "1000-2000");
-            optional_text_row(ui, "localPort", &mut rule.local_port, "1000-2000");
+            help_multiline_list_row(ui, "domain (one per line)", HELP_RULE_DOMAIN, &mut rule.domain, ("routing_rule_domain", index));
+            help_multiline_list_row(ui, "ip (one per line)", HELP_RULE_IP, &mut rule.ip, ("routing_rule_ip", index));
+            optional_text_row(ui, "port", HELP_RULE_PORT, &mut rule.port, "443 or 1000-2000");
+            optional_text_row(ui, "sourcePort", HELP_RULE_SOURCE_PORT, &mut rule.source_port, "1000-2000");
+            optional_text_row(ui, "localPort", HELP_RULE_LOCAL_PORT, &mut rule.local_port, "1000-2000");
             ui.horizontal(|ui| {
-                ui.label("network");
+                field_label(ui, "network", HELP_RULE_NETWORK);
                 optional_network_combo(ui, ("routing_rule_network", index), &mut rule.network);
             });
-            persistent_multiline_list_row(ui, "sourceIP (one per line)", &mut rule.source_ip, ("routing_rule_source_ip", index));
-            persistent_multiline_list_row(ui, "localIP (one per line)", &mut rule.local_ip, ("routing_rule_local_ip", index));
-            persistent_multiline_list_row(ui, "user (one per line)", &mut rule.user, ("routing_rule_user", index));
-            optional_text_row(ui, "vlessRoute", &mut rule.vless_route, "0-1");
-            persistent_multiline_list_row(
+            help_multiline_list_row(ui, "sourceIP (one per line)", HELP_RULE_SOURCE_IP, &mut rule.source_ip, ("routing_rule_source_ip", index));
+            help_multiline_list_row(ui, "localIP (one per line)", HELP_RULE_LOCAL_IP, &mut rule.local_ip, ("routing_rule_local_ip", index));
+            help_multiline_list_row(ui, "user (one per line)", HELP_RULE_USER, &mut rule.user, ("routing_rule_user", index));
+            optional_text_row(ui, "vlessRoute", HELP_RULE_VLESS_ROUTE, &mut rule.vless_route, "0-1");
+            help_multiline_list_row(
                 ui,
                 "inboundTag (one per line)",
+                HELP_RULE_INBOUND_TAG,
                 &mut rule.inbound_tag,
                 ("routing_rule_inbound_tag", index),
             );
 
             ui.add_space(4.0);
-            ui.label("protocol");
+            field_label(ui, "protocol", HELP_RULE_PROTOCOL);
             protocol_checkboxes(ui, index, &mut rule.protocol);
 
             ui.add_space(4.0);
-            ui.label("attrs (HTTP header match)");
+            field_label(ui, "attrs (HTTP header match)", HELP_RULE_ATTRS);
             ui.push_id(("routing_rule_attrs", index), |ui| {
                 pairs_editor(ui, &mut rule.attrs);
             });
 
-            persistent_multiline_list_row(
+            help_multiline_list_row(
                 ui,
                 "process (one per line)",
+                HELP_RULE_PROCESS,
                 &mut rule.process,
                 ("routing_rule_process", index),
             );
-            persistent_multiline_list_row(
+            help_multiline_list_row(
                 ui,
                 "localOS (one per line, e.g. windows/linux/darwin/android/ios)",
+                HELP_RULE_LOCAL_OS,
                 &mut rule.local_os,
                 ("routing_rule_local_os", index),
             );
 
             ui.add_space(8.0);
             ui.label(RichText::new("Target").strong());
-            optional_text_row(ui, "outboundTag", &mut rule.outbound_tag, "proxy");
-            optional_text_row(ui, "balancerTag", &mut rule.balancer_tag, "lb");
+            optional_text_row(ui, "outboundTag", HELP_RULE_OUTBOUND_TAG, &mut rule.outbound_tag, "proxy");
+            optional_text_row(ui, "balancerTag", HELP_RULE_BALANCER_TAG, &mut rule.balancer_tag, "lb");
 
             ui.add_space(8.0);
             show_webhook_edit(ui, rule, index);
@@ -580,7 +754,7 @@ fn show_rule_edit_form(
 fn show_webhook_edit(ui: &mut Ui, rule: &mut RoutingRuleEntry, index: usize) {
     ui.push_id(("routing_rule_webhook", index), |ui| {
         let mut enabled = rule.webhook.is_some();
-        if ui.checkbox(&mut enabled, "webhook").changed() {
+        if super::help_checkbox(ui, "webhook", HELP_RULE_WEBHOOK, &mut enabled) {
             rule.webhook = if enabled {
                 Some(rule.webhook.take().unwrap_or_else(WebhookEntry::blank))
             } else {
@@ -594,15 +768,15 @@ fn show_webhook_edit(ui: &mut Ui, rule: &mut RoutingRuleEntry, index: usize) {
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("url");
+                    field_label(ui, "url", HELP_WEBHOOK_URL);
                     ui.add(
                         TextEdit::singleline(&mut webhook.url)
                             .desired_width(260.0)
                             .hint_text("https://example.com/hook"),
                     );
                 });
-                optional_u64_row(ui, "deduplication (seconds)", &mut webhook.deduplication, "routing_webhook_dedup");
-                ui.label("headers");
+                optional_u64_row(ui, "deduplication (seconds)", HELP_WEBHOOK_DEDUPLICATION, &mut webhook.deduplication, "routing_webhook_dedup");
+                field_label(ui, "headers", HELP_WEBHOOK_HEADERS);
                 pairs_editor(ui, &mut webhook.headers);
             });
     });
@@ -631,20 +805,21 @@ fn show_balancer_edit_form(
         .id_salt(("routing_balancer_edit", index))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label("tag");
+                field_label(ui, "tag", HELP_BALANCER_TAG);
                 ui.add(
                     TextEdit::singleline(&mut balancer.tag)
                         .desired_width(180.0)
                         .hint_text("lb"),
                 );
             });
-            persistent_multiline_list_row(
+            help_multiline_list_row(
                 ui,
                 "selector (one prefix per line)",
+                HELP_BALANCER_SELECTOR,
                 &mut balancer.selector,
                 ("routing_balancer_selector", index),
             );
-            optional_text_row(ui, "fallbackTag", &mut balancer.fallback_tag, "direct");
+            optional_text_row(ui, "fallbackTag", HELP_BALANCER_FALLBACK_TAG, &mut balancer.fallback_tag, "direct");
 
             ui.add_space(6.0);
             show_strategy_edit(ui, balancer, index);
@@ -654,7 +829,7 @@ fn show_balancer_edit_form(
 fn show_strategy_edit(ui: &mut Ui, balancer: &mut BalancerEntry, index: usize) {
     ui.push_id(("routing_balancer_strategy", index), |ui| {
         let mut enabled = balancer.strategy.is_some();
-        if ui.checkbox(&mut enabled, "strategy (default: random)").changed() {
+        if super::help_checkbox(ui, "strategy (default: random)", HELP_BALANCER_STRATEGY, &mut enabled) {
             balancer.strategy = if enabled {
                 Some(balancer.strategy.take().unwrap_or_else(StrategyEntry::blank))
             } else {
@@ -668,15 +843,12 @@ fn show_strategy_edit(ui: &mut Ui, balancer: &mut BalancerEntry, index: usize) {
             .default_open(true)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("type");
+                    field_label(ui, "type", HELP_BALANCER_STRATEGY);
                     strategy_type_combo(ui, "routing_balancer_strategy_type", &mut strategy.strategy_type);
                 });
 
                 let mut settings_enabled = strategy.settings.is_some();
-                if ui
-                    .checkbox(&mut settings_enabled, "settings (used by leastLoad)")
-                    .changed()
-                {
+                if super::help_checkbox(ui, "settings (used by leastLoad)", HELP_LEAST_LOAD_SETTINGS, &mut settings_enabled) {
                     strategy.settings = if settings_enabled {
                         Some(strategy.settings.take().unwrap_or_default())
                     } else {
@@ -689,18 +861,19 @@ fn show_strategy_edit(ui: &mut Ui, balancer: &mut BalancerEntry, index: usize) {
                 egui::CollapsingHeader::new("leastLoad settings")
                     .default_open(true)
                     .show(ui, |ui| {
-                        optional_i64_row(ui, "expected", &mut settings.expected, "routing_strategy_expected");
-                        optional_text_row(ui, "maxRTT", &mut settings.max_rtt, "1s");
-                        optional_f64_row(ui, "tolerance", &mut settings.tolerance, "routing_strategy_tolerance");
-                        persistent_multiline_list_row(
+                        optional_i64_row(ui, "expected", HELP_LEAST_LOAD_SETTINGS, &mut settings.expected, "routing_strategy_expected");
+                        optional_text_row(ui, "maxRTT", HELP_LEAST_LOAD_SETTINGS, &mut settings.max_rtt, "1s");
+                        optional_f64_row(ui, "tolerance", HELP_LEAST_LOAD_SETTINGS, &mut settings.tolerance, "routing_strategy_tolerance");
+                        help_multiline_list_row(
                             ui,
                             "baselines (one duration per line)",
+                            HELP_LEAST_LOAD_SETTINGS,
                             &mut settings.baselines,
                             "routing_strategy_baselines",
                         );
 
                         ui.add_space(4.0);
-                        ui.label("costs");
+                        field_label(ui, "costs", HELP_LEAST_LOAD_SETTINGS);
                         let mut remove_cost: Option<usize> = None;
                         for (cost_index, cost) in settings.costs.iter_mut().enumerate() {
                             ui.horizontal(|ui| {
@@ -783,10 +956,10 @@ fn pairs_editor(ui: &mut Ui, pairs: &mut Vec<(String, String)>) {
     }
 }
 
-fn optional_text_row(ui: &mut Ui, label: &str, value: &mut Option<String>, hint: &str) {
+fn optional_text_row(ui: &mut Ui, label: &'static str, help: HelpText, value: &mut Option<String>, hint: &str) {
     let mut text = value.clone().unwrap_or_default();
     ui.horizontal(|ui| {
-        ui.label(label);
+        field_label(ui, label, help);
         if ui
             .add(TextEdit::singleline(&mut text).desired_width(220.0).hint_text(hint))
             .changed()
@@ -801,11 +974,18 @@ fn optional_text_row(ui: &mut Ui, label: &str, value: &mut Option<String>, hint:
     });
 }
 
-fn optional_i64_row(ui: &mut Ui, label: &str, value: &mut Option<i64>, id: impl std::hash::Hash + std::fmt::Debug) {
+fn optional_i64_row(
+    ui: &mut Ui,
+    label: &'static str,
+    help: HelpText,
+    value: &mut Option<i64>,
+    id: impl std::hash::Hash + std::fmt::Debug,
+) {
     let mut enabled = value.is_some();
     let mut number = value.unwrap_or(0);
     ui.push_id(id, |ui| {
         ui.horizontal(|ui| {
+            help_button(ui, label, help);
             ui.checkbox(&mut enabled, label);
             ui.add_enabled(enabled, egui::DragValue::new(&mut number));
         });
@@ -813,11 +993,18 @@ fn optional_i64_row(ui: &mut Ui, label: &str, value: &mut Option<i64>, id: impl 
     *value = if enabled { Some(number) } else { None };
 }
 
-fn optional_u64_row(ui: &mut Ui, label: &str, value: &mut Option<u64>, id: impl std::hash::Hash + std::fmt::Debug) {
+fn optional_u64_row(
+    ui: &mut Ui,
+    label: &'static str,
+    help: HelpText,
+    value: &mut Option<u64>,
+    id: impl std::hash::Hash + std::fmt::Debug,
+) {
     let mut enabled = value.is_some();
     let mut number = value.unwrap_or(0);
     ui.push_id(id, |ui| {
         ui.horizontal(|ui| {
+            help_button(ui, label, help);
             ui.checkbox(&mut enabled, label);
             ui.add_enabled(enabled, egui::DragValue::new(&mut number));
         });
@@ -825,11 +1012,18 @@ fn optional_u64_row(ui: &mut Ui, label: &str, value: &mut Option<u64>, id: impl 
     *value = if enabled { Some(number) } else { None };
 }
 
-fn optional_f64_row(ui: &mut Ui, label: &str, value: &mut Option<f64>, id: impl std::hash::Hash + std::fmt::Debug) {
+fn optional_f64_row(
+    ui: &mut Ui,
+    label: &'static str,
+    help: HelpText,
+    value: &mut Option<f64>,
+    id: impl std::hash::Hash + std::fmt::Debug,
+) {
     let mut enabled = value.is_some();
     let mut number = value.unwrap_or(0.0);
     ui.push_id(id, |ui| {
         ui.horizontal(|ui| {
+            help_button(ui, label, help);
             ui.checkbox(&mut enabled, label);
             ui.add_enabled(enabled, egui::DragValue::new(&mut number).speed(0.01));
         });

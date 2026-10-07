@@ -668,6 +668,32 @@ pub(crate) fn persistent_list_text_edit(
     changed
 }
 
+/// [`persistent_multiline_list_row`] whose label carries a [`help_button`].
+pub(crate) fn help_multiline_list_row(
+    ui: &mut Ui,
+    label: &'static str,
+    help: HelpText,
+    values: &mut Vec<String>,
+    id: impl std::hash::Hash + std::fmt::Debug,
+) -> bool {
+    ui.push_id(id, |ui| {
+        field_label(ui, label, help);
+        persistent_list_text_edit(ui, "list_text", values, |ui, text| {
+            ui.add(egui::TextEdit::multiline(text).desired_rows(2))
+        })
+    })
+    .inner
+}
+
+/// A checkbox preceded by a [`help_button`]; returns true when it was toggled.
+pub(crate) fn help_checkbox(ui: &mut Ui, label: &'static str, help: HelpText, value: &mut bool) -> bool {
+    ui.horizontal(|ui| {
+        help_button(ui, label, help);
+        ui.checkbox(value, label).changed()
+    })
+    .inner
+}
+
 /// Labelled two-row `persistent_list_text_edit` — the standard "(one per line)" field.
 pub(crate) fn persistent_multiline_list_row(
     ui: &mut Ui,
@@ -711,6 +737,8 @@ mod tests {
         for (file, source) in [
             ("inbounds.rs", include_str!("inbounds.rs")),
             ("outbounds.rs", include_str!("outbounds.rs")),
+            ("dns.rs", include_str!("dns.rs")),
+            ("routing.rs", include_str!("routing.rs")),
         ] {
             assert!(source.contains("super::show_help_dialog(ui)"), "{file}");
         }

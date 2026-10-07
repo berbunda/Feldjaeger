@@ -9522,3 +9522,47 @@ Save требует заполнить поле. Три теста, которы
 `show_help_dialog`); `help_text_picks_the_language` вместо теста отката на английский; две
 проверки перевода удалены. Итог: **1391 passed / 0 failed**, clippy lib 65 (без изменений). GUI в
 запущенном приложении не проверялся.
+
+# 113	Pop-up help: DNS и Routing на двух языках (Roadmap §4.4) (0.5.53-0)
+
+## 113.1	Общие виджеты (`gui/pages/mod.rs`)
+
+- `help_multiline_list_row(ui, label, help, values, id)` — `persistent_multiline_list_row` с
+  кнопкой «h» у подписи. Id буфера (`push_id(id)` → `"list_text"`) тот же, поэтому замена не
+  сбрасывает набранный текст.
+- `help_checkbox(ui, label, help, value) -> bool` — кнопка «h» и чекбокс в одной строке.
+
+## 113.2	DNS (`gui/pages/dns.rs`, 26 текстов)
+
+Общие поля (`clientIp`, `queryStrategy`, `disableCache`, `serveStale`, `serveExpiredTTL`,
+`disableFallback`, `disableFallbackIfMatch`, `enableParallelQuery`, `useSystemHosts`, `tag`),
+поля сервера (`address` — все формы адреса, включая `+local` и `quic+local://`, `port`, `domains`,
+`expectedIPs`, `unexpectedIPs`, `skipFallback`, `finalQuery`, `timeoutMs`, `tag`, `clientIP`,
+`queryStrategy`, `disableCache`, `serveStale`, `serveExpiredTTL`) и статические hosts (`domain`,
+`targets`). Источники: xtls.github.io/config/dns.html и исходники, когда документации не хватает:
+- `app/dns/cache_controller.go` — при `serveStale` значение `serveExpiredTTL = 0` означает «без
+  ограничения» (`cache.serveExpiredTTL == 0 || ...`);
+- `app/dns/dns.go` — `UseSystem` выбирает A / AAAA по `utils.CheckRoutes()`, то есть по наличию
+  маршрутов IPv4 / IPv6;
+- `infra/conf/dns.go` — у сервера тег `clientIp` (подпись `clientIP` из документации подходит:
+  `encoding/json` сравнивает имена без учёта регистра).
+
+Вспомогательные строки `optional_text_row` / `optional_u16_row` / `optional_u32_row` /
+`optional_i64_row` получили параметр `help`.
+
+## 113.3	Routing (`gui/pages/routing.rs`, 28 текстов)
+
+`domainStrategy`, все условия правила (`ruleTag`, `domain` — все префиксы, включая `dotless:`,
+`ip` — с инверсией `!`, `port`, `sourcePort`, `localPort`, `network`, `sourceIP`, `localIP`,
+`user`, `vlessRoute`, `inboundTag`, `protocol`, `attrs`, `process`, `localOS`), цели
+(`outboundTag` важнее `balancerTag`), webhook (`url`, `deduplication`, `headers`), балансировщик
+(`tag`, `selector`, `fallbackTag`, стратегия) и настройки leastLoad. Проверено по исходникам:
+`app/router/condition.go` — у `attrs` имена заголовков приводятся к нижнему регистру, значения —
+регулярные выражения, совпасть должны все пары; `infra/conf/router.go` — поле `localOS`
+(в документации его нет). Вспомогательные строки получили параметр `help` так же, как в DNS.
+
+## 113.4	Итог
+
+Обе страницы вызывают `show_help_dialog`; тест `pages_with_help_buttons_render_the_help_dialog`
+теперь проверяет и их. Итог: **1391 passed / 0 failed**, clippy lib 65 (без изменений). GUI в
+запущенном приложении не проверялся.
