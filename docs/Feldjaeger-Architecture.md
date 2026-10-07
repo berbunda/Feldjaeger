@@ -9272,3 +9272,67 @@ DNS, Observatory, BurstObservatory) тоже пересобираются из �
 (через `include_str!` проверяет, что в трёх файлах страницы Inbounds нет `HelpText::en(`).
 Итог: **1381 passed / 0 failed**, clippy lib 66 (без изменений). GUI в запущенном приложении не
 проверялся.
+
+# 106	Аудит дрейфа: Xray-core v26.9.30 (Roadmap §4.5) (документация, без изменения версии)
+
+## 106.1	Объём
+
+- Релиз: https://github.com/XTLS/Xray-core/compare/v26.9.9...v26.9.30 — 36 коммитов (35 PR и
+  коммит релиза), 263 файла, из них 17 в `infra/conf`.
+- После релиза: https://github.com/XTLS/Xray-core/compare/v26.9.30...main — 10 коммитов
+  (2026-10-05).
+
+Метод: diff `infra/conf/*.go` (json-теги и проверки `Build()`), затем diff самого PR в
+`proxy/*`, `transport/*`, `features/*`, `main/commands/*`; для каждого изменения — поиск по коду
+Feldjäger. Данные получены через `gh api` 2026-10-07. Документация xtls.github.io не
+использовалась: она отстаёт от исходников.
+
+## 106.2	Требует работы
+
+| # | PR | Изменение в ядре | Что затрагивает в Feldjäger |
+|---|----|------------------|------------------------------|
+| A | #6773, #6853 | TUN inbound: `autoSystemDnsToGateway: bool` и `autoSystemWfpBlockLeak: []string` (`dns` / `misconfigtun`, без учёта регистра; любое другое значение — ошибка `Build()` на всех ОС). Проверки по ОС, где работает Xray: Linux — `autoSystemDnsToGateway` требует непустой `gateway`; Windows — WfpBlockLeak требует `autoSystemRoutingTable`, а `"dns"` требует `dns`. `autoSystemDnsToGateway` в #6773 назывался `autoSystemDNS` — имя не вошло ни в один релиз | Модель и форма TUN (`inbound_protocol/mod.rs`, `gui/pages/inbounds.rs`) не знают новых ключей: они сохраняются как есть, но не редактируются и не проверяются |
+| B | #6771 | WireGuard outbound: удалён `domainStrategy` (ключ больше не читается — молча игнорируется); удалён режим `"local"` у `remoteDNS`: каждый элемент теперь разбирается `netip.MustParseAddr`, поэтому не-IP значение (`"local"`, домен) роняет Xray с panic при запуске, а `xray run -test` этого может не поймать | WARP outbound (`xray/warp/parse.rs`) переносит сгенерированный `wgcf-cli` JSON как есть, вместе с `domainStrategy` и `remoteDNS` |
+| C | #6815 | FakeDNS: значение по умолчанию `FakeIPv6Pool` — `2001:2::/48` вместо `fc00::/18` (`features/dns/fakedns.go`) | Пресеты пулов в `gui/pages/fakedns.rs` предлагают `fc00::/18` как IPv6-вариант; подписи пресетов не говорят о новом умолчании ядра |
+| D | #6847 | `xray api adu` поддерживает Hysteria inbound (`extractInboundUsers`) | Проверить, ограничивает ли Feldjäger live-добавление пользователей протоколами (`app/api_ops.rs`, `app/user_ops.rs`) |
+| E | #5645, #6748, #6807, #6810, #6844 | Новые транспорты `network: "xdrive"` (`xdriveSettings`: `remoteFolder`, `service` = `local` / `Google Drive` / `template`, `secrets`, тайминги) и `network: "masque"` (`masqueSettings`: `host`, `path`, `user`, `pass`, `headers`); протокол `masque` для inbound и outbound; транспорт masque допустим только с протоколом masque, masque outbound отвергает `mux.enabled` | Чтение уже безопасно: неизвестная `network` попадает в `other_method` (inbound) / `other_transport` (outbound), `*Settings` сохраняются в extras. Редакторы не делаем — отложено до документации (как Masque в §4.1/§4.2) |
+
+## 106.3	Уже учтено
+
+| PR | Изменение | Где в Feldjäger |
+|----|-----------|-----------------|
+| #6754 | Транспорты переведены на dialer/listener FinalMask; `udphop` без `sockopt` | `CoreFeature::UdpHopSockoptRemoved` (§67.2), FinalMask этап 1.1 |
+| #6718 | xdns: `domains[]` — объекты `{name, lenLimit, labelLimit, types, edns0}`, `resolvers[]` — `{type, addr}` | FinalMask этап 1.3 |
+| #6862 | noise `type: "exp"` (сегменты `<b>`, `<r>`, `<rc>`, `<rd>`, `<t>`, `<c>`, `<n>`) | Редактор noise, справка `HELP_NOISE_PACKET` |
+| #6808 | udpHop / xicmp: исправлен panic; восстановлено умолчание `interval` (30) | Справка `HELP_UDPHOP_INTERVAL` («Empty or 0 = 30») |
+| #7090 (main) | xdns: `names[]`, `addrs[]`, умолчание `types` | Открытый пункт FinalMask этап 1.6 |
+
+## 106.4	Не касается
+
+| PR | Причина |
+|----|---------|
+| #6743 | Windows `readv`: исправление блокировки — runtime |
+| #6747 | TUN: адреса назначения UDP со статистикой трафика — runtime |
+| #6756, #6793, #6809 | Обновления зависимостей Go |
+| #6778, #6801, #6804, #6852 | WireGuard: panic, память, адрес endpoint, гонки запуска — runtime (generic WireGuard retired; WARP получает исправления с ядром) |
+| #6788 | Hysteria outbound: усечение UDP DATAGRAM с ChromeParrot — runtime |
+| #6796 | Меньше записей в журнал ошибок — runtime |
+| #6811, #6814 | TUN: повторное использование адаптера Wintun, закрытие UDP — runtime |
+| #6818, #6821, #6867 | Geodata: префильтр regexp, память матчеров — runtime |
+| #6831, #6866 | Shadowsocks 2022: рефакторинг без sing — Shadowsocks retired (§4.1) |
+| #6834 | XTLS Vision: подавление внешнего CloseNotify — runtime |
+| #6835 | HTTPUpgrade: отправка заголовков Sec-WebSocket-* — редактор retired 2026-10-07 (§4.3), чтение не меняется |
+| #6854 | Перенос `PacketConnWrapper` в `common/net` — внутренний рефакторинг |
+| b26a91d | Коммит релиза v26.9.30 |
+| `http.go`, `socks.go`, `lint.go`, `loader.go`, `transport_method.go` | Из ошибок убран `.AtError()` — текст и условия не меняются |
+
+После релиза (main): #6863 (тесты), #6871 (mux, гонка), #6874 (TUN на Windows без IPv6), #6877
+(gRPC client, повторное подключение), #6882 (QUIC sniffer), #7089 (xdns, deadlock и утечки
+сокетов) — runtime; #6855, #6856, #6881 — WireGuard inbound / kernelTun (WireGuard retired).
+
+Итого 36 + 10 коммитов: по одному месту в таблицах 106.2–106.4 (#7090 — в 106.3).
+
+## 106.5	Следствия
+
+Пункты A–E заведены в Roadmap §4.5 как дочерние пункты аудита. A–D — код, каждый со своей версией
+и разделом Architecture; E — только записи в Roadmap. Изменений кода в этом разделе нет.
