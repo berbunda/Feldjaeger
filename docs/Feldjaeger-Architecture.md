@@ -9439,3 +9439,20 @@ XTLS/Xray-core#6815 (v26.9.30) сменил `dns.FakeIPv6Pool` (`features/dns/fa
 `validate_fakedns_settings`, первые пресеты IPv4 и IPv6 совпадают с умолчаниями ядра. Итог:
 **1390 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не
 проверялся.
+
+# 110	Аудит v26.9.30: пункты D и E без изменений кода (Roadmap §4.5)
+
+**D — `xray api adu` для Hysteria (XTLS/Xray-core#6847).** Ядро добавило `*hysteria.ServerConfig`
+в `extractInboundUsers` (`main/commands/all/api/inbound_user_add.go`). У Feldjäger ограничения
+по протоколу нет: `add_inbound_users_request` (`app/api_ops.rs`) передаёт в `adu stdin:` JSON
+всего inbound, который пользователь вводит в API Console («Inbound users (live)»). Поэтому с
+ядром v26.9.30 добавление пользователей Hysteria работает без изменений. Старое ядро печатает
+«unsupported inbound type», и консоль показывает этот вывод.
+
+**E — XDRIVE и MASQUE.** Транспорты `xdrive` (#5645, #6748) и `masque` (#6807, #6810, #6844), а
+также протокол `masque` вошли в v26.9.30, но в документации xtls.github.io их по-прежнему нет.
+Чтение уже безопасно: неизвестная `network` уходит в `other_method` (inbound) / `other_transport`
+(outbound), `masqueSettings` / `xdriveSettings` остаются в extras и пишутся как есть. Записи в
+Roadmap: в пункты Masque inbound (§4.1) и Masque outbound (§4.2) добавлен итог аудита, в §4.3
+заведён пункт «Stream XDRIVE transport» со статусом «отложено до документации». Версия не
+менялась (изменения только в документации).
