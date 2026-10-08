@@ -157,6 +157,12 @@ pub enum CompatibilityWarningId {
     /// the Vision server breaks Mux connections that contain TCP, so TCP through the outbound
     /// fails; `concurrency: -1` with XUDP works (live check, Xray 26.9.30).
     MuxVisionCarriesTcp,
+    /// A Trojan outbound read from `servers[]` (no flat `address`) with other than one entry —
+    /// `TrojanClientConfig.Build()` refuses it, so the config does not load (Roadmap §4.2).
+    TrojanServersNotSingle,
+    /// A non-empty Trojan outbound `flow` — a removed feature: `Build()` fails ("The feature Flow
+    /// for Trojan has been removed"); the editor offers "Remove flow" (Roadmap §4.2).
+    TrojanFlowRemoved,
 }
 
 /// How a warning is shown: [`Self::Danger`] gets the red road-sign style in the GUI and
@@ -337,6 +343,15 @@ impl CompatibilityWarningId {
                 "breaks TCP: an xtls-rprx-vision server drops Mux connections that carry TCP, so \
                  TCP through this outbound fails; with Vision set `concurrency` to -1 (TCP outside \
                  Mux) and use `xudpConcurrency` for UDP"
+            }
+            Self::TrojanServersNotSingle => {
+                "rejected by Xray-core: a Trojan outbound takes exactly one servers[] entry, and \
+                 the config does not load; split it into one outbound per server and pick between \
+                 them with a routing balancer"
+            }
+            Self::TrojanFlowRemoved => {
+                "rejected by Xray-core: flow for Trojan is a removed feature and the config does \
+                 not load — use \"Remove flow\" in the editor (XTLS Vision needs VLESS)"
             }
         };
         Cow::Borrowed(text)
@@ -526,6 +541,7 @@ pub fn outbound_warnings(outbound: &Value, core: Option<XrayCoreVersion>) -> Vec
             location,
         });
     }
+    trojan_outbound_warnings(outbound, &mut warnings);
     wireguard_outbound_warnings(outbound, core, &mut warnings);
     let is_freedom = outbound
         .get("protocol")
@@ -636,6 +652,38 @@ fn vless_vnext_not_single(outbound: &Value) -> Option<String> {
     }
     let users = servers[0].get("users").and_then(Value::as_array);
     (users.map_or(0, Vec::len) != 1).then(|| "settings.vnext[0].users".to_owned())
+}
+
+/// Trojan outbound `settings` the core refuses: `servers[]` other than one entry (when read — a
+/// non-null flat `address` wins) and a non-empty `flow` on the entry it reads.
+fn trojan_outbound_warnings(outbound: &Value, warnings: &mut Vec<CompatibilityWarning>) {
+    let is_trojan = outbound
+        .get("protocol")
+        .and_then(Value::as_str)
+        .is_some_and(|protocol| protocol.trim().eq_ignore_ascii_case("trojan"));
+    let Some(settings) = outbound.get("settings").filter(|_| is_trojan) else {
+        return;
+    };
+    let (entry, prefix) = if settings.get("address").is_some_and(|address| !address.is_null()) {
+        (Some(settings), "settings")
+    } else if let Some(servers) = settings.get("servers").filter(|servers| !servers.is_null()) {
+        if servers.as_array().is_none_or(|servers| servers.len() != 1) {
+            warnings.push(CompatibilityWarning {
+                id: CompatibilityWarningId::TrojanServersNotSingle,
+                location: "settings.servers".to_owned(),
+            });
+        }
+        (servers.get(0), "settings.servers[0]")
+    } else {
+        (Some(settings), "settings")
+    };
+    let flow = entry.and_then(|entry| entry.get("flow")).and_then(Value::as_str);
+    if flow.is_some_and(|flow| !flow.is_empty()) {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::TrojanFlowRemoved,
+            location: format!("{prefix}.flow"),
+        });
+    }
 }
 
 /// `streamSettings.finalmask` of an outbound (Roadmap §2.6 stage 7.1): chains the dialer never
@@ -1433,6 +1481,32 @@ mod tests {
         let plain = json!({"protocol": "vless", "settings": {"address": "10.0.0.1", "port": 443, "id": "x",
             "encryption": "none"}, "streamSettings": {"security": "tls"}, "mux": {"enabled": true}});
         assert!(ids(plain).is_empty());
+    }
+
+    /// Roadmap §4.2: Trojan shapes `xray run -test` 26.9.30 refuses.
+    #[test]
+    fn flags_trojan_servers_and_flow() {
+        let ids = |settings: Value| -> Vec<_> {
+            let outbound = json!({"protocol": "trojan", "settings": settings, "streamSettings": {"security": "tls"}});
+            outbound_warnings(&outbound, None).into_iter().map(|w| (w.id, w.location)).collect()
+        };
+        let server = json!({"address": "10.0.0.1", "port": 443, "password": "p"});
+        assert!(ids(json!({"address": "10.0.0.1", "port": 443, "password": "p"})).is_empty());
+        assert!(ids(json!({"servers": [server.clone()]})).is_empty());
+        let not_single = vec![(CompatibilityWarningId::TrojanServersNotSingle, "settings.servers".to_owned())];
+        assert_eq!(ids(json!({"servers": []})), not_single);
+        assert_eq!(ids(json!({"address": null, "servers": [server.clone(), server.clone()]})), not_single);
+        // A flat address wins: servers[] is ignored by the core.
+        assert!(ids(json!({"address": "10.0.0.1", "port": 1, "password": "p", "servers": []})).is_empty());
+        assert_eq!(
+            ids(json!({"address": "10.0.0.1", "port": 1, "password": "p", "flow": "xtls-rprx-direct"})),
+            vec![(CompatibilityWarningId::TrojanFlowRemoved, "settings.flow".to_owned())]
+        );
+        assert_eq!(
+            ids(json!({"servers": [{"address": "10.0.0.1", "port": 1, "password": "p", "flow": "x"}]})),
+            vec![(CompatibilityWarningId::TrojanFlowRemoved, "settings.servers[0].flow".to_owned())]
+        );
+        assert!(ids(json!({"address": "10.0.0.1", "port": 1, "password": "p", "flow": ""})).is_empty());
     }
 
     /// Roadmap §2.3: the server side rejects `allowInsecure: true` as well.

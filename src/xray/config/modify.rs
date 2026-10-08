@@ -58,7 +58,9 @@ use super::routing_settings::{
     RoutingSettings, apply_routing_settings_to_value, validate_routing_settings,
 };
 use super::outbound_edit::{OutboundGeneral, OutboundRef, apply_outbound_general};
-use super::outbound_protocol::{OutboundSettingsDraft, apply_outbound_settings, is_shell_editable_protocol};
+use super::outbound_protocol::{
+    OutboundSettingsDraft, SHELL_EDITABLE_PROTOCOLS, apply_outbound_settings, is_shell_editable_protocol,
+};
 use super::outbound_stream::{OutboundStreamDraft, apply_outbound_stream};
 use super::reverse_proxy::{ReverseTagDraft, validate_reverse};
 use super::serialize::validate_serialized_json;
@@ -1760,7 +1762,7 @@ pub fn duplicate_outbound(
     if !protocol.as_deref().is_some_and(is_shell_editable_protocol) {
         return Err(ConfigModifyError::new(
             ConfigModifyErrorKind::ValidationFailed,
-            "Duplicate is available for Freedom, Blackhole, DNS, Loopback, and VLESS outbounds only".to_owned(),
+            format!("Duplicate is available for {SHELL_EDITABLE_PROTOCOLS} outbounds only"),
         ));
     }
 
@@ -2525,8 +2527,7 @@ fn validate_outbound_object(outbound: &Value) -> ConfigModifyResult<()> {
     if !protocol.eq_ignore_ascii_case("wireguard") && !is_shell_editable_protocol(protocol) {
         return Err(ConfigModifyError::new(
             ConfigModifyErrorKind::ValidationFailed,
-            "only wireguard, freedom, blackhole, dns, vless, or loopback outbounds may be written by this path"
-                .to_owned(),
+            format!("only WireGuard, {SHELL_EDITABLE_PROTOCOLS} outbounds may be written by this path"),
         ));
     }
     let tag = object

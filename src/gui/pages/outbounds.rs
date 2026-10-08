@@ -18,7 +18,7 @@ use crate::app::{
 };
 use crate::xray::{
     CompatibilityWarning, CompatibilityWarningId, OutboundSummary, outbound_protocol_has_transport,
-    LoopbackRouting, outbound_protocol_uses_sockopt, validate_send_through,
+    LoopbackRouting, SHELL_EDITABLE_PROTOCOLS, outbound_protocol_uses_sockopt, validate_send_through,
 };
 
 // ─── Field help text (Roadmap §4.4) ──────────────────────────────────────────
@@ -300,6 +300,45 @@ const HELP_MUX_XUDP_PROXY_UDP443: HelpText = HelpText::new(
      отвергает, даже при выключенном Mux.",
 );
 
+// Trojan (Roadmap §4.2), checked with `xray run -test` 26.9.30 (`infra/conf/trojan.go`).
+const HELP_TROJAN: HelpText = HelpText::new(
+    "Client of a Trojan server: password authentication inside TLS. Xray-core still supports it \
+     but logs on every start that Trojan is deprecated in favour of VLESS. To a public address it \
+     needs Security tls or reality (Xray refuses plain Trojan except to private addresses). The \
+     removed flow setting cannot be used — for XTLS Vision use VLESS.",
+    "Клиент сервера Trojan: аутентификация паролем внутри TLS. Xray-core его поддерживает, но при \
+     каждом запуске пишет в журнал, что Trojan устарел и вместо него рекомендуется VLESS. К \
+     публичному адресу нужен Security tls или reality (простой Trojan Xray разрешает только к \
+     приватным адресам). Удалённую настройку flow использовать нельзя — для XTLS Vision \
+     используйте VLESS.",
+);
+const HELP_TROJAN_ADDRESS: HelpText = HelpText::new(
+    "Server address: IPv4, IPv6 or domain name. Required.",
+    "Адрес сервера: IPv4, IPv6 или доменное имя. Обязательно.",
+);
+const HELP_TROJAN_PORT: HelpText = HelpText::new(
+    "Server port, 1–65535, usually the port the server's Trojan inbound listens on. Required; \
+     written as a number (Xray refuses a quoted port here).",
+    "Порт сервера, 1–65535, обычно порт, который слушает Trojan inbound сервера. Обязательно; \
+     записывается числом (порт в кавычках Xray здесь отвергает).",
+);
+const HELP_TROJAN_PASSWORD: HelpText = HelpText::new(
+    "The password of one of the server's clients[]. Required. Kept exactly as typed — spaces \
+     count, the server compares it byte for byte.",
+    "Пароль одного из clients[] сервера. Обязательно. Сохраняется точно как набран — пробелы \
+     учитываются, сервер сравнивает его побайтно.",
+);
+const HELP_TROJAN_LEVEL: HelpText = HelpText::new(
+    "User level: index into policy.levels (timeouts, buffer size), 0–255; empty = key absent \
+     (level 0). Xray refuses a larger number.",
+    "Уровень пользователя: индекс в policy.levels (таймауты, размер буфера), 0–255; пусто — \
+     ключа нет (уровень 0). Большее число Xray отвергает.",
+);
+const HELP_TROJAN_EMAIL: HelpText = HelpText::new(
+    "User label in logs and statistics on this side; empty = key absent.",
+    "Метка пользователя в журналах и статистике на этой стороне; пусто — ключа нет.",
+);
+
 /// Renders the Outbounds page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     service.tick_outbounds_page_status();
@@ -397,6 +436,18 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
                     .clicked()
                 {
                     if let Err(e) = service.begin_add_outbound_vless() {
+                        service.show_status_message(e);
+                    }
+                    ui.close();
+                }
+                if ui
+                    .button("Trojan")
+                    .on_hover_text(
+                        "Client of a Trojan server — https://xtls.github.io/en/config/outbounds/trojan.html",
+                    )
+                    .clicked()
+                {
+                    if let Err(e) = service.begin_add_outbound_trojan() {
                         service.show_status_message(e);
                     }
                     ui.close();
@@ -511,22 +562,14 @@ fn show_outbound_context_menu(
         ui.separator();
 
         let busy = service.is_outbound_mutation_busy();
-        let edit_ok = matches!(
-            row.kind(),
-            OutboundKind::Freedom
-                | OutboundKind::Blackhole
-                | OutboundKind::Dns
-                | OutboundKind::Vless
-                | OutboundKind::Loopback
-        );
+        let edit_ok = is_shell_kind(row.kind());
         if ui
             .add_enabled(edit_ok && !busy, egui::Button::new("Edit"))
-            .on_disabled_hover_text(
-                "Shell editing is available for Freedom, Blackhole, DNS, Loopback, and VLESS \
-                 outbounds only — a legacy VLESS vnext[] outbound opens only when it has one \
-                 server with one user (Save converts it to the flat form); any other must be \
-                 edited via Raw JSON",
-            )
+            .on_disabled_hover_text(format!(
+                "Shell editing is available for {SHELL_EDITABLE_PROTOCOLS} outbounds only — a legacy VLESS \
+                 vnext[] / Trojan servers[] outbound opens only when it has one server (with one \
+                 user) (Save converts it to the flat form); any other must be edited via Raw JSON",
+            ))
             .clicked()
         {
             if let Err(e) = service.begin_edit_outbound_shell(row.index) {
@@ -555,19 +598,10 @@ fn show_outbound_context_menu(
             ui.close();
         }
 
-        let duplicate_ok = matches!(
-            row.kind(),
-            OutboundKind::Freedom
-                | OutboundKind::Blackhole
-                | OutboundKind::Dns
-                | OutboundKind::Vless
-                | OutboundKind::Loopback
-        );
+        let duplicate_ok = is_shell_kind(row.kind());
         if ui
             .add_enabled(duplicate_ok && !busy, egui::Button::new("Duplicate"))
-            .on_disabled_hover_text(
-                "Duplicate is available for Freedom, Blackhole, DNS, Loopback, and VLESS outbounds only",
-            )
+            .on_disabled_hover_text(format!("Duplicate is available for {SHELL_EDITABLE_PROTOCOLS} outbounds only"))
             .clicked()
         {
             set_pending_outbound_duplicate(
@@ -1059,6 +1093,7 @@ fn outbound_protocol_label(settings: &OutboundSettingsDraft) -> &'static str {
         OutboundSettingsDraft::Dns { .. } => "DNS",
         OutboundSettingsDraft::Vless(_) => "VLESS",
         OutboundSettingsDraft::Loopback(_) => "Loopback",
+        OutboundSettingsDraft::Trojan(_) => "Trojan",
     }
 }
 
@@ -1086,6 +1121,7 @@ fn show_outbound_editor_pane(ui: &mut Ui, service: &mut ApplicationService) {
         Some(OutboundSettingsDraft::Dns { .. }) => show_dns_settings_edit(ui, service),
         Some(OutboundSettingsDraft::Vless(_)) => show_vless_settings_edit(ui, service),
         Some(OutboundSettingsDraft::Loopback(_)) => show_loopback_settings_edit(ui, service),
+        Some(OutboundSettingsDraft::Trojan(_)) => show_trojan_settings_edit(ui, service),
         None => {}
     }
     // Stream / Security for protocols that dial through a transport (Roadmap §4.2).
@@ -1931,6 +1967,86 @@ fn show_dns_rules_edit(ui: &mut Ui, rules: &mut Vec<DnsRuleDraft>) {
 /// outbound (Roadmap §2.1:58). Writes the flat `settings` form (`address`/`port`/`id`/
 /// `encryption`/`flow`/`level`/`email`/`reverse`); a draft read from a single-server legacy
 /// `vnext[]` gets a notice that Save converts it (Roadmap §4.2).
+/// Whether the Outbound Shell opens this kind (Edit / Duplicate); mirrors
+/// `is_shell_editable_protocol`.
+fn is_shell_kind(kind: OutboundKind) -> bool {
+    matches!(
+        kind,
+        OutboundKind::Freedom
+            | OutboundKind::Blackhole
+            | OutboundKind::Dns
+            | OutboundKind::Vless
+            | OutboundKind::Loopback
+            | OutboundKind::Trojan
+    )
+}
+
+/// Trojan Protocol section (Roadmap §4.2): flat `settings`; `flow` from disk can only be removed.
+fn show_trojan_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
+    let Some(session) = service.outbound_editor_session_mut() else {
+        return;
+    };
+    let OutboundSettingsDraft::Trojan(settings) = &mut session.settings else {
+        return;
+    };
+    ui.horizontal(|ui| {
+        super::help_button(ui, "Trojan", HELP_TROJAN);
+        ui.label(
+            RichText::new("Xray-core marks Trojan as deprecated in favour of VLESS (still supported).")
+                .size(12.0)
+                .color(Color32::from_rgb(140, 140, 140)),
+        );
+    });
+    if settings.legacy_servers {
+        ui.label(
+            RichText::new(
+                "This outbound uses the servers[] form. Save rewrites it into the flat settings \
+                 form — same server for Xray-core. \"Preview changes\" shows the rewrite.",
+            )
+            .italics(),
+        );
+    }
+    if !settings.flow.is_empty() {
+        ui.label(
+            RichText::new(format!(
+                "flow \"{}\" is a removed feature for Trojan — Xray-core refuses to load the config \
+                 and Save is blocked until it is removed.",
+                settings.flow
+            ))
+            .color(Color32::from_rgb(210, 170, 40)),
+        );
+        if ui.button("Remove flow").clicked() {
+            settings.flow.clear();
+        }
+    }
+    ui.add_space(4.0);
+
+    egui::Grid::new("trojan_outbound_settings_edit_grid")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            super::field_label(ui, "address", HELP_TROJAN_ADDRESS);
+            ui.text_edit_singleline(&mut settings.address);
+            ui.end_row();
+
+            super::field_label(ui, "port", HELP_TROJAN_PORT);
+            ui.add(egui::TextEdit::singleline(&mut settings.port).desired_width(80.0).hint_text("443"));
+            ui.end_row();
+
+            super::field_label(ui, "password", HELP_TROJAN_PASSWORD);
+            ui.add(egui::TextEdit::singleline(&mut settings.password).password(true));
+            ui.end_row();
+
+            super::field_label(ui, "level", HELP_TROJAN_LEVEL);
+            ui.add(egui::TextEdit::singleline(&mut settings.level).desired_width(80.0).hint_text("0"));
+            ui.end_row();
+
+            super::field_label(ui, "email", HELP_TROJAN_EMAIL);
+            ui.text_edit_singleline(&mut settings.email);
+            ui.end_row();
+        });
+}
+
 fn show_vless_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
     let Some(session) = service.outbound_editor_session_mut() else {
         return;

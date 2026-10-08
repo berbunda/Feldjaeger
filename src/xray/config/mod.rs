@@ -243,7 +243,8 @@ pub use outbound_protocol::{
     FREEDOM_LEGACY_STRATEGY_KEYS, FREEDOM_NOISE_TYPES, FREEDOM_PROXY_PROTOCOL_VERSIONS,
     FragmentDraft, FreedomFinalRuleDraft, FreedomSettingsDraft, LegacyDomainStrategyMigration, LoopbackRouting, LoopbackSettingsDraft, loopback_routing,
     NoiseDraft, OutboundSettingsDraft,
-    apply_outbound_settings, is_shell_editable_protocol, legacy_vnext_blocker, parse_outbound_settings,
+    SHELL_EDITABLE_PROTOCOLS, apply_outbound_settings, is_shell_editable_protocol, outbound_shell_blocker,
+    parse_outbound_settings,
 };
 pub use outbound_stream::{
     DialerProxyProblem, GrpcClientSettings, HYSTERIA_TRANSPORT_VERSION, HttpUpgradeClientSettings,

@@ -1,5 +1,5 @@
-//! Outbound Protocol tab (Freedom, Blackhole, DNS, VLESS, Loopback; Roadmap §2.4:94–96, §2.1:58,
-//! §4.2).
+//! Outbound Protocol tab (Freedom, Blackhole, DNS, VLESS, Loopback, Trojan; Roadmap §2.4:94–96,
+//! §2.1:58, §4.2).
 //!
 //! See <https://xtls.github.io/en/config/outbounds/freedom.html>,
 //! <https://xtls.github.io/en/config/outbounds/blackhole.html>,
@@ -19,6 +19,7 @@ use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind
 
 mod freedom;
 mod loopback;
+mod trojan;
 mod vless;
 pub use freedom::{
     FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS, FREEDOM_FINAL_RULE_NETWORKS,
@@ -26,7 +27,8 @@ pub use freedom::{
     FreedomSettingsDraft, LegacyDomainStrategyMigration,
 };
 pub use loopback::{LoopbackRouting, LoopbackSettingsDraft, loopback_routing};
-pub use vless::{VlessOutboundSettings, legacy_vnext_blocker};
+pub use trojan::TrojanOutboundSettings;
+pub use vless::VlessOutboundSettings;
 
 /// Documented `settings.noises[].type` values (free text also accepted).
 pub const FREEDOM_NOISE_TYPES: &[&str] = &["rand", "str", "hex", "base64"];
@@ -40,6 +42,9 @@ pub const DNS_RULE_ACTIONS: &[&str] = &["direct", "hijack", "drop", "return"];
 /// Documented `settings.rewriteNetwork` values for DNS (free text also accepted).
 pub const DNS_REWRITE_NETWORKS: &[&str] = &["tcp", "udp"];
 
+/// The protocols [`is_shell_editable_protocol`] accepts, for user-facing messages.
+pub const SHELL_EDITABLE_PROTOCOLS: &str = "Freedom, Blackhole, DNS, Loopback, VLESS and Trojan";
+
 /// Outbound protocols currently reachable through the Outbound Shell (Add/Edit).
 ///
 /// VLESS is included here for the button-enabled check on the Outbounds table; whether a
@@ -50,7 +55,7 @@ pub const DNS_REWRITE_NETWORKS: &[&str] = &["tcp", "udp"];
 pub fn is_shell_editable_protocol(protocol: &str) -> bool {
     matches!(
         protocol.trim().to_ascii_lowercase().as_str(),
-        "freedom" | "blackhole" | "dns" | "vless" | "loopback"
+        "freedom" | "blackhole" | "dns" | "vless" | "loopback" | "trojan"
     )
 }
 
@@ -135,6 +140,8 @@ pub enum OutboundSettingsDraft {
     /// Loopback: re-injects traffic into routing as if it came from `inboundTag` (Roadmap §4.2,
     /// see [`loopback`]).
     Loopback(LoopbackSettingsDraft),
+    /// Trojan: client of a Trojan server (Roadmap §4.2, see [`trojan`]).
+    Trojan(TrojanOutboundSettings),
 }
 
 impl OutboundSettingsDraft {
@@ -171,6 +178,7 @@ impl OutboundSettingsDraft {
             Self::Dns { .. } => "dns",
             Self::Vless(_) => "vless",
             Self::Loopback(_) => "loopback",
+            Self::Trojan(_) => "trojan",
         }
     }
 
@@ -182,6 +190,11 @@ impl OutboundSettingsDraft {
     /// Default for Add Loopback.
     pub fn loopback_default() -> Self {
         Self::Loopback(LoopbackSettingsDraft::default())
+    }
+
+    /// Default for Add Trojan.
+    pub fn trojan_default() -> Self {
+        Self::Trojan(TrojanOutboundSettings::default())
     }
 }
 
@@ -198,6 +211,7 @@ pub fn parse_outbound_settings(outbound: &Value) -> Option<OutboundSettingsDraft
         "dns" => Some(parse_dns_settings(outbound)),
         "vless" => vless::parse_vless_outbound_settings(outbound).map(OutboundSettingsDraft::Vless),
         "loopback" => Some(OutboundSettingsDraft::Loopback(loopback::parse_loopback_settings(outbound))),
+        "trojan" => trojan::parse_trojan_outbound_settings(outbound).map(OutboundSettingsDraft::Trojan),
         _ => None,
     }
 }
@@ -336,6 +350,20 @@ pub fn apply_outbound_settings(
             vless::apply_vless_outbound_settings(outbound, settings)
         }
         OutboundSettingsDraft::Loopback(settings) => loopback::apply_loopback_settings(outbound, settings),
+        OutboundSettingsDraft::Trojan(settings) => trojan::apply_trojan_outbound_settings(outbound, settings),
+    }
+}
+
+/// Why a shell-editable outbound cannot be opened in the Shell (a legacy multi-entry form that
+/// only Raw JSON can express); `None` when [`parse_outbound_settings`] reads it.
+pub fn outbound_shell_blocker(outbound: &Value) -> Option<String> {
+    let protocol = outbound.get("protocol").and_then(Value::as_str)?.trim().to_ascii_lowercase();
+    match protocol.as_str() {
+        "vless" => vless::legacy_vnext_blocker(outbound)
+            .map(|reason| format!("Legacy VLESS vnext[] cannot be converted: {reason}")),
+        "trojan" => trojan::legacy_servers_blocker(outbound)
+            .map(|reason| format!("Trojan servers[] cannot be converted: {reason}")),
+        _ => None,
     }
 }
 

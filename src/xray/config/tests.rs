@@ -242,6 +242,26 @@ fn loopback_outbound_summary() {
     assert_eq!(summaries[2].description, "Re-route (no inboundTag)");
 }
 
+/// Roadmap §4.2: the Trojan row shows the server the core dials (flat form wins over servers[]).
+#[test]
+fn trojan_outbound_summary() {
+    let parser = XrayConfigParser::new();
+    let outcome = parser.parse_str(
+        r#"{
+            "outbounds":[
+                {"tag":"a","protocol":"trojan","settings":{"address":"example.com","port":443,"password":"p",
+                    "servers":[{"address":"ignored","port":1}]}},
+                {"tag":"b","protocol":"trojan","settings":{"servers":[{"address":"10.0.0.1","port":8443}]}},
+                {"tag":"c","protocol":"trojan"}
+            ]
+        }"#,
+    );
+    let summaries = outcome.sections().outbound_summaries();
+    assert_eq!(summaries[0].description, "example.com:443");
+    assert_eq!(summaries[1].description, "10.0.0.1:8443");
+    assert_eq!(summaries[2].description, "Summary unavailable");
+}
+
 #[test]
 fn outbound_summary_protocol_descriptions_and_send_through() {
     let parser = XrayConfigParser::new();

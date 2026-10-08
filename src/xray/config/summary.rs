@@ -1195,10 +1195,22 @@ fn outbound_description(protocol: Option<&str>, value: &Value) -> String {
                 (None, _) => "Re-route (no inboundTag)".to_owned(),
             }
         }
+        OutboundKind::Trojan => {
+            // The flat form wins over servers[] when `address` is set, as in the core.
+            let settings = value.get("settings");
+            let flat = settings.filter(|s| s.get("address").is_some_and(|a| !a.is_null()));
+            let entry = flat.or_else(|| settings.and_then(|s| s.pointer("/servers/0")));
+            let address = entry.and_then(|e| e.get("address")).and_then(Value::as_str);
+            let port = entry.and_then(|e| e.get("port")).and_then(Value::as_u64);
+            match (address, port) {
+                (Some(address), Some(port)) => format!("{address}:{port}"),
+                (Some(address), None) => address.to_owned(),
+                (None, _) => "Summary unavailable".to_owned(),
+            }
+        }
         OutboundKind::Http
         | OutboundKind::Hysteria
         | OutboundKind::Shadowsocks
-        | OutboundKind::Trojan
         | OutboundKind::Vmess
         | OutboundKind::Unknown => "Summary unavailable".to_owned(),
     }

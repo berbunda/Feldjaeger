@@ -3822,6 +3822,73 @@ fn loopback_outbound_shell_add_edit_duplicate() {
     assert_eq!(config.sections().outbounds().len(), 2);
 }
 
+/// Roadmap §4.2 "Outbounds Shell: Trojan": Add writes the flat form (with a Mux draft), Edit keeps
+/// unknown `settings` keys and an untouched `mux`, Duplicate accepts the protocol.
+#[test]
+fn trojan_outbound_shell_add_edit_duplicate() {
+    use super::modify::{DuplicateOutboundRequest, duplicate_outbound};
+    use super::outbound_edit::{OutboundGeneral, OutboundMux, OutboundRef, parse_outbound_general};
+    use super::outbound_protocol::{OutboundSettingsDraft, parse_outbound_settings};
+    use super::outbound_stream::parse_outbound_stream;
+
+    let mut config = single_file_editable(r#"{"outbounds":[]}"#);
+    let OutboundSettingsDraft::Trojan(mut draft) = OutboundSettingsDraft::trojan_default() else {
+        panic!("trojan draft expected");
+    };
+    draft.address = "10.0.0.1".to_owned();
+    draft.port = "443".to_owned();
+    draft.password = "secret".to_owned();
+    let mux = OutboundMux { enabled: true, concurrency: "4".to_owned(), ..OutboundMux::default() };
+    add_outbound_shell(
+        &mut config,
+        AddOutboundShellRequest {
+            general: OutboundGeneral { tag: Some("tj".to_owned()), mux: Some(mux), ..OutboundGeneral::default() },
+            settings: OutboundSettingsDraft::Trojan(draft),
+            stream: Default::default(),
+            core_version: None,
+            preferred_source_file: None,
+        },
+    )
+    .expect("add trojan");
+    assert_eq!(
+        config.sections().outbounds()[0].value().clone(),
+        serde_json::json!({"protocol": "trojan", "tag": "tj",
+            "settings": {"address": "10.0.0.1", "port": 443, "password": "secret"},
+            "mux": {"enabled": true, "concurrency": 4}})
+    );
+
+    // Edit: new password; an unknown settings key and the mux stay as they are.
+    let mut config = single_file_editable(
+        r#"{"outbounds":[{"tag":"tj","protocol":"trojan","settings":{"address":"10.0.0.1",
+            "port":443,"password":"old","future":1},"mux":{"enabled":true,"xudpConcurrency":8}}]}"#,
+    );
+    let original = config.sections().outbounds()[0].value().clone();
+    let mut settings = parse_outbound_settings(&original).expect("trojan is shell-editable");
+    let OutboundSettingsDraft::Trojan(draft) = &mut settings else {
+        panic!("trojan draft expected");
+    };
+    draft.password = "new".to_owned();
+    let expected_fingerprint = config.outbound_object_fingerprint(0).expect("fingerprint");
+    update_outbound_shell(
+        &mut config,
+        UpdateOutboundShellRequest {
+            outbound_ref: OutboundRef { outbound_index: 0, expected_fingerprint },
+            general: parse_outbound_general(&original),
+            settings,
+            stream: parse_outbound_stream(&original),
+            core_version: None,
+        },
+    )
+    .expect("edit trojan");
+    let edited = config.sections().outbounds()[0].value();
+    assert_eq!(edited["settings"]["password"], "new");
+    assert_eq!(edited["settings"]["future"], 1);
+    assert_eq!(edited["mux"], original["mux"]);
+
+    duplicate_outbound(&mut config, DuplicateOutboundRequest { outbound_index: 0 }).expect("duplicate trojan");
+    assert_eq!(config.sections().outbounds().len(), 2);
+}
+
 #[test]
 fn duplicate_outbound_allows_vless_legacy_vnext_form() {
     use super::modify::{DuplicateOutboundRequest, duplicate_outbound};

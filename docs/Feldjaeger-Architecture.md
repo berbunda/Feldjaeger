@@ -10160,3 +10160,74 @@ VLESS, дальше Trojan / Socks / Hysteria) — `enabled`, `concurrency`, `xu
 `warnings` — 1 (все три предупреждения, обе формы VLESS, `-1` + XUDP без предупреждения). Итог:
 **1414 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не
 проверялся.
+
+# 127	Outbounds Shell: Trojan (Roadmap §4.2) (0.5.62-0)
+
+## 127.1	Сверка с ядром
+
+Xray-core v26.9.30, `infra/conf/trojan.go`: `TrojanClientConfig` — плоские `address` (`*Address`),
+`port` (`uint16`), `level` (`byte`), `email`, `password`, `flow` и `servers[]` из
+`TrojanServerTarget` с теми же полями. При `c.Address != nil` `Build()` строит единственный сервер
+из плоских ключей и `servers` игнорирует; иначе `servers` должен содержать ровно один элемент.
+Затем: адрес обязателен, `port != 0`, `password != ""`, `flow` должен быть пустым (удалённая
+функция). Каждая загрузка пишет в журнал `PrintNonRemovalDeprecatedFeatureWarning("Trojan (with no
+Flow, etc.)", "VLESS with Flow & Seed")`. Документация (`config/outbounds/trojan.md`, Context7) —
+только плоская форма.
+
+`xray run -test` 26.9.30, адрес 10.0.0.1 (приватный, чтобы не мешал запрет plaintext):
+
+| `settings` | результат |
+|---|---|
+| плоская форма; `level: 255`, `email` | OK |
+| `level: 256` | отказ: `cannot unmarshal number 256 … of type uint8` |
+| `port: "443"` | отказ: `cannot unmarshal string … of type uint16` |
+| `port: 0` / `password: ""` | отказ: `Invalid Trojan port.` / `Trojan password is not specified.` |
+| `password: " "` | OK — пароль не обрезается |
+| `flow: "xtls-rprx-direct"` | отказ: `The feature Flow for Trojan has been removed` |
+| `servers` из 1 / `address: null` + `servers` из 1 | OK |
+| `servers` из 0 или 2 | отказ: `"servers" should have one and only one member` |
+| плоский `address` + `servers` из 2 | OK — `servers` игнорируется |
+| `email: 5` | отказ: `… of type string` |
+| неизвестный ключ | OK |
+| публичный адрес без TLS / с `security: tls` | отказ (`PlaintextOutboundForbidden`, §94) / OK |
+
+## 127.2	Модель (`outbound_protocol/trojan.rs`)
+
+- `TrojanOutboundSettings { address, port, password, level, email, flow, legacy_servers }`;
+  `OutboundSettingsDraft::Trojan`, `trojan_default()`, `protocol_name() = "trojan"`;
+  `is_shell_editable_protocol` включает `trojan`.
+- Разбор: ядро читает `servers`, если `address` отсутствует или `null`, а `servers` задан. Тогда
+  черновик берётся из `servers[0]` с `legacy_servers = true`, если сервер ровно один, его ключи ⊆
+  ключей плоской формы, а строковые поля — строки; иначе `None` и причина в
+  `legacy_servers_blocker`. При плоском `address` `servers` не трогается (ядро его игнорирует) и
+  сохраняется как есть.
+- Запись: плоские ключи принадлежат черновику — `address` (trim), `port` числом 1–65535,
+  `password` как набран (непустой), `level` 0–255 (пусто — ключ удаляется), `email` (пусто —
+  удаляется), `flow` удаляется; при `legacy_servers` удаляется и `servers`. Непустой `flow` в
+  черновике — ошибка («use Remove flow»): с ним конфигурация всё равно не загрузится.
+- `outbound_shell_blocker(outbound)` в `outbound_protocol` вместо экспорта
+  `legacy_vnext_blocker`: причина для VLESS `vnext[]` или Trojan `servers[]` с проверкой протокола
+  (у Socks/HTTP тоже есть `servers`, у VMess — `vnext`); `begin_edit_outbound_shell` выводит её.
+- `SHELL_EDITABLE_PROTOCOLS` — общий текст списка протоколов Shell для `duplicate_outbound`,
+  `validate_outbound_object` и подсказок Edit/Duplicate в GUI.
+
+## 127.3	Предупреждения, сводка, GUI
+
+- `TrojanServersNotSingle` (`settings.servers`) — `servers` читается ядром и в нём не один
+  элемент; `TrojanFlowRemoved` (`settings.flow` или `settings.servers[0].flow`) — непустой `flow`
+  у той записи, которую читает ядро.
+- `summary.rs`: строка таблицы — `address:port` (плоская форма побеждает `servers[0]`, как в ядре).
+- `outbounds.rs`: пункт «Trojan» в «Add Outbound»; Edit/Duplicate через `is_shell_kind`;
+  `show_trojan_settings_edit` — серая пометка об устаревании, курсивная пометка о конвертации
+  `servers[]`, для `flow` с диска — янтарное предупреждение и «Remove flow»; поля `address`, `port`,
+  `password` (маскированный), `level`, `email`. Stream / Security, Socket options и Mux — общие
+  секции. Справка EN+RU — 6 текстов. `docs/ui.md` дополнен.
+
+## 127.4	Итог
+
+Тесты (+10): `trojan.rs` — 7 (круговой Save плоской формы с чужими ключами и паролем с пробелами;
+запись чисел и удаление пустых; 7 отказов как в ядре без частичной записи; «Remove flow»;
+конвертация `servers[0]` и повторный разбор; плоский `address` побеждает `servers`; 6 блокеров),
+`warnings` — 1, `modify_tests` — 1 (Add с Mux → Edit с сохранением `mux` и чужого ключа →
+Duplicate), `tests` — 1 (сводка). Итог: **1424 passed / 0 failed**, clippy lib 65 (без
+изменений). GUI в запущенном приложении не проверялся.

@@ -144,7 +144,7 @@ use crate::xray::{
     XrayLogLineLimit, XrayLogService, XrayLogSourceKind, add_inbound, is_shell_editable_protocol,
     parse_debug_vars_stdout,
     parse_inbound_general, parse_inbound_protocol, parse_inbound_security, parse_inbound_stream,
-    legacy_vnext_blocker, parse_outbound_general, parse_outbound_settings, parse_sniffing_settings,
+    outbound_shell_blocker, parse_outbound_general, parse_outbound_settings, parse_sniffing_settings,
     parse_stats_query_stdout, parse_stats_sys_stdout,
     port_is_shell_editable, raw_port_display, update_api_settings, update_dns_settings,
     update_fakedns_settings, update_routing_settings, update_policy_settings,
@@ -7108,6 +7108,11 @@ impl ApplicationService {
         self.begin_add_outbound(OutboundSettingsDraft::loopback_default())
     }
 
+    /// Opens an Add session for a new Trojan outbound (Roadmap §4.2).
+    pub fn begin_add_outbound_trojan(&mut self) -> Result<(), String> {
+        self.begin_add_outbound(OutboundSettingsDraft::trojan_default())
+    }
+
     fn begin_add_outbound(&mut self, settings: OutboundSettingsDraft) -> Result<(), String> {
         if self.is_any_remote_busy() {
             return Err("Another operation is already running.".to_owned());
@@ -7148,8 +7153,8 @@ impl ApplicationService {
             .value()
             .clone();
         let settings = parse_outbound_settings(&outbound_value).ok_or_else(|| {
-            match legacy_vnext_blocker(&outbound_value) {
-                Some(reason) => format!("Legacy VLESS vnext[] cannot be converted: {reason}. Use Raw JSON."),
+            match outbound_shell_blocker(&outbound_value) {
+                Some(reason) => format!("{reason}. Use Raw JSON."),
                 None => "Protocol not supported for shell edit.".to_owned(),
             }
         })?;
