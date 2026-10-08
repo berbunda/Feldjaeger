@@ -691,15 +691,15 @@ fn show_rule_edit_form(
     egui::CollapsingHeader::new(rule_title(rule))
         .id_salt(("routing_rule_edit", index))
         .show(ui, |ui| {
-            optional_text_row(ui, "ruleTag", HELP_RULE_TAG, &mut rule.rule_tag, "my-rule");
+            super::optional_text_row(ui, "ruleTag", HELP_RULE_TAG, &mut rule.rule_tag, "my-rule", 220.0, ("routing_rule_tag", index));
 
             ui.add_space(6.0);
             ui.label(RichText::new("Matching Conditions").strong());
             help_multiline_list_row(ui, "domain (one per line)", HELP_RULE_DOMAIN, &mut rule.domain, ("routing_rule_domain", index));
             help_multiline_list_row(ui, "ip (one per line)", HELP_RULE_IP, &mut rule.ip, ("routing_rule_ip", index));
-            optional_text_row(ui, "port", HELP_RULE_PORT, &mut rule.port, "443 or 1000-2000");
-            optional_text_row(ui, "sourcePort", HELP_RULE_SOURCE_PORT, &mut rule.source_port, "1000-2000");
-            optional_text_row(ui, "localPort", HELP_RULE_LOCAL_PORT, &mut rule.local_port, "1000-2000");
+            super::optional_text_row(ui, "port", HELP_RULE_PORT, &mut rule.port, "443 or 1000-2000", 220.0, ("routing_rule_port", index));
+            super::optional_text_row(ui, "sourcePort", HELP_RULE_SOURCE_PORT, &mut rule.source_port, "1000-2000", 220.0, ("routing_rule_source_port", index));
+            super::optional_text_row(ui, "localPort", HELP_RULE_LOCAL_PORT, &mut rule.local_port, "1000-2000", 220.0, ("routing_rule_local_port", index));
             ui.horizontal(|ui| {
                 field_label(ui, "network", HELP_RULE_NETWORK);
                 optional_network_combo(ui, ("routing_rule_network", index), &mut rule.network);
@@ -707,7 +707,7 @@ fn show_rule_edit_form(
             help_multiline_list_row(ui, "sourceIP (one per line)", HELP_RULE_SOURCE_IP, &mut rule.source_ip, ("routing_rule_source_ip", index));
             help_multiline_list_row(ui, "localIP (one per line)", HELP_RULE_LOCAL_IP, &mut rule.local_ip, ("routing_rule_local_ip", index));
             help_multiline_list_row(ui, "user (one per line)", HELP_RULE_USER, &mut rule.user, ("routing_rule_user", index));
-            optional_text_row(ui, "vlessRoute", HELP_RULE_VLESS_ROUTE, &mut rule.vless_route, "0-1");
+            super::optional_text_row(ui, "vlessRoute", HELP_RULE_VLESS_ROUTE, &mut rule.vless_route, "0-1", 220.0, ("routing_rule_vless_route", index));
             help_multiline_list_row(
                 ui,
                 "inboundTag (one per line)",
@@ -743,8 +743,8 @@ fn show_rule_edit_form(
 
             ui.add_space(8.0);
             ui.label(RichText::new("Target").strong());
-            optional_text_row(ui, "outboundTag", HELP_RULE_OUTBOUND_TAG, &mut rule.outbound_tag, "proxy");
-            optional_text_row(ui, "balancerTag", HELP_RULE_BALANCER_TAG, &mut rule.balancer_tag, "lb");
+            super::optional_text_row(ui, "outboundTag", HELP_RULE_OUTBOUND_TAG, &mut rule.outbound_tag, "proxy", 220.0, ("routing_rule_outbound_tag", index));
+            super::optional_text_row(ui, "balancerTag", HELP_RULE_BALANCER_TAG, &mut rule.balancer_tag, "lb", 220.0, ("routing_rule_balancer_tag", index));
 
             ui.add_space(8.0);
             show_webhook_edit(ui, rule, index);
@@ -819,7 +819,7 @@ fn show_balancer_edit_form(
                 &mut balancer.selector,
                 ("routing_balancer_selector", index),
             );
-            optional_text_row(ui, "fallbackTag", HELP_BALANCER_FALLBACK_TAG, &mut balancer.fallback_tag, "direct");
+            super::optional_text_row(ui, "fallbackTag", HELP_BALANCER_FALLBACK_TAG, &mut balancer.fallback_tag, "direct", 220.0, ("routing_balancer_fallback_tag", index));
 
             ui.add_space(6.0);
             show_strategy_edit(ui, balancer, index);
@@ -862,7 +862,7 @@ fn show_strategy_edit(ui: &mut Ui, balancer: &mut BalancerEntry, index: usize) {
                     .default_open(true)
                     .show(ui, |ui| {
                         optional_i64_row(ui, "expected", HELP_LEAST_LOAD_SETTINGS, &mut settings.expected, "routing_strategy_expected");
-                        optional_text_row(ui, "maxRTT", HELP_LEAST_LOAD_SETTINGS, &mut settings.max_rtt, "1s");
+                        super::optional_text_row(ui, "maxRTT", HELP_LEAST_LOAD_SETTINGS, &mut settings.max_rtt, "1s", 220.0, ("routing_balancer_max_rtt", index));
                         optional_f64_row(ui, "tolerance", HELP_LEAST_LOAD_SETTINGS, &mut settings.tolerance, "routing_strategy_tolerance");
                         help_multiline_list_row(
                             ui,
@@ -954,24 +954,6 @@ fn pairs_editor(ui: &mut Ui, pairs: &mut Vec<(String, String)>) {
     if ui.button("Add entry").clicked() {
         pairs.push((String::new(), String::new()));
     }
-}
-
-fn optional_text_row(ui: &mut Ui, label: &'static str, help: HelpText, value: &mut Option<String>, hint: &str) {
-    let mut text = value.clone().unwrap_or_default();
-    ui.horizontal(|ui| {
-        field_label(ui, label, help);
-        if ui
-            .add(TextEdit::singleline(&mut text).desired_width(220.0).hint_text(hint))
-            .changed()
-        {
-            let trimmed = text.trim();
-            *value = if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_owned())
-            };
-        }
-    });
 }
 
 fn optional_i64_row(

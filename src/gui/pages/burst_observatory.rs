@@ -518,26 +518,32 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
     egui::CollapsingHeader::new("Ping configuration settings")
         .default_open(true)
         .show(ui, |ui| {
-            optional_text_row(
+            super::optional_text_row(
                 ui,
                 "destination",
+                HELP_DESTINATION,
                 &mut ping_config.destination,
                 "https://connectivitycheck.gstatic.com/generate_204 (default)",
-                HELP_DESTINATION,
+                280.0,
+                "burst_ping_destination",
             );
-            optional_text_row(
+            super::optional_text_row(
                 ui,
                 "connectivity",
+                HELP_CONNECTIVITY,
                 &mut ping_config.connectivity,
                 "(default: no check)",
-                HELP_CONNECTIVITY,
+                280.0,
+                "burst_ping_connectivity",
             );
-            optional_text_row(
+            super::optional_text_row(
                 ui,
                 "interval",
+                HELP_INTERVAL,
                 &mut ping_config.interval,
                 "1m (default, min 10s)",
-                HELP_INTERVAL,
+                280.0,
+                "burst_ping_interval",
             );
             optional_u64_row(
                 ui,
@@ -547,7 +553,15 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
                 "burst_ping_sampling",
                 HELP_SAMPLING,
             );
-            optional_text_row(ui, "timeout", &mut ping_config.timeout, "5s (default)", HELP_TIMEOUT);
+            super::optional_text_row(
+                ui,
+                "timeout",
+                HELP_TIMEOUT,
+                &mut ping_config.timeout,
+                "5s (default)",
+                280.0,
+                "burst_ping_timeout",
+            );
 
             ui.horizontal(|ui| {
                 super::help_button(ui, "httpMethod", HELP_HTTP_METHOD);
@@ -555,31 +569,6 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
                 http_method_combo(ui, "burst_ping_http_method", &mut ping_config.http_method);
             });
         });
-}
-
-fn optional_text_row(
-    ui: &mut Ui,
-    label: &'static str,
-    value: &mut Option<String>,
-    hint: &str,
-    help: HelpText,
-) {
-    let mut text = value.clone().unwrap_or_default();
-    ui.horizontal(|ui| {
-        super::help_button(ui, label, help);
-        ui.label(label);
-        if ui
-            .add(TextEdit::singleline(&mut text).desired_width(280.0).hint_text(hint))
-            .changed()
-        {
-            let trimmed = text.trim();
-            *value = if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_owned())
-            };
-        }
-    });
 }
 
 fn optional_u64_row(

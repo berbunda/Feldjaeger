@@ -298,14 +298,24 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
     ui.strong("General");
     ui.add_space(4.0);
 
-    optional_text_row(
+    super::optional_text_row(
         ui,
         "probeUrl",
+        HELP_PROBE_URL,
         &mut draft.probe_url,
         "https://www.google.com/generate_204",
-        HELP_PROBE_URL,
+        280.0,
+        "observatory_probe_url",
     );
-    optional_text_row(ui, "probeInterval", &mut draft.probe_interval, "10s", HELP_PROBE_INTERVAL);
+    super::optional_text_row(
+        ui,
+        "probeInterval",
+        HELP_PROBE_INTERVAL,
+        &mut draft.probe_interval,
+        "10s",
+        280.0,
+        "observatory_probe_interval",
+    );
     ui.horizontal(|ui| {
         super::help_button(ui, "enableConcurrency", HELP_ENABLE_CONCURRENCY);
         ui.checkbox(&mut draft.enable_concurrency, "enableConcurrency");
@@ -323,27 +333,3 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
     });
 }
 
-fn optional_text_row(
-    ui: &mut Ui,
-    label: &'static str,
-    value: &mut Option<String>,
-    hint: &str,
-    help: HelpText,
-) {
-    let mut text = value.clone().unwrap_or_default();
-    ui.horizontal(|ui| {
-        super::help_button(ui, label, help);
-        ui.label(label);
-        if ui
-            .add(TextEdit::singleline(&mut text).desired_width(280.0).hint_text(hint))
-            .changed()
-        {
-            let trimmed = text.trim();
-            *value = if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_owned())
-            };
-        }
-    });
-}

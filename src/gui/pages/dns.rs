@@ -567,7 +567,7 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
     ui.strong("General information");
     ui.add_space(4.0);
 
-    optional_text_row(ui, "clientIp", HELP_CLIENT_IP, &mut draft.client_ip, "1.2.3.4");
+    super::optional_text_row(ui, "clientIp", HELP_CLIENT_IP, &mut draft.client_ip, "1.2.3.4", 220.0, "dns_client_ip");
 
     ui.horizontal(|ui| {
         field_label(ui, "queryStrategy", HELP_QUERY_STRATEGY);
@@ -590,7 +590,7 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
     help_checkbox(ui, "enableParallelQuery", HELP_ENABLE_PARALLEL_QUERY, &mut draft.enable_parallel_query);
     help_checkbox(ui, "useSystemHosts", HELP_USE_SYSTEM_HOSTS, &mut draft.use_system_hosts);
 
-    optional_text_row(ui, "tag", HELP_TAG, &mut draft.tag, "dns-out");
+    super::optional_text_row(ui, "tag", HELP_TAG, &mut draft.tag, "dns-out", 220.0, "dns_tag");
 
     ui.add_space(16.0);
     ui.separator();
@@ -690,8 +690,8 @@ fn show_server_edit_form(
     help_checkbox(ui, "skipFallback", HELP_SERVER_SKIP_FALLBACK, &mut server.skip_fallback);
     help_checkbox(ui, "finalQuery", HELP_SERVER_FINAL_QUERY, &mut server.final_query);
     optional_u32_row(ui, "timeoutMs", HELP_SERVER_TIMEOUT, &mut server.timeout_ms, ("dns_server_timeout", index));
-    optional_text_row(ui, "tag", HELP_SERVER_TAG, &mut server.tag, "server-tag");
-    optional_text_row(ui, "clientIP", HELP_SERVER_CLIENT_IP, &mut server.client_ip, "1.2.3.4");
+    super::optional_text_row(ui, "tag", HELP_SERVER_TAG, &mut server.tag, "server-tag", 220.0, ("dns_server_tag", index));
+    super::optional_text_row(ui, "clientIP", HELP_SERVER_CLIENT_IP, &mut server.client_ip, "1.2.3.4", 220.0, ("dns_server_client_ip", index));
 
     ui.horizontal(|ui| {
         field_label(ui, "queryStrategy", HELP_SERVER_QUERY_STRATEGY);
@@ -735,24 +735,6 @@ fn show_host_edit_form(
 }
 
 // ─── Small editing widgets ──────────────────────────────────────────────────
-
-fn optional_text_row(ui: &mut Ui, label: &'static str, help: HelpText, value: &mut Option<String>, hint: &str) {
-    let mut text = value.clone().unwrap_or_default();
-    ui.horizontal(|ui| {
-        field_label(ui, label, help);
-        if ui
-            .add(TextEdit::singleline(&mut text).desired_width(220.0).hint_text(hint))
-            .changed()
-        {
-            let trimmed = text.trim();
-            *value = if trimmed.is_empty() {
-                None
-            } else {
-                Some(trimmed.to_owned())
-            };
-        }
-    });
-}
 
 fn optional_u16_row(
     ui: &mut Ui,

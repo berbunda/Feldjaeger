@@ -668,6 +668,34 @@ pub(crate) fn persistent_list_text_edit(
     changed
 }
 
+/// Optional one-line text field with a [`help_button`] label: blank = `None`, otherwise the
+/// trimmed text. The typed text lives in a frame-persistent buffer, so a space being typed
+/// (`foo bar`) survives although the model keeps only the trimmed value. `id` must be unique
+/// among rows drawn in the same `Ui` (e.g. include the list index).
+pub(crate) fn optional_text_row(
+    ui: &mut Ui,
+    label: &'static str,
+    help: HelpText,
+    value: &mut Option<String>,
+    hint: &str,
+    width: f32,
+    id: impl std::hash::Hash + std::fmt::Debug,
+) {
+    let buffer_id = ui.make_persistent_id(id);
+    let mut text = load_text_buffer(ui, buffer_id, value, || value.clone().unwrap_or_default());
+    ui.horizontal(|ui| {
+        field_label(ui, label, help);
+        if ui
+            .add(egui::TextEdit::singleline(&mut text).desired_width(width).hint_text(hint))
+            .changed()
+        {
+            let trimmed = text.trim();
+            *value = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+        }
+    });
+    store_text_buffer(ui, buffer_id, value.clone(), text);
+}
+
 /// [`persistent_multiline_list_row`] whose label carries a [`help_button`].
 pub(crate) fn help_multiline_list_row(
     ui: &mut Ui,
@@ -861,5 +889,55 @@ mod tests {
             .expect("buffer");
         assert_eq!(stored.text, "b\nc");
         assert_eq!(stored.source, values);
+    }
+
+    /// Roadmap §4.4: a space being typed in a one-line optional field survives the frame, and a
+    /// second row with the same label but another `id` keeps its own buffer.
+    #[test]
+    fn optional_text_row_keeps_a_space_being_typed() {
+        const HELP: HelpText = HelpText::new("help", "справка");
+        let ctx = egui::Context::default();
+        let mut first = Some("foo".to_owned());
+        let mut second = Some("bar".to_owned());
+        let mut buffer_id = egui::Id::NULL;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            buffer_id = ui.make_persistent_id(("tag", 0));
+        })
+        .drop_without_applying_deltas();
+        ctx.data_mut(|d| {
+            d.insert_temp(
+                buffer_id,
+                SourcedTextBuffer {
+                    source: first.clone(),
+                    text: "foo ".to_owned(),
+                },
+            );
+        });
+
+        for _ in 0..2 {
+            ctx.run_ui(egui::RawInput::default(), |ui| {
+                optional_text_row(ui, "tag", HELP, &mut first, "", 220.0, ("tag", 0));
+                optional_text_row(ui, "tag", HELP, &mut second, "", 220.0, ("tag", 1));
+            })
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(first.as_deref(), Some("foo"));
+        assert_eq!(second.as_deref(), Some("bar"));
+        let stored = ctx
+            .data(|d| d.get_temp::<SourcedTextBuffer<Option<String>>>(buffer_id))
+            .expect("buffer");
+        assert_eq!(stored.text, "foo ");
+
+        // Cancel / reset replaced the value: the buffer gives way to the model.
+        first = None;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            optional_text_row(ui, "tag", HELP, &mut first, "", 220.0, ("tag", 0));
+        })
+        .drop_without_applying_deltas();
+        let stored = ctx
+            .data(|d| d.get_temp::<SourcedTextBuffer<Option<String>>>(buffer_id))
+            .expect("buffer");
+        assert_eq!(stored.text, "");
+        assert_eq!(stored.source, None);
     }
 }
