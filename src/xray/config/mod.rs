@@ -232,8 +232,10 @@ pub use observatory_settings::{
     validate_observatory_settings,
 };
 pub use outbound_edit::{
-    LegacyProxySettings, OutboundGeneral, OutboundRef, ProxySettingsMigration, apply_outbound_general,
-    parse_outbound_general, validate_send_through,
+    LegacyProxySettings, MUX_CONCURRENCY_EFFECTIVE_MAX, MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX,
+    MUX_XUDP_PROXY_UDP443_VALUES, OutboundGeneral, OutboundMux, OutboundRef, ProxySettingsMigration,
+    apply_outbound_general, parse_outbound_general, parse_outbound_mux, validate_outbound_mux,
+    validate_send_through,
 };
 pub use outbound_protocol::{
     BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS, DnsRuleDraft,

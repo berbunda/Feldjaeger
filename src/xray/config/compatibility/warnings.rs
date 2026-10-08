@@ -37,6 +37,7 @@ use crate::xray::config::stream::{
 };
 
 use crate::xray::config::inbound_stream::{KCP_IGNORED_FIELDS, KCP_LEGACY_OBFUSCATION_FIELDS};
+use crate::xray::config::outbound_edit::{parse_outbound_mux, validate_outbound_mux};
 use crate::xray::config::outbound_protocol::FREEDOM_LEGACY_STRATEGY_KEYS;
 
 /// Stable warning identifiers (never block Save; see the module docs).
@@ -144,6 +145,18 @@ pub enum CompatibilityWarningId {
     /// mode, a domain) — Xray-core v26.9.30+ panics at start, `xray run -test` included;
     /// [`WarningSeverity::Danger`].
     WireGuardRemoteDnsNotIp,
+    /// Outbound `mux` that `MuxConfig` cannot decode or build — a non-object, a field of the wrong
+    /// JSON type or outside `int16`, `xudpProxyUDP443` other than `reject` / `allow` / `skip`
+    /// (checked even with Mux off): the config does not load (Roadmap §4.2).
+    MuxRejected,
+    /// `mux.enabled` on a Freedom / Loopback outbound: the Mux client sends its sub-connections to
+    /// the pseudo-destination `v1.mux.cool`, which these handlers cannot serve — every connection
+    /// through the outbound fails (live check, Xray 26.9.30).
+    MuxOnNonProxyOutbound,
+    /// VLESS with an `xtls-rprx-vision` flow and `mux.enabled` carrying TCP (`concurrency` ≥ 0):
+    /// the Vision server breaks Mux connections that contain TCP, so TCP through the outbound
+    /// fails; `concurrency: -1` with XUDP works (live check, Xray 26.9.30).
+    MuxVisionCarriesTcp,
 }
 
 /// How a warning is shown: [`Self::Danger`] gets the red road-sign style in the GUI and
@@ -308,6 +321,22 @@ impl CompatibilityWarningId {
                  address — the \"local\" mode and domain names were removed \
                  (XTLS/Xray-core#6771); `xray run -test` panics too. Replace it with an IP, e.g. \
                  1.1.1.1"
+            }
+            Self::MuxRejected => {
+                "rejected by Xray-core: `mux` must be an object with `enabled` true/false, \
+                 `concurrency` / `xudpConcurrency` whole numbers from -32768 to 32767 and \
+                 `xudpProxyUDP443` reject / allow / skip (lowercase, checked even with Mux off); \
+                 the config does not load"
+            }
+            Self::MuxOnNonProxyOutbound => {
+                "breaks the outbound: Freedom and Loopback cannot carry Mux, so with `mux.enabled` \
+                 every connection through this outbound fails; Mux belongs on a proxy outbound \
+                 (VLESS, Trojan, …) — use \"Remove mux\" in the editor"
+            }
+            Self::MuxVisionCarriesTcp => {
+                "breaks TCP: an xtls-rprx-vision server drops Mux connections that carry TCP, so \
+                 TCP through this outbound fails; with Vision set `concurrency` to -1 (TCP outside \
+                 Mux) and use `xudpConcurrency` for UDP"
             }
         };
         Cow::Borrowed(text)
@@ -527,7 +556,67 @@ pub fn outbound_warnings(outbound: &Value, core: Option<XrayCoreVersion>) -> Vec
         }
         outbound_stream_warnings(stream, &mut warnings);
     }
+    mux_warnings(outbound, &mut warnings);
     warnings
+}
+
+/// Outbound `mux` (Roadmap §4.2): what the core refuses, and the two live-checked ways an
+/// accepted `mux` breaks traffic.
+fn mux_warnings(outbound: &Value, warnings: &mut Vec<CompatibilityWarning>) {
+    if outbound.get("mux").is_none_or(Value::is_null) {
+        return;
+    }
+    let mux = parse_outbound_mux(outbound);
+    if mux.foreign.is_some() {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::MuxRejected,
+            location: "mux".to_owned(),
+        });
+        return;
+    }
+    if validate_outbound_mux(&mux).is_err() {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::MuxRejected,
+            location: "mux.xudpProxyUDP443".to_owned(),
+        });
+    }
+    if !mux.enabled {
+        return;
+    }
+    let protocol = outbound
+        .get("protocol")
+        .and_then(Value::as_str)
+        .map(|protocol| protocol.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    match protocol.as_str() {
+        "freedom" | "loopback" => warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::MuxOnNonProxyOutbound,
+            location: "mux.enabled".to_owned(),
+        }),
+        "vless" if vless_outbound_flow(outbound).starts_with("xtls-rprx-vision")
+            && mux.effective_concurrency().is_some_and(|concurrency| concurrency >= 0) =>
+        {
+            warnings.push(CompatibilityWarning {
+                id: CompatibilityWarningId::MuxVisionCarriesTcp,
+                location: "mux.concurrency".to_owned(),
+            });
+        }
+        _ => {}
+    }
+}
+
+/// The `flow` a VLESS outbound uses: the flat `settings.flow` when `settings.address` is set,
+/// else `vnext[0].users[0].flow` (as `VLessOutboundConfig.Build()` picks).
+fn vless_outbound_flow(outbound: &Value) -> &str {
+    let Some(settings) = outbound.get("settings") else {
+        return "";
+    };
+    let flow = if settings.get("address").is_some_and(|address| !address.is_null()) {
+        settings.get("flow")
+    } else {
+        settings.pointer("/vnext/0/users/0/flow")
+    };
+    flow.and_then(Value::as_str).map(str::trim).unwrap_or("")
 }
 
 /// Location of the `vnext[]` / `users[]` array a VLESS outbound has other than one entry in, when
@@ -1301,6 +1390,49 @@ mod tests {
         assert!(outbound_warnings(&reality, None).is_empty());
         let off = json!({"streamSettings": {"security": "tls", "tlsSettings": {"allowInsecure": false}}});
         assert!(outbound_warnings(&off, None).is_empty());
+    }
+
+    /// Roadmap §4.2: `mux` — `xray run -test` refusals and the two live-checked breakages.
+    #[test]
+    fn flags_mux_the_core_refuses_or_that_breaks_traffic() {
+        let ids = |outbound: Value| -> Vec<_> {
+            outbound_warnings(&outbound, None).into_iter().map(|w| (w.id, w.location)).collect()
+        };
+        let vision = |mux: Value| {
+            json!({"protocol": "vless", "settings": {"address": "10.0.0.1", "port": 443, "id": "x",
+                   "flow": "xtls-rprx-vision", "encryption": "none"},
+                   "streamSettings": {"security": "tls"}, "mux": mux})
+        };
+        let rejected = |location: &str| vec![(CompatibilityWarningId::MuxRejected, location.to_owned())];
+        assert_eq!(ids(json!({"protocol": "vless", "mux": "on"})), rejected("mux"));
+        assert_eq!(ids(json!({"protocol": "vless", "mux": {"concurrency": "8"}})), rejected("mux"));
+        assert_eq!(
+            ids(json!({"protocol": "vless", "mux": {"enabled": false, "xudpProxyUDP443": "Reject"}})),
+            rejected("mux.xudpProxyUDP443")
+        );
+        assert_eq!(
+            ids(json!({"protocol": "freedom", "mux": {"enabled": true}})),
+            vec![(CompatibilityWarningId::MuxOnNonProxyOutbound, "mux.enabled".to_owned())]
+        );
+        assert_eq!(
+            ids(json!({"protocol": "loopback", "mux": {"enabled": true}})),
+            vec![(CompatibilityWarningId::MuxOnNonProxyOutbound, "mux.enabled".to_owned())]
+        );
+        assert!(ids(json!({"protocol": "freedom", "mux": {"enabled": false, "concurrency": 8}})).is_empty());
+        let tcp = vec![(CompatibilityWarningId::MuxVisionCarriesTcp, "mux.concurrency".to_owned())];
+        assert_eq!(ids(vision(json!({"enabled": true}))), tcp);
+        assert_eq!(ids(vision(json!({"enabled": true, "concurrency": 0}))), tcp);
+        assert!(ids(vision(json!({"enabled": true, "concurrency": -1, "xudpConcurrency": 16}))).is_empty());
+        assert!(ids(vision(json!({"enabled": false}))).is_empty());
+        // Legacy vnext form: the flow comes from users[0].
+        let legacy = json!({"protocol": "vless", "settings": {"vnext": [{"address": "10.0.0.1", "port": 443,
+            "users": [{"id": "x", "flow": "xtls-rprx-vision-udp443", "encryption": "none"}]}]},
+            "streamSettings": {"security": "tls"}, "mux": {"enabled": true, "concurrency": 4}});
+        assert_eq!(ids(legacy), tcp);
+        // Without Vision, Mux over VLESS works.
+        let plain = json!({"protocol": "vless", "settings": {"address": "10.0.0.1", "port": 443, "id": "x",
+            "encryption": "none"}, "streamSettings": {"security": "tls"}, "mux": {"enabled": true}});
+        assert!(ids(plain).is_empty());
     }
 
     /// Roadmap §2.3: the server side rejects `allowInsecure: true` as well.

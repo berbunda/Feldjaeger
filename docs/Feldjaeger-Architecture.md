@@ -10063,3 +10063,100 @@ failed**, clippy lib 65 (без изменений). GUI в запущенном
 при модели `Some("foo")`, вторая строка с той же подписью и другим `id` его не затирает, смена
 значения извне сбрасывает буфер. Итог с §124: **1405 passed / 0 failed**, clippy lib 65 (без
 изменений). GUI в запущенном приложении не проверялся.
+
+# 126	Outbound `mux` editor (Roadmap §4.2) (0.5.61-0)
+
+## 126.1	Сверка с ядром
+
+Xray-core v26.9.30 (тег, исходники скачаны с GitHub): `infra/conf/xray.go` — `MuxConfig`
+(`enabled bool`, `concurrency int16`, `xudpConcurrency int16`, `xudpProxyUDP443 string`) и
+`MuxConfig.Build()`; `app/proxyman/outbound/handler.go` — применение; документация
+`config/outbound.md` (MuxObject) через Context7 совпадает с кодом.
+
+Поведение ядра:
+- `concurrency`: `0` → 8; `< 0` — TCP не идёт через Mux; по документации 1–128, большее
+  работает как 128 (`MaxConnection: 128`).
+- `xudpConcurrency`: `0` — UDP по тем же Mux-соединениям; `> 0` — отдельный туннель XUDP
+  (документированный максимум 1024); `< 0` — собственный UDP протокола (у VLESS — UoT).
+- `xudpProxyUDP443`: `reject` (по умолчанию) / `allow` / `skip`; при любом `enabled: true` действует
+  до разбора XUDP.
+
+`xray run -test` 26.9.30 (`xray-bin/xray.exe`):
+
+| `mux` | результат |
+|---|---|
+| `"xudpProxyUDP443": "Reject"` | отказ: `unknown "xudpProxyUDP443": Reject` |
+| `"enabled": false, "xudpProxyUDP443": "x"` | отказ — проверяется и при выключенном Mux |
+| `"concurrency": 40000` / `"8"` / `8.5` | отказ: `cannot unmarshal … of type int16` |
+| `"enabled": "true"` | отказ: `… of type bool` |
+| `"on"` (не объект) | отказ: `… of type conf.MuxConfig` |
+| `null`, неизвестный ключ `foo` | `Configuration OK.` |
+
+Живые проверки: два `xray.exe` 26.9.30 на 127.0.0.1 (VLESS + TLS с самоподписанным
+сертификатом, клиент — `pinnedPeerCertSha256`), `curl --socks5-hostname` к https://example.com,
+по два запроса:
+
+| клиент | результат |
+|---|---|
+| VLESS `xtls-rprx-vision`, без mux | 200, 200 |
+| Vision + `{"enabled": true, "concurrency": 8}` | 000, 000 — сервер обрывает Mux с TCP (`proxy/vless/inbound`: «we will break Mux connections that contain TCP requests») |
+| Vision + `{"enabled": true, "concurrency": -1, "xudpConcurrency": 16}` | 200, 200 |
+| VLESS без flow + `{"enabled": true, "concurrency": 8}` | 200, 200 |
+| Freedom + `{"enabled": true}` | 000, 000 |
+| Freedom + `{"enabled": false, "concurrency": 8}` | 200, 200 |
+| Loopback + `{"enabled": true}` (→ Freedom) | 000, 000; без mux — 200, 200 |
+| DNS-outbound | 000 и без mux (не пропускает обычный TCP) — вывода о mux нет |
+
+В журналах ядра на уровне warning эти отказы не видны — соединение принимается и молча
+обрывается.
+
+## 126.2	Модель (`outbound_edit/mux.rs`)
+
+- `OutboundMux { enabled, concurrency, xudp_concurrency, xudp_proxy_udp443, extras, foreign }`:
+  числа — свободный текст (пусто — ключа нет), неизвестные ключи `mux` — `extras` как есть.
+  `foreign` — причина, по которой `mux` с диска нельзя представить: не объект, поле не того JSON-типа
+  или вне `int16`. `null` — как отсутствие.
+- `validate_outbound_mux` — проверка как при декодировании и `Build()`: `int16`, точное
+  `reject`/`allow`/`skip`; для `foreign` — «use Raw JSON».
+- `apply_outbound_mux` (через `apply_outbound_general`): черновик, равный разбору текущего
+  outbound, ничего не пишет — Save без правок байт в байт, даже для значения, которое ядро
+  отвергает; пустой черновик удаляет `mux`; иначе объект собирается заново: `extras` + `enabled`
+  (пишется всегда) + числа JSON-числами + `xudpProxyUDP443`, если задан.
+- Черновик лежит в `OutboundGeneral::mux: Option<OutboundMux>` — `mux`, как `tag` и `sendThrough`,
+  ключ верхнего уровня outbound, и так не пришлось менять запросы Add/Update. `None` (значение по
+  умолчанию) оставляет `mux` как есть, поэтому вручную собранный `OutboundGeneral` его не трогает;
+  `parse_outbound_general` всегда заполняет `Some`, Add-сессия начинает с пустого черновика.
+
+## 126.3	Предупреждения (`outbound_warnings` → `mux_warnings`)
+
+- `MuxRejected` (`mux` или `mux.xudpProxyUDP443`) — то, что ядро не загрузит (таблица выше).
+- `MuxOnNonProxyOutbound` (`mux.enabled`) — Freedom и Loopback с `enabled: true`. Blackhole и DNS
+  не включены: первый трафик и так отбрасывает, у второго живая проверка ничего не показала.
+- `MuxVisionCarriesTcp` (`mux.concurrency`) — VLESS с flow, начинающимся на `xtls-rprx-vision`
+  (`-udp443` ядро сводит к тому же Vision), при `enabled` и действующем `concurrency ≥ 0` (пусто и
+  0 — это 8). Flow берётся как в `VLessOutboundConfig.Build()`: плоский `settings.flow` при
+  непустом `settings.address`, иначе `vnext[0].users[0].flow`.
+
+Все три — Caution, Save не блокируют. Невалидное значение в черновике блокирует Save
+валидацией (`apply_outbound_general`).
+
+## 126.4	GUI (`outbounds.rs::show_outbound_mux_edit`)
+
+Секция «Mux» после Socket options. У прокси-outbound (`outbound_protocol_has_transport`: сейчас
+VLESS, дальше Trojan / Socks / Hysteria) — `enabled`, `concurrency`, `xudpConcurrency`,
+`xudpProxyUDP443` (`optional_string_combo`, пусто — reject), красная строка ошибки валидации,
+янтарные подсказки (concurrency > 128 работает как 128, xudpConcurrency выше документированных 1024)
+и список сохраняемых неизвестных ключей. Над полями — mux-предупреждения черновика
+(`outbound_editor_warnings`). Для Freedom / Loopback / Blackhole / DNS секция появляется только
+при `mux` на диске: пояснение и «Remove mux»; так же — для `foreign`. Справка EN+RU — 5 текстов.
+`docs/ui.md` дополнен.
+
+## 126.5	Итог
+
+Тесты (+9): `mux.rs` — 7 (разбор и `extras`; формы, которые ядро не декодирует; Save без правок
+байт в байт, включая отвергаемые значения; запись чисел и `enabled`; пустой черновик удаляет
+ключ; отказы как в ядре, включая `xudpProxyUDP443` при выключенном Mux; действующий
+`concurrency`), `outbound_edit` — 1 (`None` не трогает `mux`, правка пишется, ошибка валидации),
+`warnings` — 1 (все три предупреждения, обе формы VLESS, `-1` + XUDP без предупреждения). Итог:
+**1414 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не
+проверялся.

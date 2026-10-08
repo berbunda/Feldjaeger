@@ -11,9 +11,10 @@ use crate::app::{
     ApplicationService, BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS,
     DnsRuleDraft, FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS,
     FREEDOM_FINAL_RULE_NETWORKS, FREEDOM_NOISE_TYPES, FREEDOM_PROXY_PROTOCOL_VERSIONS,
-    FragmentDraft, FreedomFinalRuleDraft, MISSING_FIELD, NoiseDraft,
-    OutboundKind, OutboundSettingsDraft, OutboundsPageState, OutboundsSortColumn,
-    outbound_row_display,
+    FragmentDraft, FreedomFinalRuleDraft, MISSING_FIELD, MUX_CONCURRENCY_EFFECTIVE_MAX,
+    MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX, MUX_XUDP_PROXY_UDP443_VALUES, NoiseDraft, OutboundKind,
+    OutboundMux, OutboundSettingsDraft, OutboundsPageState, OutboundsSortColumn,
+    outbound_row_display, validate_outbound_mux,
 };
 use crate::xray::{
     CompatibilityWarning, CompatibilityWarningId, OutboundSummary, outbound_protocol_has_transport,
@@ -248,6 +249,55 @@ const HELP_VLESS_LEVEL: HelpText = HelpText::new(
 const HELP_VLESS_EMAIL: HelpText = HelpText::new(
     "User label in logs and statistics; empty = key absent.",
     "Метка пользователя в журналах и статистике; пусто — ключа нет.",
+);
+
+// Mux (Roadmap §4.2). Behaviour from Xray-core v26.9.30 (`MuxConfig`,
+// `app/proxyman/outbound/handler.go`) and live runs of xray.exe 26.9.30.
+const HELP_MUX: HelpText = HelpText::new(
+    "Mux carries many client connections inside one connection to the server, saving handshakes \
+     (TCP), and XUDP tunnels UDP the same way. The server needs nothing extra: any Xray inbound \
+     that forwards traffic serves Mux. Only proxy outbounds can use it — Freedom and Loopback \
+     break with Mux on. With a VLESS xtls-rprx-vision flow, TCP through Mux fails (the server \
+     drops such connections): set concurrency to -1 and use xudpConcurrency for UDP.",
+    "Mux передаёт много клиентских соединений внутри одного соединения с сервером и экономит \
+     рукопожатия (TCP), а XUDP так же туннелирует UDP. Серверу ничего настраивать не нужно: Mux \
+     обслуживает любой inbound Xray, который пересылает трафик. Использовать его может только \
+     прокси-outbound — Freedom и Loopback с включённым Mux перестают работать. С flow VLESS \
+     xtls-rprx-vision TCP через Mux не проходит (сервер обрывает такие соединения): поставьте \
+     concurrency -1, а для UDP используйте xudpConcurrency.",
+);
+const HELP_MUX_ENABLED: HelpText = HelpText::new(
+    "Turns Mux on. Off, the other values are kept but unused; xudpProxyUDP443 is still checked \
+     when Xray loads the config.",
+    "Включает Mux. Когда выключен, остальные значения сохраняются, но не действуют; \
+     xudpProxyUDP443 всё равно проверяется при загрузке конфигурации.",
+);
+const HELP_MUX_CONCURRENCY: HelpText = HelpText::new(
+    "How many TCP connections share one Mux connection. Empty or 0 = 8; from 1 to 128 — more acts \
+     as 128 (a connection is reused at most 128 times); -1 = TCP is not carried by Mux (only UDP \
+     via XUDP, when xudpConcurrency is set). Must be a whole number from -32768 to 32767, or \
+     Xray does not load the config.",
+    "Сколько TCP-соединений делят одно Mux-соединение. Пусто или 0 — 8; от 1 до 128 — большее \
+     значение работает как 128 (соединение переиспользуется не больше 128 раз); -1 — TCP не идёт \
+     через Mux (только UDP через XUDP, если задан xudpConcurrency). Целое число от -32768 до \
+     32767, иначе Xray не загрузит конфигурацию.",
+);
+const HELP_MUX_XUDP_CONCURRENCY: HelpText = HelpText::new(
+    "UDP over Mux. Empty or 0 = UDP rides the same Mux connections as TCP; 1 to 1024 = a separate \
+     XUDP tunnel with that many UDP sessions per connection; -1 = UDP is not carried by Mux and \
+     uses the protocol's own UDP (UDP over TCP for VLESS).",
+    "UDP через Mux. Пусто или 0 — UDP идёт по тем же Mux-соединениям, что и TCP; от 1 до 1024 — \
+     отдельный туннель XUDP с таким числом UDP-сессий на соединение; -1 — UDP не идёт через Mux, \
+     а использует собственный UDP протокола (для VLESS — UDP поверх TCP).",
+);
+const HELP_MUX_XUDP_PROXY_UDP443: HelpText = HelpText::new(
+    "UDP to port 443 (QUIC) while Mux is on. reject (default, empty) — refused, browsers fall back \
+     to TCP HTTP/2; allow — carried by Mux; skip — not carried by Mux, the protocol's own UDP is \
+     used. Exactly these lowercase words: Xray refuses anything else, even with Mux off.",
+    "UDP на порт 443 (QUIC) при включённом Mux. reject (по умолчанию, пусто) — отклоняется, \
+     браузеры переходят на TCP HTTP/2; allow — идёт через Mux; skip — не идёт через Mux, \
+     используется собственный UDP протокола. Только эти слова в нижнем регистре: иное Xray \
+     отвергает, даже при выключенном Mux.",
 );
 
 /// Renders the Outbounds page.
@@ -1054,6 +1104,7 @@ fn show_outbound_editor_pane(ui: &mut Ui, service: &mut ApplicationService) {
         ui.separator();
         super::outbound_stream::show_outbound_sockopt_edit(ui, service);
     }
+    show_outbound_mux_edit(ui, service, protocol);
     ui.add_space(8.0);
 
     let busy = service.is_outbound_mutation_busy();
@@ -1174,6 +1225,104 @@ fn show_outbound_general_edit(ui: &mut Ui, service: &mut ApplicationService, is_
         match service.migrate_outbound_proxy_settings() {
             Ok(message) | Err(message) => service.show_status_message(message),
         }
+    }
+}
+
+/// Mux section (Roadmap §4.2): the full editor on proxy outbounds; elsewhere — and for a `mux`
+/// the core cannot load — only a "Remove mux" for one found on disk.
+fn show_outbound_mux_edit(ui: &mut Ui, service: &mut ApplicationService, protocol: &str) {
+    // Computing warnings borrows the service immutably, so before the mutable session borrow.
+    let mux_warnings: Vec<_> = service
+        .outbound_editor_warnings()
+        .into_iter()
+        .filter(|warning| {
+            matches!(
+                warning.id,
+                CompatibilityWarningId::MuxRejected
+                    | CompatibilityWarningId::MuxOnNonProxyOutbound
+                    | CompatibilityWarningId::MuxVisionCarriesTcp
+            )
+        })
+        .collect();
+    let Some(session) = service.outbound_editor_session_mut() else {
+        return;
+    };
+    let mux = session.general.mux.get_or_insert_with(OutboundMux::default);
+    let proxy = outbound_protocol_has_transport(protocol);
+    if !proxy && *mux == OutboundMux::default() {
+        return;
+    }
+
+    ui.add_space(8.0);
+    ui.separator();
+    ui.horizontal(|ui| {
+        super::help_button(ui, "mux", HELP_MUX);
+        ui.strong("Mux");
+    });
+    show_outbound_compatibility_warnings(ui, &mux_warnings);
+
+    if !proxy || mux.foreign.is_some() {
+        let note = match &mux.foreign {
+            Some(reason) => format!("mux on disk cannot be edited here: {reason}."),
+            None => format!("{protocol} outbounds cannot use Mux."),
+        };
+        ui.label(RichText::new(note).size(12.0).color(Color32::from_rgb(140, 140, 140)));
+        if ui
+            .button("Remove mux")
+            .on_hover_text("Removes the whole mux object on Save; \"Preview changes\" shows it")
+            .clicked()
+        {
+            *mux = OutboundMux::default();
+        }
+        return;
+    }
+
+    super::help_checkbox(ui, "enabled", HELP_MUX_ENABLED, &mut mux.enabled);
+    egui::Grid::new("outbound_mux_edit_grid")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            super::field_label(ui, "concurrency", HELP_MUX_CONCURRENCY);
+            ui.add(egui::TextEdit::singleline(&mut mux.concurrency).desired_width(80.0).hint_text("8"));
+            ui.end_row();
+
+            super::field_label(ui, "xudpConcurrency", HELP_MUX_XUDP_CONCURRENCY);
+            ui.add(egui::TextEdit::singleline(&mut mux.xudp_concurrency).desired_width(80.0).hint_text("0"));
+            ui.end_row();
+
+            super::field_label(ui, "xudpProxyUDP443", HELP_MUX_XUDP_PROXY_UDP443);
+            optional_string_combo(ui, "outbound_mux_udp443", &mut mux.xudp_proxy_udp443, MUX_XUDP_PROXY_UDP443_VALUES);
+            ui.end_row();
+        });
+
+    // Checked live with the same rule as Save; the rest are values the core accepts but caps.
+    if let Err(message) = validate_outbound_mux(mux) {
+        ui.label(RichText::new(message).size(12.0).color(Color32::from_rgb(220, 80, 80)));
+    }
+    let number = |text: &str| text.trim().parse::<i64>().ok();
+    if number(&mux.concurrency).is_some_and(|value| value > MUX_CONCURRENCY_EFFECTIVE_MAX) {
+        ui.label(
+            RichText::new(format!("concurrency above {MUX_CONCURRENCY_EFFECTIVE_MAX} acts as {MUX_CONCURRENCY_EFFECTIVE_MAX}."))
+                .size(12.0)
+                .color(Color32::from_rgb(210, 170, 40)),
+        );
+    }
+    if number(&mux.xudp_concurrency).is_some_and(|value| value > MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX) {
+        ui.label(
+            RichText::new(format!(
+                "xudpConcurrency above the documented maximum {MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX}."
+            ))
+            .size(12.0)
+            .color(Color32::from_rgb(210, 170, 40)),
+        );
+    }
+    if !mux.extras.is_empty() {
+        let keys: Vec<&str> = mux.extras.keys().map(String::as_str).collect();
+        ui.label(
+            RichText::new(format!("Kept as is: {}", keys.join(", ")))
+                .size(12.0)
+                .color(Color32::from_rgb(140, 140, 140)),
+        );
     }
 }
 

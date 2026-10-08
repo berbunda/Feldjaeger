@@ -32,6 +32,8 @@ pub use config::{
     FREEDOM_NOISE_TYPES, FREEDOM_PROXY_PROTOCOL_VERSIONS, FragmentDraft, FreedomFinalRuleDraft,
     FreedomSettingsDraft, LegacyDomainStrategyMigration, LoopbackRouting, LoopbackSettingsDraft, NoiseDraft, loopback_routing,
     OutboundGeneral, OutboundRef, OutboundSettingsDraft, ProxySettingsMigration, UpdateOutboundShellRequest,
+    MUX_CONCURRENCY_EFFECTIVE_MAX, MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX, MUX_XUDP_PROXY_UDP443_VALUES,
+    OutboundMux, parse_outbound_mux, validate_outbound_mux,
     DialerProxyProblem, GrpcClientSettings, HYSTERIA_TRANSPORT_VERSION, HttpUpgradeClientSettings,
     HysteriaClientSettings, OutboundSecurityDraft, OutboundStreamDraft, OutboundTransport,
     REALITY_REFUSED_FINGERPRINTS, RawClientSettings, RealityClientDraft, RealityPublicKeyField,

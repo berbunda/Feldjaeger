@@ -1,9 +1,15 @@
-//! Outbound General fields (tag / sendThrough) + Shell edit identity, and the explicit migration
-//! of the removed `proxySettings` into `streamSettings.sockopt.dialerProxy`.
+//! Outbound General fields (tag / sendThrough / `mux`) + Shell edit identity, and the explicit
+//! migration of the removed `proxySettings` into `streamSettings.sockopt.dialerProxy`.
 
 use serde_json::{Map, Value};
 
 use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
+
+mod mux;
+pub use mux::{
+    MUX_CONCURRENCY_EFFECTIVE_MAX, MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX, MUX_XUDP_PROXY_UDP443_VALUES,
+    OutboundMux, parse_outbound_mux, validate_outbound_mux,
+};
 
 /// `proxySettings` as found on disk — a removed feature since Xray-core v26.9.8
 /// (XTLS/Xray-core#6058): `OutboundDetourConfig.Build()` refuses any outbound that has the key,
@@ -57,6 +63,9 @@ pub struct OutboundGeneral {
     /// `sockopt.dialerProxy` is already set, writes its tag there. `false` leaves
     /// `proxySettings` exactly as it is on disk.
     pub migrate_proxy_settings: bool,
+    /// `mux` draft (Roadmap §4.2); `None` leaves `mux` exactly as it is (the default, so a
+    /// hand-built General never touches it). [`parse_outbound_general`] always fills it.
+    pub mux: Option<OutboundMux>,
 }
 
 impl OutboundGeneral {
@@ -102,6 +111,7 @@ pub fn parse_outbound_general(outbound: &Value) -> OutboundGeneral {
             .map(str::to_owned),
         legacy_proxy_settings: parse_legacy_proxy_settings(outbound),
         migrate_proxy_settings: false,
+        mux: Some(parse_outbound_mux(outbound)),
     }
 }
 
@@ -207,6 +217,9 @@ pub fn apply_outbound_general(
 
     apply_optional_string(object, "tag", general.tag.as_deref());
     apply_optional_string(object, "sendThrough", general.send_through.as_deref());
+    if let Some(mux) = &general.mux {
+        mux::apply_outbound_mux(object, mux)?;
+    }
 
     if general.migrate_proxy_settings {
         if let Some(tag) = migrated_tag {
@@ -283,6 +296,31 @@ mod tests {
         assert_eq!(outbound["tag"], "direct");
         assert!(outbound.get("sendThrough").is_none());
         assert_eq!(outbound["mux"]["enabled"], true);
+    }
+
+    /// Roadmap §4.2: `mux` rides on General — `None` never touches it, a parsed draft is written
+    /// only when edited.
+    #[test]
+    fn general_writes_mux_only_when_edited() {
+        let original = json!({"protocol": "vless", "tag": "p", "settings": {}, "mux": {"enabled": true, "x": 1}});
+        let mut outbound = original.clone();
+        apply_outbound_general(&mut outbound, &general_of(&original)).expect("unchanged");
+        assert_eq!(outbound, original);
+
+        let untouched = OutboundGeneral { tag: Some("p".to_owned()), ..OutboundGeneral::default() };
+        apply_outbound_general(&mut outbound, &untouched).expect("None");
+        assert_eq!(outbound, original);
+
+        let mut general = general_of(&original);
+        let mux = general.mux.as_mut().expect("parsed");
+        mux.concurrency = "-1".to_owned();
+        mux.xudp_concurrency = "16".to_owned();
+        apply_outbound_general(&mut outbound, &general).expect("edited");
+        assert_eq!(outbound["mux"], json!({"x": 1, "enabled": true, "concurrency": -1, "xudpConcurrency": 16}));
+
+        general.mux.as_mut().expect("parsed").xudp_proxy_udp443 = "Skip".to_owned();
+        let error = apply_outbound_general(&mut outbound, &general).unwrap_err();
+        assert!(error.to_string().contains("xudpProxyUDP443"), "{error}");
     }
 
     /// Roadmap §4.2: the forms `OutboundDetourConfig.Build()` and `ParseRandomIP` can use.
