@@ -8,6 +8,7 @@
 
 use egui::{Color32, RichText, Ui};
 
+use super::HelpText;
 use crate::app::{
     ApplicationService, MetricsPageModel, MetricsPageState, TrafficCategory, TrafficSeriesDisplay,
 };
@@ -17,8 +18,66 @@ const ERROR_COLOR: Color32 = Color32::from_rgb(200, 60, 60);
 const MUTED_COLOR: Color32 = Color32::from_rgb(140, 140, 140);
 const OK_COLOR: Color32 = Color32::from_rgb(60, 160, 80);
 
+// ─── Help text (Roadmap §4.4) ─────────────────────────────────────────────────
+//
+// From Xray-core v26.9.30 (`app/metrics/metrics.go`) and `/debug/vars` of a live
+// `xray.exe` 26.9.30 with stats and observatory.
+
+const HELP_LISTEN: HelpText = HelpText::new(
+    "Refresh runs curl (or wget, if curl is missing) on the server against \
+     http://<metrics.listen>/debug/vars — Go's expvar JSON with the keys stats, observatory, \
+     memstats and cmdline. Only metrics.listen works here: a metrics object reachable only by \
+     tag through routing cannot be fetched this way.\n\n\
+     The endpoint has no authentication and also serves /debug/pprof (profiles, command line) — \
+     keep it on 127.0.0.1. Traffic shows the same counters as the Statistics page (they need \
+     stats and the policy stats switches), with its own history; the rate is the average between \
+     the last two Refresh clicks.",
+    "Refresh выполняет на сервере curl (или wget, если curl нет) по адресу \
+     http://<metrics.listen>/debug/vars — JSON expvar из Go с ключами stats, observatory, \
+     memstats и cmdline. Здесь работает только metrics.listen: объект metrics, доступный лишь по \
+     тегу через маршрутизацию, так прочитать нельзя.\n\n\
+     У адреса нет аутентификации, и он отдаёт ещё /debug/pprof (профили, командную строку) — \
+     держите его на 127.0.0.1. Traffic показывает те же счётчики, что и страница Statistics (им \
+     нужны stats и переключатели stats* в policy), со своей историей; скорость — среднее между \
+     двумя последними нажатиями Refresh.",
+);
+const HELP_OBSERVATORY: HelpText = HelpText::new(
+    "Live results of observatory / burstObservatory, per probed outbound: green / red — alive \
+     after the last probe; delay — of the last successful probe; last seen — time of the last \
+     success, last try — of the last attempt; the error of a failed probe. For burstObservatory \
+     also the health-ping summary: average, min / max and failed / all of the recent probes. \
+     Empty until the first probe completes.",
+    "Живые результаты observatory / burstObservatory для каждого проверяемого outbound: \
+     зелёный / красный — доступен ли после последней проверки; delay — задержка последней \
+     успешной проверки; last seen — время последнего успеха, last try — последней попытки; \
+     ошибка неудачной проверки. Для burstObservatory — ещё сводка health ping: среднее, \
+     min / max и неудачных / всего среди недавних проверок. Пусто, пока не завершится первая \
+     проверка.",
+);
+const HELP_OTHER_COUNTERS: HelpText = HelpText::new(
+    "Counters whose name does not match an inbound or outbound tag of the loaded configuration: \
+     per-user counters user>>>email>>>traffic>>>uplink / downlink (they need the policy level \
+     switches statsUserUplink / statsUserDownlink and an email on the user), and counters of tags \
+     that are not in the configuration — e.g. added live on the API Console.",
+    "Счётчики, имя которых не совпадает с тегом inbound или outbound загруженной конфигурации: \
+     счётчики пользователей user>>>email>>>traffic>>>uplink / downlink (для них нужны \
+     переключатели уровня policy statsUserUplink / statsUserDownlink и email у пользователя), и \
+     счётчики тегов, которых нет в конфигурации, — например, добавленных на ходу в API Console.",
+);
+const HELP_RUNTIME: HelpText = HelpText::new(
+    "Go memstats of the Xray process: heap in use (Alloc), total ever allocated (TotalAlloc), \
+     memory obtained from the OS (Sys), live heap objects, Mallocs / Frees, GC cycles and their \
+     total pause; cmdline — how Xray was started (binary, -config / -confdir). The field set \
+     differs from statssys on the Statistics page.",
+    "memstats процесса Xray из Go: занятая куча (Alloc), всего выделено (TotalAlloc), память, \
+     полученная от ОС (Sys), живые объекты кучи, Mallocs / Frees, циклы GC и их суммарная пауза; \
+     cmdline — как запущен Xray (бинарник, -config / -confdir). Набор полей отличается от \
+     statssys на странице Statistics.",
+);
+
 /// Renders the Metrics page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
+    super::show_help_dialog(ui);
     ui.heading("Metrics");
     ui.add_space(6.0);
     ui.label(
@@ -40,6 +99,7 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     }
 
     ui.horizontal(|ui| {
+        super::help_button(ui, "Metrics", HELP_LISTEN);
         ui.strong("Metrics listen:");
         ui.label(model.listen_addr.as_deref().unwrap_or("?"));
         if ui
@@ -135,6 +195,7 @@ fn show_observatory_section(ui: &mut Ui, model: &MetricsPageModel) {
     egui::CollapsingHeader::new(title)
         .default_open(true)
         .show(ui, |ui| {
+            super::help_button(ui, "Observatory", HELP_OBSERVATORY);
             if model.observatory.is_empty() {
                 ui.label(
                     RichText::new(
@@ -191,6 +252,7 @@ fn show_other_counters_section(ui: &mut Ui, model: &MetricsPageModel) {
     egui::CollapsingHeader::new(title)
         .default_open(false)
         .show(ui, |ui| {
+            super::help_button(ui, "Other counters", HELP_OTHER_COUNTERS);
             if model.other_counters.is_empty() {
                 ui.label(
                     RichText::new(
@@ -218,7 +280,10 @@ fn show_other_counters_section(ui: &mut Ui, model: &MetricsPageModel) {
 }
 
 fn show_runtime_section(ui: &mut Ui, model: &MetricsPageModel) {
-    ui.heading("Runtime");
+    ui.horizontal(|ui| {
+        super::help_button(ui, "Runtime", HELP_RUNTIME);
+        ui.heading("Runtime");
+    });
     ui.label(
         RichText::new(
             "From Go's default `memstats`/`cmdline` expvars — a different, smaller field set \

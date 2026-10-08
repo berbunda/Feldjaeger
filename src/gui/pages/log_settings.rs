@@ -5,10 +5,109 @@
 
 use egui::{Color32, ComboBox, RichText, TextEdit, Ui};
 
+use super::HelpText;
 use crate::app::{
     ApplicationService, LogLevel, LogOutput, LogSettingsPageState, MaskAddress, log_level_display,
     log_output_display, mask_address_display,
 };
+
+// ─── Field help text (Roadmap §4.4) ──────────────────────────────────────────
+//
+// Condensed from https://xtls.github.io/config/log.html; behaviour is Xray-core's
+// (`infra/conf/log.go`, `app/log/log.go`, `common/log/logger.go` v26.9.30), checked with
+// `xray run -test` and a short `xray run` of each case.
+
+const HELP_ACCESS: HelpText = HelpText::new(
+    "access — where Xray writes the access log: one line per connection (time, client address, \
+     accepted / rejected, destination, inbound → outbound tags, user email); DNS entries also go \
+     here when DNS query logging is on.\n\n\
+     Standard Output — the key is omitted; under systemd the lines end up in the journal. File — \
+     an absolute path: Xray creates the file at start (mode 0600) and appends to it; the \
+     directory must exist and be writable by the Xray service user, otherwise Xray does not \
+     start (\"failed to initialize access logger\"). Xray never rotates the file itself — use \
+     logrotate with copytruncate, or reopen it via the API (LoggerService, xray api \
+     restartlogger). Disabled — \"none\".\n\n\
+     Without a log object Xray keeps the access log off; an empty \"log\": {} turns it on to \
+     standard output. Log level None turns it off too, whatever is set here.",
+    "access — куда Xray пишет журнал доступа: строка на каждое соединение (время, адрес клиента, \
+     accepted / rejected, адрес назначения, теги inbound → outbound, email пользователя); сюда \
+     же идут DNS-записи, если включено журналирование DNS-запросов.\n\n\
+     Standard Output — ключ не пишется; под systemd строки попадают в journal. File — \
+     абсолютный путь: Xray создаёт файл при запуске (права 0600) и дописывает в конец; каталог \
+     должен существовать и быть доступен на запись пользователю службы Xray, иначе Xray не \
+     запустится («failed to initialize access logger»). Сам Xray файл не ротирует — используйте \
+     logrotate с copytruncate или переоткрывайте файл через API (LoggerService, xray api \
+     restartlogger). Disabled — \"none\".\n\n\
+     Без объекта log Xray держит журнал доступа выключенным; пустой \"log\": {} включает его в \
+     стандартный вывод. Уровень None тоже выключает его, что бы здесь ни было указано.",
+);
+const HELP_ERROR: HelpText = HelpText::new(
+    "error — where Xray writes its own messages: start-up, configuration problems, connection \
+     errors and, at higher verbosity, details of each connection. Which of them are written is \
+     set by Log level.\n\n\
+     Standard Output — the key is omitted; this is also what Xray does without a log object; \
+     under systemd the lines end up in the journal. File — an absolute path, with the same rules \
+     as for the access log (the directory must exist and be writable by the Xray service user, \
+     otherwise Xray does not start; no rotation by Xray itself). Disabled — \"none\".",
+    "error — куда Xray пишет собственные сообщения: запуск, проблемы конфигурации, ошибки \
+     соединений, а при подробном уровне — детали каждого соединения. Какие из них попадают в \
+     журнал, задаёт Log level.\n\n\
+     Standard Output — ключ не пишется; так же Xray поступает и без объекта log; под systemd \
+     строки попадают в journal. File — абсолютный путь, правила те же, что у журнала доступа \
+     (каталог должен существовать и быть доступен на запись пользователю службы Xray, иначе Xray \
+     не запустится; сам Xray файл не ротирует). Disabled — \"none\".",
+);
+const HELP_LOG_LEVEL: HelpText = HelpText::new(
+    "loglevel — verbosity of the error log; each level also includes the more severe ones. \
+     Debug — everything, including per-connection internals: very verbose, for troubleshooting \
+     only. Info — routing decisions (taking detour, sniffed domain) and every failed or closed \
+     connection. Warning (default) — configuration problems Xray works around, e.g. a routing \
+     rule pointing to a missing outbound tag, and deprecation notices. Error — only failures \
+     Xray could not handle. None — \
+     turns off both the error log and the access log (including DNS entries), whatever their \
+     destinations.\n\n\
+     Case does not matter; Xray does not reject an unknown value — it uses warning, as when the \
+     field is omitted. The access log has no levels.",
+    "loglevel — подробность журнала ошибок; каждый уровень включает и более серьёзные. Debug — \
+     всё, включая внутренние подробности соединений: очень много строк, только для поиска \
+     неисправностей. Info — решения маршрутизации (taking detour, sniffed domain) и каждое \
+     неудачное или закрытое соединение. Warning (по умолчанию) — проблемы конфигурации, которые \
+     Xray обходит, например правило маршрутизации с несуществующим outbound-тегом, и \
+     предупреждения об устаревших настройках. Error — только сбои, с которыми Xray не справился. \
+     None — выключает и журнал ошибок, и журнал доступа \
+     (вместе с DNS-записями), куда бы они ни были направлены.\n\n\
+     Регистр не важен; неизвестное значение Xray не отвергает, а использует warning, как и при \
+     отсутствии поля. У журнала доступа уровней нет.",
+);
+const HELP_DNS_LOG: HelpText = HelpText::new(
+    "dnsLog — adds the queries of Xray's built-in DNS (the dns section) to the access log: \
+     DNS server, whether the answer came from a query or the cache, domain → resolved addresses, \
+     time taken, error. The entries go only to \
+     the access log — with the access log disabled or Log level None they are not written \
+     anywhere. Default: off.",
+    "dnsLog — добавляет в журнал доступа запросы встроенного DNS Xray (секция dns): DNS-сервер, \
+     получен ли ответ запросом или из кэша, домен → полученные адреса, затраченное время, \
+     ошибка. Записи идут только в \
+     журнал доступа — если он выключен или выбран уровень None, они нигде не записываются. По \
+     умолчанию выключено.",
+);
+const HELP_MASK_ADDRESS: HelpText = HelpText::new(
+    "maskAddress — hides IP addresses in every log line Xray writes (access, DNS and error \
+     entries). Disabled — the key is omitted, addresses are written in full. Quarter — keeps the \
+     first IPv4 byte (1.*.*.*) and an IPv6 /16 prefix. Half — keeps two IPv4 bytes (1.2.*.*) and \
+     an IPv6 /32 prefix (2001:db8::/32). Full — replaces every address ([Masked IPv4], Masked \
+     IPv6).\n\n\
+     Custom — /N+/M: N is how many leading IPv4 bits stay visible (0, 8, 16, 24 or 32; 32 = no \
+     masking), M is the IPv6 prefix kept (0–128; 128 = no masking). The keywords are \
+     case-sensitive: \"Half\" or an IPv4 part not divisible by 8 make Xray refuse to start.",
+    "maskAddress — скрывает IP-адреса во всех строках журналов Xray (доступ, DNS и ошибки). \
+     Disabled — ключ не пишется, адреса записываются полностью. Quarter — оставляет первый байт \
+     IPv4 (1.*.*.*) и префикс IPv6 /16. Half — два байта IPv4 (1.2.*.*) и префикс IPv6 /32 \
+     (2001:db8::/32). Full — заменяет каждый адрес ([Masked IPv4], Masked IPv6).\n\n\
+     Custom — /N+/M: N — сколько старших бит IPv4 остаются видны (0, 8, 16, 24 или 32; 32 — без \
+     маскировки), M — сохраняемый префикс IPv6 (0–128; 128 — без маскировки). Ключевые слова \
+     чувствительны к регистру: с \"Half\" или с частью IPv4, не кратной 8, Xray не запускается.",
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OutputMode {
@@ -74,6 +173,7 @@ impl MaskMode {
 
 /// Renders the Log Settings page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
+    super::show_help_dialog(ui);
     ui.heading("Log Settings");
     ui.add_space(8.0);
 
@@ -304,7 +404,7 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
 
     ui.strong("Access log");
     ui.add_space(4.0);
-    edit_output(ui, "access", &mut draft.access);
+    edit_output(ui, "access", HELP_ACCESS, &mut draft.access);
     ui.label(
         RichText::new("Access logs may contain client addresses and destination information.")
             .size(12.0)
@@ -314,8 +414,9 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
     ui.add_space(12.0);
     ui.strong("Error log");
     ui.add_space(4.0);
-    edit_output(ui, "error", &mut draft.error);
+    edit_output(ui, "error", HELP_ERROR, &mut draft.error);
     ui.horizontal(|ui| {
+        super::help_button(ui, "loglevel", HELP_LOG_LEVEL);
         ui.label("Log level");
         let current = draft.log_level.display_label();
         ComboBox::from_id_salt("log_settings_level")
@@ -343,16 +444,34 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
                 }
             });
     });
+    if matches!(draft.log_level, LogLevel::None) && !matches!(draft.access, LogOutput::Disabled) {
+        ui.label(
+            RichText::new("Log level None also turns off the access log.")
+                .size(12.0)
+                .color(Color32::from_rgb(210, 170, 40)),
+        );
+    }
 
     ui.add_space(12.0);
     ui.strong("Additional log entries");
     ui.add_space(4.0);
-    ui.checkbox(&mut draft.dns_log, "Enable DNS query logging");
+    super::help_checkbox(ui, "Enable DNS query logging", HELP_DNS_LOG, &mut draft.dns_log);
     ui.label(
         RichText::new("DNS logging may expose queried domain names and resolved addresses.")
             .size(12.0)
             .color(Color32::from_rgb(160, 140, 80)),
     );
+    if draft.dns_log
+        && (matches!(draft.access, LogOutput::Disabled) || matches!(draft.log_level, LogLevel::None))
+    {
+        ui.label(
+            RichText::new(
+                "DNS entries go to the access log, which is off — they will not be written.",
+            )
+            .size(12.0)
+            .color(Color32::from_rgb(210, 170, 40)),
+        );
+    }
 
     ui.add_space(12.0);
     ui.strong("Privacy");
@@ -367,7 +486,7 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
     }
 }
 
-fn edit_output(ui: &mut Ui, id: &str, output: &mut LogOutput) {
+fn edit_output(ui: &mut Ui, id: &'static str, help: HelpText, output: &mut LogOutput) {
     let mut mode = OutputMode::from_output(output);
     let mut path = match output {
         LogOutput::File(path) => path.clone(),
@@ -379,6 +498,7 @@ fn edit_output(ui: &mut Ui, id: &str, output: &mut LogOutput) {
     };
 
     ui.horizontal(|ui| {
+        super::help_button(ui, id, help);
         ui.label("Destination");
         ComboBox::from_id_salt(format!("log_settings_{id}_mode"))
             .selected_text(mode.label())
@@ -435,6 +555,7 @@ fn edit_mask(ui: &mut Ui, mask: &mut MaskAddress) {
     };
 
     ui.horizontal(|ui| {
+        super::help_button(ui, "maskAddress", HELP_MASK_ADDRESS);
         ui.label("Mask IP addresses in logs");
         ComboBox::from_id_salt("log_settings_mask_mode")
             .selected_text(mode.label())

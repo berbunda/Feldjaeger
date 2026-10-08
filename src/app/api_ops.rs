@@ -134,12 +134,16 @@ pub fn list_rules_request() -> ApiCallRequest {
     }
 }
 
-/// `xray api bi [balancer]` — balancer info (every balancer when `balancer_tag` is `None`).
-pub fn balancer_info_request(balancer_tag: Option<String>) -> ApiCallRequest {
+/// `xray api bi <balancer>` — one balancer's override and current selection.
+///
+/// The tag is required: without it `bi` sends an empty tag and the core answers
+/// "app/router: cannot find tag" — there is no "every balancer" form (checked against Xray
+/// 26.9.30).
+pub fn balancer_info_request(balancer_tag: String) -> ApiCallRequest {
     ApiCallRequest {
         label: "Fetching balancer info...".to_owned(),
         subcommand: "bi",
-        args: balancer_tag.into_iter().collect(),
+        args: vec![balancer_tag],
         stdin_body: None,
     }
 }
@@ -284,8 +288,14 @@ pub fn balancer_override_request(
 }
 
 /// `xray api sib -outbound=<outbound> [-inbound=<inbound>] [-ruletag=<tag>] [-reset] <ip>...` —
-/// route one or more source IPs to `outbound_tag` (emergency block/redirect), or clear a
-/// previous block with `reset = true`. Requires `RoutingService`.
+/// route one or more source IPs to `outbound_tag` (emergency block/redirect). Requires
+/// `RoutingService`.
+///
+/// `sib` appends one rule with that rule tag to the end of the live rules. `reset = true` first
+/// removes the rule with that tag, then adds the new one — it replaces the IP list, it does not
+/// lift the block (remove the rule tag with `rmrules` for that). `ips` must not be empty: with
+/// no IPs `sib` reads the literal `stdin:` as an address and fails before resetting anything
+/// (checked against Xray 26.9.30).
 pub fn source_ip_block_request(
     outbound_tag: String,
     inbound_tag: Option<String>,
@@ -396,6 +406,13 @@ mod tests {
             request.args,
             vec!["-b".to_owned(), "b1".to_owned(), "direct".to_owned()]
         );
+    }
+
+    #[test]
+    fn balancer_info_always_passes_the_tag() {
+        let request = balancer_info_request("bal".to_owned());
+        assert_eq!(request.subcommand, "bi");
+        assert_eq!(request.args, vec!["bal".to_owned()]);
     }
 
     #[test]

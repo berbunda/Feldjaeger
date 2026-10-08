@@ -9,12 +9,57 @@
 
 use egui::{Color32, RichText, TextEdit, Ui};
 
+use super::HelpText;
 use crate::app::{ApiSettingsPageState, ApplicationService};
 use crate::gui::pages::persistent_list_text_edit;
 use crate::xray::KNOWN_API_SERVICES;
 
+// ─── Field help text (Roadmap §4.4) ──────────────────────────────────────────
+//
+// Condensed from https://xtls.github.io/config/api.html; behaviour is Xray-core's
+// (`infra/conf/api.go`, `app/commander/commander.go` v26.9.30), checked with `xray run -test`.
+
+const HELP_TAG: HelpText = HelpText::new(
+    "Required: Xray-core refuses to load an api object without a tag (\"API tag can't be \
+     empty.\"). Without listen, Xray creates an outbound with this tag that serves the API — \
+     route traffic to it, usually a dokodemo-door inbound on 127.0.0.1 plus a routing rule \
+     inboundTag → outboundTag = this tag. With listen set the tag is still required but unused.",
+    "Обязательно: без tag Xray-core не загружает объект api («API tag can't be empty.»). Без \
+     listen Xray создаёт outbound с этим тегом, который обслуживает API, — к нему нужно \
+     направить трафик, обычно inbound dokodemo-door на 127.0.0.1 и правило маршрутизации \
+     inboundTag → outboundTag = этот тег. При заданном listen tag всё равно обязателен, но не \
+     используется.",
+);
+const HELP_LISTEN: HelpText = HelpText::new(
+    "Address the gRPC API listens on by itself, e.g. 127.0.0.1:10085; a value starting with / or \
+     @ is a Unix socket (file path / abstract name). The API has no authentication — keep it on \
+     loopback. The API Console and Statistics pages connect to this address on the server. \
+     Empty = no own listener: the API is reachable only through the tag outbound and routing.",
+    "Адрес, на котором gRPC API слушает сам, например 127.0.0.1:10085; значение, начинающееся с \
+     / или @, — Unix-сокет (путь к файлу / абстрактное имя). У API нет аутентификации — держите \
+     его на loopback. Страницы API Console и Statistics подключаются к этому адресу на сервере. \
+     Пусто — без собственного слушателя: API доступен только через outbound tag и маршрутизацию.",
+);
+const HELP_SERVICES: HelpText = HelpText::new(
+    "gRPC services the API exposes: HandlerService — add / remove inbounds, outbounds and users \
+     at runtime; LoggerService — restart the logger (log rotation); StatsService — traffic \
+     counters (they exist only with stats and the policy stats* switches); RoutingService — \
+     routing rules and balancers at runtime; ReflectionService — gRPC reflection, lets grpcurl \
+     list the methods; ObservatoryService — Observatory / BurstObservatory results (Xray does \
+     not start without one of those sections). Names are case-insensitive; an unknown name is \
+     silently ignored.",
+    "gRPC-сервисы, которые открывает API: HandlerService — добавление / удаление inbound, \
+     outbound и пользователей на ходу; LoggerService — перезапуск логгера (ротация логов); \
+     StatsService — счётчики трафика (они есть только при stats и включённых stats* в policy); \
+     RoutingService — правила маршрутизации и балансировщики на ходу; ReflectionService — \
+     gRPC reflection, позволяет grpcurl получить список методов; ObservatoryService — результаты \
+     Observatory / BurstObservatory (без одной из этих секций Xray не запускается). Регистр в \
+     именах не важен; неизвестное имя молча игнорируется.",
+);
+
 /// Renders the API Settings page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
+    super::show_help_dialog(ui);
     ui.heading("API Settings");
     ui.add_space(8.0);
 
@@ -209,6 +254,7 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
 
     let mut tag = draft.tag.clone().unwrap_or_default();
     ui.horizontal(|ui| {
+        super::help_button(ui, "tag", HELP_TAG);
         ui.label("tag");
         if ui
             .add(
@@ -226,15 +272,21 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
             };
         }
     });
-    ui.label(
-        RichText::new("Outbound tag Xray auto-creates for the API endpoint. Empty = omit.")
+    if draft.tag.is_none() {
+        ui.label(
+            RichText::new(
+                "Required: Xray-core refuses to load the api object without a tag. Save stays \
+                 blocked until it is set.",
+            )
             .size(12.0)
-            .color(Color32::from_rgb(140, 140, 140)),
-    );
+            .color(Color32::from_rgb(200, 60, 60)),
+        );
+    }
 
     ui.add_space(8.0);
     let mut listen = draft.listen.clone().unwrap_or_default();
     ui.horizontal(|ui| {
+        super::help_button(ui, "listen", HELP_LISTEN);
         ui.label("listen");
         if ui
             .add(
@@ -252,16 +304,12 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
             };
         }
     });
-    ui.label(
-        RichText::new(
-            "Address to listen on directly. Empty = only reachable via routing (not wired here).",
-        )
-        .size(12.0)
-        .color(Color32::from_rgb(140, 140, 140)),
-    );
 
     ui.add_space(8.0);
-    ui.label("services (one per line)");
+    ui.horizontal(|ui| {
+        super::help_button(ui, "services", HELP_SERVICES);
+        ui.label("services (one per line)");
+    });
     ui.horizontal_wrapped(|ui| {
         for known in KNOWN_API_SERVICES {
             let present = draft.services.iter().any(|s| s == known);

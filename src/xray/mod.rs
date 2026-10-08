@@ -123,6 +123,7 @@ pub use config::{
     apply_inbound_sniffing, apply_inbound_stream, apply_tunnel_stream, allowed_security_modes, allowed_stream_methods,
     api_settings_change_summary, api_settings_from_section, api_settings_to_new_value,
     apply_api_settings_to_value, update_api_settings, validate_api_settings,
+    validate_api_settings_for_config,
     apply_dns_settings_to_value, dns_settings_change_summary, dns_settings_from_section,
     dns_settings_to_new_value, update_dns_settings, validate_dns_settings,
     apply_fakedns_settings_to_value, fakedns_settings_change_summary, fakedns_settings_from_section,

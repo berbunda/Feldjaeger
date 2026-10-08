@@ -4574,3 +4574,46 @@ fn update_vless_outbound_shell_writes_stream_only_when_changed() {
     assert_eq!(stream["tlsSettings"]["serverName"], "a.example");
     assert_eq!(stream["sockopt"]["mark"], 2);
 }
+
+#[test]
+fn api_observatory_service_needs_an_observatory_section_in_the_config() {
+    use super::api_settings::ApiSettings;
+    use super::modify::{UpdateApiSettingsRequest, update_api_settings};
+
+    // Architecture §119: without observatory / burstObservatory Xray does not start
+    // ("core: not all dependencies are resolved", `xray run -test` 26.9.30).
+    let settings = ApiSettings {
+        tag: Some("api".to_owned()),
+        services: vec!["ObservatoryService".to_owned()],
+        ..ApiSettings::defaults()
+    };
+
+    let mut without =
+        single_file_editable(r#"{"outbounds":[{"tag":"direct","protocol":"freedom"}]}"#);
+    let error = update_api_settings(
+        &mut without,
+        UpdateApiSettingsRequest {
+            settings: settings.clone(),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(error.kind(), ConfigModifyErrorKind::ValidationFailed);
+    assert!(without.sections().api().is_none(), "nothing written on rejection");
+
+    for observatory in [
+        r#""observatory":{"subjectSelector":["direct"]}"#,
+        r#""burstObservatory":{"subjectSelector":["direct"],"pingConfig":{}}"#,
+    ] {
+        let mut with = single_file_editable(&format!(
+            r#"{{{observatory},"outbounds":[{{"tag":"direct","protocol":"freedom"}}]}}"#
+        ));
+        update_api_settings(
+            &mut with,
+            UpdateApiSettingsRequest {
+                settings: settings.clone(),
+            },
+        )
+        .expect(observatory);
+        assert_eq!(with.sections().api().unwrap().value()["tag"], "api");
+    }
+}

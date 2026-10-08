@@ -15,12 +15,64 @@ use crate::app::{
     ApiConsolePageState, ApplicationService, StatsPageModel, TrafficCategory, TrafficSeriesDisplay,
 };
 
+use super::HelpText;
+
 const WARN_COLOR: Color32 = Color32::from_rgb(210, 170, 40);
 const ERROR_COLOR: Color32 = Color32::from_rgb(200, 60, 60);
 const MUTED_COLOR: Color32 = Color32::from_rgb(140, 140, 140);
 
+// ─── Help text (Roadmap §4.4) ─────────────────────────────────────────────────
+//
+// From Xray-core v26.9.30 (`app/stats`, `main/commands/all/api/stats_*.go`) and
+// `xray api statsquery` / `statssys` against a live `xray.exe` 26.9.30.
+
+const HELP_TRAFFIC: HelpText = HelpText::new(
+    "Refresh runs xray api statsquery on the server (needs StatsService in api.services) and \
+     reads every counter. Counters exist only with a top-level \"stats\": {} plus the policy \
+     switches: system statsInboundUplink / Downlink and statsOutboundUplink / Downlink for \
+     inbounds and outbounds; only tagged inbounds and outbounds get counters.\n\n\
+     Values are bytes since Xray started — a restart resets them to 0; Feldjäger never resets \
+     them itself. Inbound uplink is what clients sent, downlink what they received; outbound \
+     uplink is what Xray sent out, downlink what came back.\n\n\
+     The rate is the average between the last two Refresh clicks; the chart holds up to 120 \
+     refreshes, kept only while Feldjäger runs.",
+    "Refresh выполняет на сервере xray api statsquery (нужен StatsService в api.services) и \
+     читает все счётчики. Счётчики существуют, только если есть объект верхнего уровня \
+     \"stats\": {} и включены переключатели policy: system statsInboundUplink / Downlink и \
+     statsOutboundUplink / Downlink для inbound и outbound; счётчики получают только inbound и \
+     outbound с тегом.\n\n\
+     Значения — байты с момента запуска Xray: перезапуск обнуляет их; сам Feldjäger их не \
+     сбрасывает. Uplink у inbound — то, что отправили клиенты, downlink — то, что они получили; \
+     uplink у outbound — то, что Xray отправил наружу, downlink — то, что вернулось.\n\n\
+     Скорость — среднее между двумя последними нажатиями Refresh; график хранит до 120 \
+     обновлений и только пока работает Feldjäger.",
+);
+const HELP_OTHER_COUNTERS: HelpText = HelpText::new(
+    "Counters whose name does not match an inbound or outbound tag of the loaded configuration: \
+     per-user counters user>>>email>>>traffic>>>uplink / downlink (they need the policy level \
+     switches statsUserUplink / statsUserDownlink and an email on the user), and counters of tags \
+     that are not in the configuration — e.g. added live on the API Console.",
+    "Счётчики, имя которых не совпадает с тегом inbound или outbound загруженной конфигурации: \
+     счётчики пользователей user>>>email>>>traffic>>>uplink / downlink (для них нужны \
+     переключатели уровня policy statsUserUplink / statsUserDownlink и email у пользователя), и \
+     счётчики тегов, которых нет в конфигурации, — например, добавленных на ходу в API Console.",
+);
+const HELP_SYSTEM: HelpText = HelpText::new(
+    "xray api statssys — the Xray process itself: Uptime (seconds since start), Goroutines, GC \
+     cycles and their total pause, heap in use (Alloc), total ever allocated (TotalAlloc — only \
+     grows), memory obtained from the OS (Sys — the closest to the process footprint), live \
+     objects = Mallocs − Frees. Steadily growing Goroutines or Alloc under constant load can \
+     point to stuck connections.",
+    "xray api statssys — сам процесс Xray: Uptime (секунды с запуска), число горутин, циклы GC и \
+     их суммарная пауза, занятая куча (Alloc), всего выделено (TotalAlloc — только растёт), \
+     память, полученная от ОС (Sys — ближе всего к размеру процесса), живые объекты = Mallocs − \
+     Frees. Постоянный рост числа горутин или Alloc при неизменной нагрузке может указывать на \
+     зависшие соединения.",
+);
+
 /// Renders the Stats page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
+    super::show_help_dialog(ui);
     ui.heading("Statistics");
     ui.add_space(6.0);
     ui.label(
@@ -68,6 +120,7 @@ fn show_state_message(ui: &mut Ui, state: ApiConsolePageState) {
 
 fn show_traffic_section(ui: &mut Ui, service: &mut ApplicationService, model: &StatsPageModel) {
     ui.horizontal(|ui| {
+        super::help_button(ui, "Traffic", HELP_TRAFFIC);
         ui.heading("Traffic");
         if ui
             .add_enabled(!model.is_query_running, egui::Button::new("Refresh"))
@@ -141,6 +194,7 @@ fn show_other_counters_section(ui: &mut Ui, model: &StatsPageModel) {
     egui::CollapsingHeader::new(title)
         .default_open(false)
         .show(ui, |ui| {
+            super::help_button(ui, "Other counters", HELP_OTHER_COUNTERS);
             if model.other_counters.is_empty() {
                 ui.label(
                     RichText::new(
@@ -169,6 +223,7 @@ fn show_other_counters_section(ui: &mut Ui, model: &StatsPageModel) {
 
 fn show_sys_stats_section(ui: &mut Ui, service: &mut ApplicationService, model: &StatsPageModel) {
     ui.horizontal(|ui| {
+        super::help_button(ui, "System", HELP_SYSTEM);
         ui.heading("System");
         if ui
             .add_enabled(!model.is_sys_running, egui::Button::new("Refresh"))

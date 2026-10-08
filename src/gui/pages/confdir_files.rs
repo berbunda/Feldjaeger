@@ -5,10 +5,66 @@
 
 use egui::{Color32, RichText, Sense, Ui};
 
+use super::HelpText;
 use crate::app::{ApplicationService, ConfdirFileRow, ConfdirFilesPageState};
+
+// ─── Help text (Roadmap §4.4) ─────────────────────────────────────────────────
+//
+// Merge rules from Xray-core v26.9.30 (`main/run.go` `readConfDir`, `infra/conf/xray.go`
+// `Config.Override`); add / remove flow from `app::config_write`.
+
+const HELP_FILES: HelpText = HelpText::new(
+    "Xray started with -confdir reads the directory's *.json and *.jsonc files (with the default \
+     -format auto also *.toml, *.yaml, *.yml) in file-name order and merges them:\n\
+     • a top-level object (log, routing, dns, policy, api, stats, observatory, …) from a later \
+     file replaces the earlier one entirely — routing is not merged rule by rule;\n\
+     • inbounds — one with the same tag replaces the earlier one, the others are appended;\n\
+     • outbounds — one with the same tag replaces the earlier one, the others are inserted \
+     BEFORE the outbounds of earlier files (and the first outbound is the default one), unless \
+     the file name contains \"tail\" — then they are appended.\n\n\
+     Feldjäger reads only *.json files: files in other formats are not shown or edited, but \
+     still take part in xray run -test. The table shows which sections each file holds; Remove \
+     (right-click a file) works only for an empty file.",
+    "Xray, запущенный с -confdir, читает файлы *.json и *.jsonc каталога (с -format auto по \
+     умолчанию — ещё *.toml, *.yaml, *.yml) в порядке имён и объединяет их:\n\
+     • объект верхнего уровня (log, routing, dns, policy, api, stats, observatory, …) из более \
+     позднего файла целиком заменяет прежний — routing не объединяется по правилам;\n\
+     • inbounds — inbound с тем же тегом заменяет прежний, остальные добавляются в конец;\n\
+     • outbounds — outbound с тем же тегом заменяет прежний, остальные вставляются ПЕРЕД \
+     outbound из более ранних файлов (а первый outbound — outbound по умолчанию), если только в \
+     имени файла нет \"tail\" — тогда они добавляются в конец.\n\n\
+     Feldjäger читает только файлы *.json: файлы других форматов не показываются и не \
+     редактируются, но участвуют в xray run -test. Таблица показывает, какие секции лежат в \
+     каждом файле; Remove (правый щелчок по файлу) доступен только для пустого файла.",
+);
+const HELP_ADD_FILE: HelpText = HelpText::new(
+    "A bare file name ending in .json, without a path; the file is created in the confdir with \
+     the content {}. The name sets the merge order — e.g. 00-base.json, 10-custom.json; a name \
+     containing \"tail\" puts its outbounds after the others. After creating it Feldjäger runs \
+     xray run -test on the directory and removes the new file again if the test fails. An empty \
+     file changes nothing until content is added to it.",
+    "Имя файла без пути, оканчивающееся на .json; файл создаётся в confdir с содержимым {}. Имя \
+     задаёт порядок объединения — например, 00-base.json, 10-custom.json; имя со словом \"tail\" \
+     ставит его outbound после остальных. После создания Feldjäger выполняет xray run -test для \
+     каталога и удаляет новый файл, если проверка не прошла. Пустой файл ничего не меняет, пока \
+     в него не добавлено содержимое.",
+);
+const HELP_REMOVE_FILE: HelpText = HelpText::new(
+    "Only an empty file can be removed. Feldjäger first copies it to \
+     <name>.feldjaeger.bak.<unix time> in the same directory, removes it and runs xray run \
+     -test; if the test fails, the file is restored. The copy stays on the server, but the \
+     Backups page lists backups only for files of the loaded configuration, so it will not show \
+     this one — copy it back over SSH if needed.",
+    "Удалить можно только пустой файл. Feldjäger сначала копирует его в \
+     <имя>.feldjaeger.bak.<unix-время> в том же каталоге, удаляет и выполняет xray run -test; \
+     если проверка не прошла, файл восстанавливается. Копия остаётся на сервере, но страница \
+     Backups показывает копии только для файлов загруженной конфигурации, поэтому этой копии \
+     там не будет — при необходимости верните её по SSH.",
+);
 
 /// Renders the Config Files page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
+    super::show_help_dialog(ui);
     show_add_file_dialog(ui, service);
     show_remove_file_dialog(ui, service);
 
@@ -46,6 +102,7 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
 
 fn show_header(ui: &mut Ui, service: &mut ApplicationService) {
     ui.horizontal(|ui| {
+        super::help_button(ui, "Config Files", HELP_FILES);
         ui.strong("Files");
         ui.add_space(12.0);
         let busy = service.is_confdir_file_mutation_busy();
@@ -173,6 +230,7 @@ fn show_add_file_dialog(ui: &mut Ui, service: &mut ApplicationService) {
         .open(&mut open)
         .show(ui.ctx(), |ui| {
             ui.horizontal(|ui| {
+                super::help_button(ui, "File name", HELP_ADD_FILE);
                 ui.label("File name:");
                 ui.text_edit_singleline(&mut pending.filename);
             });
@@ -260,13 +318,16 @@ fn show_remove_file_dialog(ui: &mut Ui, service: &mut ApplicationService) {
         .default_width(400.0)
         .open(&mut open)
         .show(ui.ctx(), |ui| {
-            ui.label(
-                RichText::new(format!(
-                    "Remove «{}»? It is already empty — this only removes the file itself.",
-                    pending.display_name
-                ))
-                .size(14.0),
-            );
+            ui.horizontal(|ui| {
+                super::help_button(ui, "Remove confdir file", HELP_REMOVE_FILE);
+                ui.label(
+                    RichText::new(format!(
+                        "Remove «{}»? It is already empty — this only removes the file itself.",
+                        pending.display_name
+                    ))
+                    .size(14.0),
+                );
+            });
             ui.add_space(6.0);
             ui.label(
                 RichText::new(

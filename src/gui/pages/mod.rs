@@ -743,6 +743,14 @@ mod tests {
             ("policy.rs", include_str!("policy.rs")),
             ("observatory.rs", include_str!("observatory.rs")),
             ("burst_observatory.rs", include_str!("burst_observatory.rs")),
+            ("api_settings.rs", include_str!("api_settings.rs")),
+            ("log_settings.rs", include_str!("log_settings.rs")),
+            ("confdir_files.rs", include_str!("confdir_files.rs")),
+            ("backups.rs", include_str!("backups.rs")),
+            ("service.rs", include_str!("service.rs")),
+            ("api_console.rs", include_str!("api_console.rs")),
+            ("stats.rs", include_str!("stats.rs")),
+            ("metrics.rs", include_str!("metrics.rs")),
         ] {
             assert!(source.contains("super::show_help_dialog(ui)"), "{file}");
         }

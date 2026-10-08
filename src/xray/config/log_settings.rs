@@ -231,7 +231,9 @@ impl MaskAddress {
                 if trimmed.is_empty() {
                     Self::Disabled
                 } else {
-                    match trimmed.to_ascii_lowercase().as_str() {
+                    // Case-sensitive like `ParseMaskAddress`: "Half" is not a keyword there
+                    // but a malformed custom mask, and Xray refuses to start with it.
+                    match trimmed {
                         "quarter" => Self::Quarter,
                         "half" => Self::Half,
                         "full" => Self::Full,
@@ -278,10 +280,15 @@ pub struct LogSettings {
 }
 
 impl LogSettings {
-    /// Effective defaults when the `log` object is absent (display only).
+    /// Effective values when the `log` object is absent.
+    ///
+    /// Xray-core then uses `DefaultLogConfig()`: the access log is **off** and the error log
+    /// goes to stdout at `warning` — unlike an empty `"log": {}`, where a missing `access` means
+    /// stdout. Editing starts from these values, so the first Save writes `"access": "none"`
+    /// and keeps the access log off instead of silently turning it on.
     pub fn defaults() -> Self {
         Self {
-            access: LogOutput::Stdout,
+            access: LogOutput::Disabled,
             error: LogOutput::Stdout,
             log_level: LogLevel::default_effective(),
             dns_log: false,
@@ -335,7 +342,14 @@ pub fn log_settings_from_section(section: Option<&SourcedSection<Value>>) -> Log
         warnings.push(format!("Unknown log level: {raw}"));
     }
     if let MaskAddress::Unknown(raw) = &mask_address {
-        warnings.push(format!("Unknown maskAddress value: {raw}"));
+        if ["quarter", "half", "full"].contains(&raw.to_ascii_lowercase().as_str()) {
+            warnings.push(format!(
+                "maskAddress \"{raw}\": Xray-core accepts only lowercase quarter / half / full \
+                 and refuses to start with this value. Pick the mode again and save."
+            ));
+        } else {
+            warnings.push(format!("Unknown maskAddress value: {raw}"));
+        }
     }
 
     LogSettings {
@@ -563,7 +577,8 @@ mod tests {
     fn missing_log_object_uses_defaults() {
         let settings = log_settings_from_section(None);
         assert!(!settings.section_present);
-        assert_eq!(settings.access, LogOutput::Stdout);
+        // Xray-core `DefaultLogConfig()`: no access log without a `log` object.
+        assert_eq!(settings.access, LogOutput::Disabled);
         assert_eq!(settings.error, LogOutput::Stdout);
         assert_eq!(settings.log_level, LogLevel::Warning);
         assert!(!settings.dns_log);
@@ -688,6 +703,30 @@ mod tests {
             settings.mask_address,
             MaskAddress::Unknown("weird".to_owned())
         );
+    }
+
+    /// `ParseMaskAddress` compares keywords case-sensitively: `xray run -test` 26.9.30 with
+    /// `"maskAddress": "Half"` fails (`strconv.Atoi: parsing "Half"`), so it must not be shown
+    /// as the working `half` mode.
+    #[test]
+    fn mask_keywords_are_case_sensitive() {
+        let settings =
+            log_settings_from_section(Some(&section(json!({ "maskAddress": "Half" }))));
+        assert_eq!(settings.mask_address, MaskAddress::Unknown("Half".to_owned()));
+        assert!(settings
+            .warnings
+            .iter()
+            .any(|w| w.contains("refuses to start")));
+    }
+
+    /// Without a `log` object the first Save must keep the access log off (`DefaultLogConfig`),
+    /// not drop `access` and so switch it to stdout.
+    #[test]
+    fn saving_defaults_keeps_access_log_off() {
+        let value = log_settings_to_new_value(&LogSettings::defaults());
+        assert_eq!(value["access"], json!("none"));
+        assert!(value.get("error").is_none());
+        assert_eq!(value["loglevel"], json!("warning"));
     }
 
     #[test]

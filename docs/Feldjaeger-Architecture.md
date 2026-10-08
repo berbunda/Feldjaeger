@@ -9726,3 +9726,267 @@ Feldjäger (§55) считал `pingConfig` необязательным: Save �
 «нет ни селекторов, ни `pingConfig`» в существующих тестах summary / состояния страницы. Итог:
 **1393 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не
 проверялся.
+
+# 118	Pop-up help: API Settings на двух языках (Roadmap §4.4) (0.5.57-0)
+
+## 118.1	Тексты (`gui/pages/api_settings.rs`, 3 текста)
+
+Источник — ядро v26.9.30 и `xray run -test` (`xray-bin/xray.exe`):
+- `HELP_TAG` — `APIConfig.Build()` отвергает пустой `tag` («API tag can't be empty.») даже при
+  заданном `listen`. `Commander.Start()`: без `listen` создаётся outbound с этим тегом
+  (`OutboundListener`), к которому трафик направляется маршрутизацией (обычно dokodemo-door на
+  loopback + правило `inboundTag` → `outboundTag`); с `listen` функция возвращается раньше, и
+  outbound не создаётся.
+- `HELP_LISTEN` — `ResolveTCPAddr` для `host:port`, Unix-сокет для значений с `/` или `@`
+  (`xray run -test` с `/tmp/xray-api.sock` — OK); аутентификации нет. API Console и Statistics
+  подключаются к этому адресу на сервере (`resolve_api_listen`).
+- `HELP_SERVICES` — назначение шести сервисов, которые знает `infra/conf/api.go`; сравнение имён
+  через `strings.ToLower`, неизвестное имя пропускается без ошибки (`FooService` — OK).
+  `ObservatoryService` без `observatory` / `burstObservatory` — «core: not all dependencies are
+  resolved», Xray не запускается; с любой из этих секций — OK.
+
+## 118.2	Форма
+
+Кнопки справки у `tag`, `listen` и подписи `services`. Серые подписи под `tag` («Empty = omit» —
+неверно, см. ниже) и `listen` удалены: их заменяет справка. Пояснение о двух способах
+редактирования списка `services` и общее примечание страницы оставлены.
+
+## 118.3	Найдено (исправлено в §119)
+
+| случай | `xray run -test` 26.9.30 | Feldjäger |
+|---|---|---|
+| `"api": {}` | отказ: «API tag can't be empty.» | Save разрешён |
+| `"api": {"listen": "127.0.0.1:10085"}` | отказ | Save разрешён |
+| `"api": {"tag": "api"}` | OK | — |
+| `services: ["ObservatoryService"]` без observatory | отказ при запуске | нет переключателя, текстом Save разрешён |
+
+Оба случая — отдельные пункты Roadmap §4.5, исправлены следующей версией (§119).
+
+## 118.4	Итог
+
+Страница вызывает `show_help_dialog`, тест `pages_with_help_buttons_render_the_help_dialog`
+проверяет и её. Итог: **1393 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном
+приложении не проверялся.
+
+# 119	Багфикс: API без `tag` и `ObservatoryService` без observatory (Roadmap §4.5) (0.5.57-1)
+
+## 119.1	Проблема
+
+Проверено `xray run -test` 26.9.30 (`xray-bin/xray.exe`), таблица — §118.3:
+- `APIConfig.Build()` отвергает пустой `tag` («API tag can't be empty.») независимо от `listen`.
+  Feldjäger разрешал Save без `tag`, а Save при отсутствующей секции писал `"api": {}` с тем, что
+  ввёл пользователь: только `listen` — тоже отказ. Серая подпись формы прямо советовала «Empty =
+  omit».
+- `ObservatoryService` требует функцию Observatory, которую регистрируют только секции
+  `observatory` / `burstObservatory`; без них — «core: not all dependencies are resolved» при
+  запуске. Переключателя для этого сервиса не было (`KNOWN_API_SERVICES` перечислял пять
+  сервисов из документации), а введённый текстом сервис проходил Save.
+
+## 119.2	Исправление (тот же подход, что §117)
+
+- `validate_api_settings` требует `tag` (прочие проверки полей не менялись).
+- `ApiSettings::into_edit_draft` — черновик **новой** секции начинается с `tag: "api"`;
+  существующая секция без `tag` не меняется молча — Save блокируется, под пустым полем `tag`
+  красная подсказка.
+- `KNOWN_API_SERVICES` += `OBSERVATORY_API_SERVICE` (`"ObservatoryService"`) — появился
+  переключатель.
+- Проверка, зависящая от остального конфига, вынесена отдельно, чтобы `validate_api_settings`
+  оставалась чистой функцией над `ApiSettings`:
+  `validate_api_settings_against_config(settings, observatory_present)` (модель) и
+  `validate_api_settings_for_config(config, settings)` (`modify.rs`, смотрит
+  `sections().observatory()` / `burst_observatory()`; секция со значением `null` парсером не
+  сохраняется, поэтому `is_some()` достаточно). Её вызывают `update_api_settings`, Preview
+  changes и Save — последний теперь сначала берёт `editable`, затем проверяет. Имя сервиса
+  сравнивается без учёта регистра, как `strings.ToLower` в ядре.
+- Read-only: `ApiSettings::core_problems(observatory_present)` — те же два случая для
+  загруженного конфига, добавляются к предупреждениям страницы вне режима редактирования
+  (`build_api_settings_page_model`). Отсутствие секции `api` проблемой не считается.
+
+Не сделано: удаление секции `observatory` при оставшемся `ObservatoryService` не проверяется —
+в Feldjäger нет действия, удаляющего эту секцию целиком.
+
+## 119.3	Итог
+
+Тесты (+5): `validation_requires_tag`, `edit_draft_of_new_section_starts_with_tag`,
+`observatory_service_needs_an_observatory_section`, `core_problems_report_missing_tag_and_observatory`
+(модель), `api_observatory_service_needs_an_observatory_section_in_the_config` (`modify_tests.rs`,
+через `update_api_settings`: без observatory — отказ и ничего не записано, с `observatory` или
+`burstObservatory` — OK); `validation_accepts_tag_only_and_full_settings` и
+`validation_rejects_control_characters` переписаны под обязательный `tag`. Итог:
+**1398 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не
+проверялся.
+
+# 120	Pop-up help: Log Settings на двух языках (Roadmap §4.4) (0.5.58-0)
+
+## 120.1	Тексты (`gui/pages/log_settings.rs`, 5 текстов)
+
+Источник — ядро v26.9.30 (`infra/conf/log.go`, `app/log/log.go`, `app/log/log_creator.go`,
+`common/log/logger.go`, `common/log/dns.go`), `xray run -test` и короткий `xray run` с socks-inbound
+и запросом через него (`xray-bin/xray.exe`, вывод stdout сравнивался по строкам `accepted`):
+- `HELP_ACCESS` — формат строки (`from tcp:127.0.0.1:6098 accepted tcp:example.com:80`, теги и
+  email при наличии); пустое значение — ключ не пишется (stdout, под systemd — journal); файл
+  открывается при запуске `O_APPEND|O_CREATE`, права 0600, без каталога — «failed to initialize
+  access logger» (`xray run -test` ловит это сам); ротации нет — logrotate с copytruncate или
+  `xray api restartlogger` (LoggerService); без объекта `log` журнал доступа выключен
+  (`DefaultLogConfig()`), с `"log": {}` — stdout; `loglevel: none` выключает и его.
+- `HELP_ERROR` — те же правила назначения; без объекта `log` — stdout.
+- `HELP_LOG_LEVEL` — `strings.ToLower`, неизвестное значение (`verbose`) — `Configuration OK`,
+  действует warning. Описание уровней — по фактическим вызовам ядра: «taking detour» / «sniffed
+  domain» и «connection ends» / «failed to process outbound traffic» — `LogInfo*`, «non existing
+  outTag» — `LogWarning`. `none` ставит `LogType_None` обоим журналам (файл access при этом даже не
+  создаётся — проверено).
+- `HELP_DNS_LOG` — `*log.DNSLog` уходит в `accessLogger` только при `dnsLog`, поэтому при
+  выключенном журнале доступа или `loglevel: none` записи теряются; поля строки — по
+  `DNSLog.String()` (сервер, query / cache, домен → адреса, время, ошибка).
+- `HELP_MASK_ADDRESS` — `ParseMaskAddress` + `MaskedMsgWrapper`: маска применяется ко всем
+  сообщениям (access, DNS, error); quarter = /8 + /16, half = /16 + /32, full — замена на
+  `[Masked IPv4]` / `Masked IPv6`; в custom N — сколько старших бит IPv4 видно (кратно 8),
+  32 / 128 — без маскировки. `"Half"` и `/12+/32` — отказ `xray run -test`.
+
+## 120.2	Форма
+
+Кнопки справки у «Destination» обоих журналов (`edit_output` получил заголовок и `HelpText`),
+«Log level», «Enable DNS query logging» (`help_checkbox`) и «Mask IP addresses in logs».
+Предупреждения о приватности (rules.md § «Xray runtime logs») оставлены. Добавлены две жёлтые
+подсказки, потому что оба случая Xray принимает молча: `loglevel` None при невыключенном журнале
+доступа («Log level None also turns off the access log.») и `dnsLog` при выключенном журнале
+доступа или уровне None («DNS entries go to the access log, which is off — they will not be
+written.»).
+
+## 120.3	Найдено (исправлено в §121)
+
+| случай | Xray 26.9.30 | Feldjäger |
+|---|---|---|
+| нет объекта `log` | access выключен, error → stdout | показывал access «Standard Output»; первый Save писал `log` без `access` → access включался в stdout |
+| `"log": {}` | access → stdout | — (верно) |
+| `"maskAddress": "Half"` | отказ: `strconv.Atoi: parsing "Half"` | показывал рабочий режим Half |
+
+## 120.4	Итог
+
+Страница вызывает `show_help_dialog`, тест `pages_with_help_buttons_render_the_help_dialog`
+проверяет и её. GUI в запущенном приложении не проверялся.
+
+# 121	Багфикс: умолчания без объекта `log` и регистр `maskAddress` (Roadmap §4.5) (0.5.58-1)
+
+## 121.1	Проблема
+
+`LogSettings::defaults()` и `XrayLogConfigView::defaults()` считали, что без объекта `log` оба
+журнала идут в stdout, — так ядро ведёт себя только для пустого `"log": {}` (`LogConfig.Build()`
+начинает с `LogType_Console` для обоих). Без объекта `log` `infra/conf/xray.go` берёт
+`DefaultLogConfig()`: `AccessLogType: None`. Последствия: страница показывала журнал доступа
+включённым; редактирование начиналось с `LogOutput::Stdout`, который `write_to` выражает
+удалением ключа, поэтому первый Save создавал `log` без `access` и включал журнал доступа в
+journal без явного действия пользователя (нарушение rules.md § «Project philosophy»); просмотрщик
+Xray Logs предлагал access-источник «stdout», которого нет.
+
+Второе: `MaskAddress::parse` сравнивал ключевые слова без учёта регистра, а `ParseMaskAddress` —
+с учётом: `"Half"` попадает в ветку custom-маски, `strconv.Atoi` падает, Xray не запускается.
+Feldjäger показывал такое значение как рабочий режим Half.
+
+## 121.2	Исправление
+
+- `LogSettings::defaults()` — `access: LogOutput::Disabled`; первый Save пишет `"access": "none"`,
+  error и loglevel по-прежнему `warning` / ключ не пишется — действующее поведение Xray не
+  меняется. Для повреждённого (не-объект) `log` используются те же умолчания только для показа.
+- `XrayLogConfigView::defaults()` — `access: XrayLogDestination::Disabled` (используется и при
+  незагруженном конфиге — там значение и раньше было предположением).
+- `MaskAddress::parse` — точное сравнение `quarter` / `half` / `full`; прочее — custom-формат или
+  `Unknown` (сохраняется как есть). Для `Unknown`, совпадающего с ключевым словом без учёта
+  регистра, — отдельное предупреждение «Xray-core accepts only lowercase … and refuses to start»;
+  выбор режима в форме и Save исправляют значение.
+
+Не сделано: `LogOutput::parse` и просмотрщик по-прежнему читают `"None"` / `" none"` как
+выключенный журнал, хотя ядро сравнивает `== "none"` и откроет файл `None` относительно рабочего
+каталога службы. Xray при этом запускается, а Save записывает `"none"` — оставлено как есть.
+
+## 121.3	Итог
+
+Тесты (+2): `mask_keywords_are_case_sensitive`, `saving_defaults_keeps_access_log_off`;
+`missing_log_object_uses_defaults`, `missing_section_disables_access_and_keeps_error_on_stdout`
+(переименован) и `cancel_clears_draft_semantics` переписаны под новые умолчания. Итог:
+**1400 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не
+проверялся.
+
+# 122	Pop-up help: операционные страницы на двух языках (Roadmap §4.4) (0.5.59-0)
+
+## 122.1	Тексты (29)
+
+Источники — исходники Xray-core v26.9.30, код Feldjäger и вызовы против живого `xray.exe`
+26.9.30 (`xray-bin/xray.exe`, конфиг с `api.listen` и HandlerService / RoutingService /
+LoggerService / StatsService, `metrics.listen`, `observatory`):
+
+| страница | тексты | что сверено |
+|---|---|---|
+| Config Files (`confdir_files.rs`) | `HELP_FILES`, `HELP_ADD_FILE`, `HELP_REMOVE_FILE` | `main/run.go` `readConfDir` (регулярка `^.+\.(json\|jsonc)$`, при `-format auto` — ещё toml/yaml/yml; `os.ReadDir` — порядок имён), `Config.Override` (объекты верхнего уровня заменяются целиком; inbound — замена по тегу или в конец; outbound — замена по тегу или **в начало**, в конец только если в имени файла есть `tail`); Feldjäger читает только `*.json` (`discovery.rs`); `create_confdir_file_validated` / `remove_confdir_file_validated` |
+| Backups (`backups.rs`) | `HELP_BACKUPS`, `HELP_RESTORE` | `BackupManager` (`{file}.feldjaeger.bak.{unix}` рядом с файлом, удаления нет, `find … -printf`), unit-файл копируется так же, но не показывается; `restore_with_conflict_check` (отказ при изменённом файле → `write_config_validated`), без перезапуска Xray |
+| Service (`service.rs`) | `HELP_OPERATIONS`, `HELP_UNIT_FILE`, `HELP_UNIT_NAME`, `HELP_UNIT_BINARY`, `HELP_UNIT_LAYOUT`, `HELP_UNIT_USER`, `HELP_UNIT_WANTED_BY`, `HELP_ENABLE_AND_START`, `HELP_SUDO_PASSWORD` | `render_unit` (состав файла, capabilities для `nobody`, закомментированы для `root`), `install_or_replace_unit` (копия → запись → `daemon-reload` → восстановление), `preflight_config_readable` (права «для остальных» проверяются для любого пользователя), `confirmation_prompt` |
+| API Console (`api_console.rs`) | `HELP_API_SERVER`, `…_LOGGER`, `…_INBOUNDS`, `…_OUTBOUNDS`, `…_USERS`, `…_RULES`, `…_BALANCER`, `…_SIB` | `main/commands/all/api/*.go` и живые вызовы, таблица ниже; `app/dispatcher/default.go` — соединение по правилу с несуществующим `outboundTag` закрывается, а не уходит в outbound по умолчанию |
+| Statistics (`stats.rs`) | `HELP_TRAFFIC`, `HELP_OTHER_COUNTERS`, `HELP_SYSTEM` | `statsquery`: счётчики только у inbound / outbound с тегом (inbound без тега в выводе нет), значения с запуска Xray; `statssys` (Uptime в секундах); `rate_since_previous_sample`, `STATS_HISTORY_CAP` = 120 |
+| Metrics (`metrics.rs`) | `HELP_LISTEN`, `HELP_OBSERVATORY`, `HELP_OTHER_COUNTERS`, `HELP_RUNTIME` | `app/metrics/metrics.go` (ключи `stats` / `observatory` / `memstats` / `cmdline`, `/debug/pprof/*` на том же адресе), `run_metrics_scrape` (curl, при отсутствии — wget) |
+
+Живые вызовы `xray api` (26.9.30):
+
+| вызов | результат |
+|---|---|
+| `adi` с голым объектом inbound | «no valid inbound found», exit 1 |
+| `adi` с существующим тегом | «existing tag found», exit 1 |
+| `adu` с голым объектом inbound | «Added 0 user(s)», **exit 0** |
+| `adu` с `{"inbounds":[…]}` без `port` | «Listen on AnyIP but no Port(s) set», 0 пользователей, exit 0 |
+| `adu` с полным inbound | добавлен пользователь с email, без email — пропущен |
+| `rmu` с неизвестным email | «User … not found.», «Removed 0», exit 0 |
+| `rmi` с неизвестным тегом | ошибка, exit 1 |
+| `rmrules` с неизвестным тегом | `{}`, exit 0 |
+| `adrules` без `-append` | все живые правила **и балансировщики** заменены телом (`bi bal` после — «cannot find tag») |
+| `adrules -append` | правила добавлены в конец, балансировщики на месте |
+| `bi` без тега | «set balancer tag» + «cannot find tag» |
+| `bo -b bal direct` | `bi bal` показывает override |
+| `sib -reset` без IP | «illegal ip rule: stdin:», ничего не удалено |
+| `sib` второй раз без `-reset` | «duplicate ruleTag sourceIpBlock» |
+| `sib` | правило `sourceIpBlock` в конце списка |
+| `ado` | новый outbound в конце `lso` |
+
+## 122.2	Форма
+
+Кнопки справки — у заголовка или первой строки каждой секции (у `CollapsingHeader` нельзя
+разместить кнопку в самом заголовке), у полей формы unit-файла (`field_label`), у «Enable and
+start after Apply» (`help_checkbox`), у пароля sudo, в окнах Add / Remove confdir file и
+Restore backup. Все шесть страниц вызывают `show_help_dialog`, тест
+`pages_with_help_buttons_render_the_help_dialog` проверяет их. Исправления формы API Console —
+§123. GUI в запущенном приложении не проверялся.
+
+# 123	Багфиксы API Console и Service (Roadmap §4.5) (0.5.59-1)
+
+## 123.1	API Console
+
+- **Balancer info.** `balancer_info_request(Option<String>)` без тега вызывал `bi` без аргумента —
+  ядро всегда отвечает «cannot find tag» (§122.1). Сигнатура — `balancer_info_request(String)`,
+  кнопка неактивна при пустом теге, подпись «optional — empty lists all» убрана.
+- **Source IP block.** `can_apply` разрешал Reset без IP, а `sib` без позиционных аргументов
+  подставляет `stdin:` как адрес и падает на сборке правила — ещё до `RemoveRule`. Теперь нужен
+  хотя бы один IP; подпись Reset — «replace the IP list of an existing rule with this tag»;
+  doc-комментарий `source_ip_block_request` больше не называет Reset снятием блокировки (для
+  этого — `rmrules sourceIpBlock`).
+- **Add rule(s).** Поле формы `add_rules_append: bool` по умолчанию было `false`, то есть `adrules`
+  без `-append`: замена всех живых правил и балансировщиков без явного действия, указывающего,
+  что именно удаляется (rules.md § «Project philosophy»). Поле переименовано в
+  `add_rules_replace` (по умолчанию `false` → `-append`), флажок «Replace ALL live rules and
+  balancers», при отметке — жёлтое предупреждение. Сам `add_rules_request(body, append)` не
+  менялся.
+- **Add user(s).** Подпись советовала «whole inbound JSON», а `adu` берёт `conf.InboundConfigs`
+  из документа конфигурации: голый объект даёт «Added 0 user(s)» с exit 0, и страница показывает
+  успех. Подпись теперь требует `{"inbounds": [...]}` с полным inbound и говорит, что
+  добавляются пользователи с email.
+
+## 123.2	Service
+
+`unit_apply_needs_restart_prompt` выставлялся как `was_running && !enable_and_start`. Но
+«Enable and start» выполняет `systemctl start`, а для работающего unit это ничего не делает:
+после Edit unit с этим флажком процесс оставался со старым `ExecStart` / `User`, и окно
+«Restart service?» не появлялось. Условие вынесено в `UnitApplyOutcome::needs_restart_prompt()`
+(`result.is_ok() && was_running`), обработчик в `ApplicationService` вызывает его.
+
+## 123.3	Итог
+
+Тесты (+2): `balancer_info_always_passes_the_tag` (`api_ops.rs`),
+`restart_prompt_follows_was_running_only` (`service_control.rs`). Итог: **1402 passed / 0
+failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не проверялся.

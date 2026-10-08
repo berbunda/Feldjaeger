@@ -16,11 +16,54 @@ use crate::app::{
     format_backup_timestamp, format_size,
 };
 
+use super::HelpText;
+
+// ─── Help text (Roadmap §4.4) ─────────────────────────────────────────────────
+//
+// From `remote::BackupManager` and `app::backup_ops` (restore through `write_config_validated`).
+
+const HELP_BACKUPS: HelpText = HelpText::new(
+    "Before every change of a configuration file — on any page, on restore, on removing a \
+     confdir file — Feldjäger copies the file to <file>.feldjaeger.bak.<unix time> in the same \
+     directory. Xray ignores these copies (a confdir loads only *.json, *.jsonc, *.toml, *.yaml, \
+     *.yml). Feldjäger never deletes them: they accumulate, remove old ones over SSH.\n\n\
+     The list covers the files of the loaded configuration only. The systemd unit file is backed \
+     up the same way (/etc/systemd/system/<unit>.feldjaeger.bak.<time>) but is not listed here. \
+     List backups runs one find in the file's directory and needs find with -printf (GNU \
+     findutils; BusyBox find lacks it).",
+    "Перед каждым изменением файла конфигурации — на любой странице, при восстановлении, при \
+     удалении файла confdir — Feldjäger копирует файл в <файл>.feldjaeger.bak.<unix-время> в том \
+     же каталоге. Xray эти копии не читает (confdir загружает только *.json, *.jsonc, *.toml, \
+     *.yaml, *.yml). Feldjäger их никогда не удаляет: они накапливаются, старые удаляйте по \
+     SSH.\n\n\
+     Список охватывает только файлы загруженной конфигурации. Unit-файл systemd копируется так \
+     же (/etc/systemd/system/<unit>.feldjaeger.bak.<время>), но здесь не показывается. List \
+     backups выполняет один find в каталоге файла, и ему нужен find с -printf (GNU findutils; у \
+     find из BusyBox его нет).",
+);
+const HELP_RESTORE: HelpText = HelpText::new(
+    "Restore writes the backup's content over the live file. It is refused if the file on the \
+     server changed since Feldjäger loaded it — reload the configuration first. The current \
+     content is backed up first, then xray run -test checks the result; if it fails, the file is \
+     put back. The comparison shows current → backup, with secrets hidden. The running Xray \
+     keeps its old configuration until it is restarted on the Service page.",
+    "Restore записывает содержимое копии поверх рабочего файла. Восстановление отклоняется, \
+     если файл на сервере изменился после загрузки в Feldjäger, — сначала перезагрузите \
+     конфигурацию. Текущее содержимое сначала копируется, затем результат проверяет xray run \
+     -test; если проверка не прошла, файл возвращается. Сравнение показывает текущее → копия, \
+     секреты скрыты. Работающий Xray использует старую конфигурацию, пока его не перезапустят \
+     на странице Service.",
+);
+
 /// Renders the Backups page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
+    super::show_help_dialog(ui);
     show_restore_dialog(ui, service);
 
-    ui.heading("Backups");
+    ui.horizontal(|ui| {
+        super::help_button(ui, "Backups", HELP_BACKUPS);
+        ui.heading("Backups");
+    });
     ui.add_space(8.0);
     ui.label(
         RichText::new(
@@ -217,15 +260,18 @@ fn show_restore_dialog(ui: &mut Ui, service: &mut ApplicationService) {
         .default_width(520.0)
         .open(&mut open)
         .show(ui.ctx(), |ui| {
-            ui.label(
-                RichText::new(format!(
-                    "Restore the backup from {} ({}) over «{}»?",
-                    format_backup_timestamp(pending.created_at_unix),
-                    format_size(pending.size_bytes as u64),
-                    display_source_file(&pending.original_path),
-                ))
-                .size(14.0),
-            );
+            ui.horizontal(|ui| {
+                super::help_button(ui, "Restore backup", HELP_RESTORE);
+                ui.label(
+                    RichText::new(format!(
+                        "Restore the backup from {} ({}) over «{}»?",
+                        format_backup_timestamp(pending.created_at_unix),
+                        format_size(pending.size_bytes as u64),
+                        display_source_file(&pending.original_path),
+                    ))
+                    .size(14.0),
+                );
+            });
             ui.add_space(6.0);
             ui.label(
                 RichText::new(

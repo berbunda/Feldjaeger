@@ -131,7 +131,15 @@ pub fn build_api_settings_page_model(
         .any(|w| w.starts_with("Malformed api object"));
 
     let editing = draft.is_some();
-    let settings = draft.cloned().unwrap_or_else(|| loaded.clone());
+    let mut settings = draft.cloned().unwrap_or_else(|| loaded.clone());
+    if !editing {
+        // What would stop Xray-core from loading / starting (Architecture §119); while editing,
+        // Save reports the same problems for the draft.
+        let sections = editable.sections();
+        let observatory_present =
+            sections.observatory().is_some() || sections.burst_observatory().is_some();
+        settings.warnings.extend(loaded.core_problems(observatory_present));
+    }
     let change_summary = if let Some(draft) = draft {
         api_settings_change_summary(&loaded, draft)
     } else {

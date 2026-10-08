@@ -46,6 +46,7 @@ mod wiring;
 pub use api_settings::{
     ApiSettings, KNOWN_API_SERVICES, api_settings_change_summary, api_settings_from_section,
     api_settings_to_new_value, apply_api_settings_to_value, validate_api_settings,
+    validate_api_settings_against_config,
 };
 pub use burst_observatory_settings::{
     BurstObservatorySettings, BurstPingConfigEntry, apply_burst_observatory_settings_to_value,
@@ -205,7 +206,7 @@ pub use modify::{
     delete_user, duplicate_inbound, duplicate_outbound, generate_client_auth,
     generate_client_uuid, remove_confdir_file, remove_outbound, rename_outbound_tag,
     replace_inbound_raw_json, replace_outbound, replace_outbound_raw_json, update_api_settings,
-    update_burst_observatory_settings,
+    update_burst_observatory_settings, validate_api_settings_for_config,
     update_dns_settings, update_env_settings, update_fakedns_settings, update_geodata_settings,
     update_inbound_client,
     update_inbound_general,

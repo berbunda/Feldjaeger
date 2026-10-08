@@ -319,6 +319,17 @@ pub struct UnitApplyOutcome {
     pub was_running: bool,
 }
 
+impl UnitApplyOutcome {
+    /// Whether the GUI should offer "Restart now" after a successful Apply.
+    ///
+    /// A process that was already running keeps the previous `ExecStart` / `User` until it is
+    /// restarted. "Enable and start" does not help there: `systemctl start` on a running unit
+    /// does nothing, so the prompt is needed whenever the service was running.
+    pub fn needs_restart_prompt(&self) -> bool {
+        self.result.is_ok() && self.was_running
+    }
+}
+
 /// Connect → install_or_replace_unit → optional enable+start → disconnect.
 pub async fn run_unit_apply<B>(
     backend: &B,
@@ -899,5 +910,24 @@ mod tests {
             ServiceOperation::Disable.confirmation_prompt(),
             Some("Disable Xray startup?")
         );
+    }
+
+    fn unit_apply_outcome(was_running: bool, enable_and_start: bool) -> UnitApplyOutcome {
+        UnitApplyOutcome {
+            service_name: "xray.service".to_owned(),
+            result: Ok(()),
+            enable_and_start,
+            was_running,
+        }
+    }
+
+    /// `systemctl start` on a running unit is a no-op, so "Enable and start" must not suppress
+    /// the Restart prompt — the running process would keep the old unit.
+    #[test]
+    fn restart_prompt_follows_was_running_only() {
+        assert!(unit_apply_outcome(true, false).needs_restart_prompt());
+        assert!(unit_apply_outcome(true, true).needs_restart_prompt());
+        assert!(!unit_apply_outcome(false, true).needs_restart_prompt());
+        assert!(!unit_apply_outcome(false, false).needs_restart_prompt());
     }
 }

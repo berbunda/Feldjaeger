@@ -14,6 +14,103 @@ use crate::init::{
 use crate::xray::InitSystemKind;
 use feldjaeger_ssh::RemotePath;
 
+use super::HelpText;
+
+// ─── Help text (Roadmap §4.4) ─────────────────────────────────────────────────
+//
+// From `init::unit` (`render_unit`, `install_or_replace_unit`), `init::systemd` and
+// `app::service_control`.
+
+const HELP_OPERATIONS: HelpText = HelpText::new(
+    "Start / Stop / Restart run systemctl for the unit. Xray reads its configuration only at \
+     start: changes saved on any page take effect after Restart — there is no reload, Xray has \
+     no hot reload. Enable — start at boot (systemctl enable, the unit's WantedBy target); it \
+     does not start the service now. Disable — no start at boot; a running service keeps \
+     running. Stop, Restart and Disable ask for confirmation. A unit created here has \
+     Restart=on-failure: systemd restarts Xray after a crash, but not after Stop.",
+    "Start / Stop / Restart выполняют systemctl для unit. Xray читает конфигурацию только при \
+     запуске: изменения, сохранённые на любой странице, вступают в силу после Restart — reload \
+     нет, горячей перезагрузки у Xray нет. Enable — запуск при загрузке системы (systemctl \
+     enable, цель WantedBy unit); сервис сейчас не запускается. Disable — без запуска при \
+     загрузке; работающий сервис продолжает работать. Stop, Restart и Disable просят \
+     подтверждения. У unit, созданного здесь, есть Restart=on-failure: systemd перезапускает \
+     Xray после сбоя, но не после Stop.",
+);
+const HELP_UNIT_FILE: HelpText = HelpText::new(
+    "Feldjäger writes the whole file /etc/systemd/system/<unit name>: [Unit] Description, After= \
+     network.target nss-lookup.target; [Service] User=, capabilities, ExecStart=, \
+     Restart=on-failure, LimitNPROC=10000; [Install] WantedBy=. A unit in /etc/systemd/system \
+     takes precedence over one with the same name in /usr/lib/systemd/system or \
+     /lib/systemd/system (e.g. from a package) — that is the \"override\".\n\n\
+     Edit replaces the whole file: lines Feldjäger does not model (Environment=, LimitNOFILE=, \
+     …) are dropped — the comparison shows them. Drop-ins in <unit>.d/ are not touched and still \
+     apply. Apply backs up an existing file, writes the new one, runs systemctl daemon-reload and \
+     restores the backup if that fails.",
+    "Feldjäger записывает весь файл /etc/systemd/system/<имя unit>: [Unit] Description, After= \
+     network.target nss-lookup.target; [Service] User=, capabilities, ExecStart=, \
+     Restart=on-failure, LimitNPROC=10000; [Install] WantedBy=. Unit в /etc/systemd/system \
+     важнее одноимённого unit в /usr/lib/systemd/system или /lib/systemd/system (например, из \
+     пакета) — это и есть «override».\n\n\
+     Edit заменяет файл целиком: строки, которых Feldjäger не знает (Environment=, \
+     LimitNOFILE=, …), удаляются — сравнение их показывает. Drop-in файлы в <unit>.d/ не \
+     затрагиваются и продолжают действовать. Apply копирует существующий файл, записывает новый, \
+     выполняет systemctl daemon-reload и при ошибке восстанавливает копию.",
+);
+const HELP_UNIT_NAME: HelpText = HelpText::new(
+    "Name of the unit file, e.g. xray.service; it can be set only when creating. Template units \
+     such as xray@.service are not supported.",
+    "Имя unit-файла, например xray.service; задаётся только при создании. Шаблонные unit вроде \
+     xray@.service не поддерживаются.",
+);
+const HELP_UNIT_BINARY: HelpText = HelpText::new(
+    "Absolute path of the xray executable on the server, as found by discovery (default \
+     /usr/local/bin/xray).",
+    "Абсолютный путь к исполняемому файлу xray на сервере, найденный при обнаружении (по \
+     умолчанию /usr/local/bin/xray).",
+);
+const HELP_UNIT_LAYOUT: HelpText = HelpText::new(
+    "Single file — ExecStart=<binary> run -config <file>. Confdir — run -confdir <directory>: \
+     Xray merges every config file of the directory (see the Config Files page). Before Apply \
+     Feldjäger checks that the configuration is readable by others and its parent directories \
+     are searchable — what nobody needs; the check is made for root too.",
+    "Single file — ExecStart=<бинарник> run -config <файл>. Confdir — run -confdir <каталог>: \
+     Xray объединяет все файлы конфигурации каталога (см. страницу Config Files). Перед Apply \
+     Feldjäger проверяет, что конфигурация доступна на чтение остальным, а родительские каталоги \
+     — на проход, как нужно nobody; проверка выполняется и для root.",
+);
+const HELP_UNIT_USER: HelpText = HelpText::new(
+    "nobody — Xray runs unprivileged with CAP_NET_ADMIN and CAP_NET_BIND_SERVICE (ports below \
+     1024, TUN, transparent proxy) and NoNewPrivileges. Configuration, certificates and log \
+     files must be accessible to nobody — a log directory it cannot write to stops Xray from \
+     starting. root — no restrictions; the capability lines are written commented out.",
+    "nobody — Xray работает без привилегий с CAP_NET_ADMIN и CAP_NET_BIND_SERVICE (порты ниже \
+     1024, TUN, прозрачный прокси) и NoNewPrivileges. Конфигурация, сертификаты и файлы журналов \
+     должны быть доступны nobody — если каталог журнала недоступен на запись, Xray не \
+     запустится. root — без ограничений; строки capabilities записываются закомментированными.",
+);
+const HELP_UNIT_WANTED_BY: HelpText = HelpText::new(
+    "[Install] target used by Enable; multi-user.target (the default) starts Xray at a normal \
+     boot.",
+    "Цель [Install], которую использует Enable; multi-user.target (по умолчанию) запускает Xray \
+     при обычной загрузке системы.",
+);
+const HELP_ENABLE_AND_START: HelpText = HelpText::new(
+    "After a successful Apply: systemctl enable (start at boot), then systemctl start. If the \
+     service is already running, start does nothing — Feldjäger then offers Restart, so that the \
+     new unit takes effect.",
+    "После успешного Apply: systemctl enable (запуск при загрузке), затем systemctl start. Если \
+     сервис уже работает, start ничего не делает — тогда Feldjäger предлагает Restart, чтобы \
+     новый unit вступил в силу.",
+);
+const HELP_SUDO_PASSWORD: HelpText = HelpText::new(
+    "Asked when the SSH user cannot write /etc/systemd/system. The password goes only to sudo -S \
+     on standard input, to write the unit and run daemon-reload; it is not saved or logged and is \
+     cleared from the dialog right after Apply.",
+    "Запрашивается, если пользователь SSH не может писать в /etc/systemd/system. Пароль \
+     передаётся только в sudo -S через стандартный ввод — для записи unit и daemon-reload; он не \
+     сохраняется, не попадает в журнал и стирается из окна сразу после Apply.",
+);
+
 /// Temporary dialog / form state stored in egui memory.
 #[derive(Clone, Default)]
 struct ServiceDialogState {
@@ -54,6 +151,7 @@ fn service_dialog_id() -> Id {
 
 /// Renders the Service page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
+    super::show_help_dialog(ui);
     ui.heading("Service");
     ui.add_space(8.0);
 
@@ -307,7 +405,10 @@ fn state_color(state: ServiceState) -> Color32 {
 }
 
 fn show_actions(ui: &mut Ui, service: &mut ApplicationService, busy: bool) {
-    ui.strong("Operations");
+    ui.horizontal(|ui| {
+        super::help_button(ui, "Operations", HELP_OPERATIONS);
+        ui.strong("Operations");
+    });
     ui.add_space(4.0);
     ui.horizontal_wrapped(|ui| {
         // Reload is intentionally omitted: xray-core has no config hot-reload and the
@@ -443,10 +544,13 @@ fn show_unit_form_dialog(ui: &mut Ui, service: &mut ApplicationService) {
         .show(ui.ctx(), |ui| {
             let mut form = with_dialog_state(ui, |state| state.form.clone()).unwrap_or_default();
             let create = form.create;
-            ui.label(if create {
-                "Create / override systemd unit"
-            } else {
-                "Edit systemd unit (full replace — unmodeled keys will be dropped)"
+            ui.horizontal(|ui| {
+                super::help_button(ui, "Unit file", HELP_UNIT_FILE);
+                ui.label(if create {
+                    "Create / override systemd unit"
+                } else {
+                    "Edit systemd unit (full replace — unmodeled keys will be dropped)"
+                });
             });
             ui.add_space(8.0);
 
@@ -454,18 +558,18 @@ fn show_unit_form_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                 .num_columns(2)
                 .spacing([12.0, 6.0])
                 .show(ui, |ui| {
-                    ui.label("Unit name");
+                    super::field_label(ui, "Unit name", HELP_UNIT_NAME);
                     ui.add_enabled(
                         create,
                         TextEdit::singleline(&mut form.unit_name).desired_width(280.0),
                     );
                     ui.end_row();
 
-                    ui.label("Binary");
+                    super::field_label(ui, "Binary", HELP_UNIT_BINARY);
                     ui.add(TextEdit::singleline(&mut form.binary).desired_width(280.0));
                     ui.end_row();
 
-                    ui.label("Layout");
+                    super::field_label(ui, "Layout", HELP_UNIT_LAYOUT);
                     ui.horizontal(|ui| {
                         if ui.radio_value(&mut form.confdir, false, "Single file").clicked() {
                             // keep path
@@ -482,14 +586,14 @@ fn show_unit_form_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                     ui.add(TextEdit::singleline(&mut form.config_path).desired_width(280.0));
                     ui.end_row();
 
-                    ui.label("User");
+                    super::field_label(ui, "User", HELP_UNIT_USER);
                     ui.horizontal(|ui| {
                         ui.radio_value(&mut form.user_root, false, "nobody");
                         ui.radio_value(&mut form.user_root, true, "root");
                     });
                     ui.end_row();
 
-                    ui.label("WantedBy");
+                    super::field_label(ui, "WantedBy", HELP_UNIT_WANTED_BY);
                     ui.add(TextEdit::singleline(&mut form.wanted_by).desired_width(280.0));
                     ui.end_row();
                 });
@@ -584,12 +688,21 @@ fn show_unit_confirm_dialog(ui: &mut Ui, service: &mut ApplicationService) {
 
             ui.add_space(8.0);
             let mut enable = with_dialog_state(ui, |s| s.enable_and_start);
-            ui.checkbox(&mut enable, "Enable and start after Apply");
+            super::help_checkbox(
+                ui,
+                "Enable and start after Apply",
+                HELP_ENABLE_AND_START,
+                &mut enable,
+            );
             with_dialog_state(ui, |s| s.enable_and_start = enable);
 
             if needs_sudo {
                 ui.add_space(6.0);
-                ui.label("Sudo password (sent only via sudo -S stdin; never logged)");
+                super::field_label(
+                    ui,
+                    "Sudo password (sent only via sudo -S stdin; never logged)",
+                    HELP_SUDO_PASSWORD,
+                );
                 let mut pw = with_dialog_state(ui, |s| s.sudo_password.clone());
                 ui.add(
                     TextEdit::singleline(&mut pw)

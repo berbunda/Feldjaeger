@@ -3,7 +3,8 @@
 //! Semantics follow the official LogObject documentation:
 //! <https://xtls.github.io/en/config/log.html>
 //!
-//! - missing / empty `access` or `error` → stdout
+//! - no `log` object at all → access log off, error log → stdout (Xray-core `DefaultLogConfig()`)
+//! - missing / empty `access` or `error` inside a `log` object → stdout
 //! - `"none"` → disabled
 //! - any other non-empty string → file path (absolute paths preferred)
 //! - `loglevel: "none"` forces both access and error streams off
@@ -27,10 +28,11 @@ pub struct XrayLogConfigView {
 }
 
 impl XrayLogConfigView {
-    /// Defaults when no `log` section exists (both streams → stdout).
+    /// Defaults when no `log` section exists: Xray-core `DefaultLogConfig()` turns the access
+    /// log off and sends the error log to stdout.
     pub fn defaults() -> Self {
         Self {
-            access: XrayLogDestination::Stdout,
+            access: XrayLogDestination::Disabled,
             error: XrayLogDestination::Stdout,
             loglevel: None,
             source_file: None,
@@ -129,9 +131,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_section_defaults_to_stdout() {
+    fn missing_section_disables_access_and_keeps_error_on_stdout() {
         let view = log_config_view(None);
-        assert_eq!(view.access, XrayLogDestination::Stdout);
+        assert_eq!(view.access, XrayLogDestination::Disabled);
         assert_eq!(view.error, XrayLogDestination::Stdout);
     }
 

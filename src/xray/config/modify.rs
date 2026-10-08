@@ -24,7 +24,9 @@ use super::inbound_security::{
     InboundSecurityDraft, InboundSecurityMode, apply_inbound_security,
 };
 use super::inbound_stream::{InboundStreamDraft, apply_inbound_stream, apply_tunnel_stream};
-use super::api_settings::{ApiSettings, apply_api_settings_to_value, validate_api_settings};
+use super::api_settings::{
+    ApiSettings, apply_api_settings_to_value, validate_api_settings_against_config,
+};
 use super::dns_settings::{DnsSettings, apply_dns_settings_to_value, validate_dns_settings};
 use super::fakedns_settings::{
     FakeDnsSettings, apply_fakedns_settings_to_value, validate_fakedns_settings,
@@ -1374,7 +1376,7 @@ pub fn update_api_settings(
     config: &mut EditableXrayConfig,
     request: UpdateApiSettingsRequest,
 ) -> ConfigModifyResult<ModifyConfigOutcome> {
-    validate_api_settings(&request.settings)?;
+    validate_api_settings_for_config(config, &request.settings)?;
 
     let original_by_file = snapshot_all_roots(config)?;
 
@@ -1395,6 +1397,18 @@ pub fn update_api_settings(
         serialized,
         original_serialized,
     })
+}
+
+/// Validates API settings against `config`: the field checks plus `ObservatoryService` needing an
+/// `observatory` or `burstObservatory` section (Architecture §119).
+pub fn validate_api_settings_for_config(
+    config: &EditableXrayConfig,
+    settings: &ApiSettings,
+) -> ConfigModifyResult<()> {
+    let sections = config.sections();
+    let observatory_present =
+        sections.observatory().is_some() || sections.burst_observatory().is_some();
+    validate_api_settings_against_config(settings, observatory_present)
 }
 
 /// Replaces the top-level `dns` object (Roadmap §2.1:46). Mirrors [`update_api_settings`] — same

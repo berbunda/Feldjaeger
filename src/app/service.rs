@@ -153,7 +153,8 @@ use crate::xray::{
     ProxySettingsMigration, XrayCoreVersion,
     apply_outbound_general, apply_outbound_settings, apply_outbound_stream, parse_outbound_stream,
     OutboundStreamDraft, DialerProxyProblem, dialer_proxy_problem, LoopbackRouting, loopback_routing,
-    validate_api_settings, validate_dns_settings, validate_fakedns_settings, validate_log_settings,
+    validate_api_settings_for_config, validate_dns_settings, validate_fakedns_settings,
+    validate_log_settings,
     validate_routing_settings, RoutingSettings, UpdateRoutingSettingsRequest,
     validate_policy_settings, PolicySettings, UpdatePolicySettingsRequest,
     update_observatory_settings, validate_observatory_settings, ObservatorySettings,
@@ -6847,7 +6848,7 @@ impl ApplicationService {
             let Some(editable) = self.loaded_config.editable() else {
                 return Err("Configuration not loaded.".to_owned());
             };
-            editable.api_settings()
+            editable.api_settings().into_edit_draft()
         };
         if self.is_any_remote_busy() {
             return Err("Another operation is already running.".to_owned());
@@ -6894,12 +6895,12 @@ impl ApplicationService {
             .api_settings_draft
             .clone()
             .ok_or_else(|| "Not in edit mode.".to_owned())?;
-        validate_api_settings(&draft).map_err(|e| e.message())?;
         let mut editable = self
             .loaded_config
             .editable()
             .ok_or_else(|| "Configuration not loaded.".to_owned())?
             .clone();
+        validate_api_settings_for_config(&editable, &draft).map_err(|e| e.message())?;
         let request = UpdateApiSettingsRequest { settings: draft };
         let outcome =
             update_api_settings(&mut editable, request).map_err(|e| e.message())?;
@@ -6928,15 +6929,14 @@ impl ApplicationService {
         };
 
         self.show_status_message("Validating API settings...");
-        if let Err(error) = validate_api_settings(&draft) {
-            self.api_settings_error = Some(error.message());
-            return Err(error.message());
-        }
-
         let editable = match self.loaded_config.editable() {
             Some(editable) => editable.clone(),
             None => return Err("Configuration not loaded.".to_owned()),
         };
+        if let Err(error) = validate_api_settings_for_config(&editable, &draft) {
+            self.api_settings_error = Some(error.message());
+            return Err(error.message());
+        }
 
         let profile =
             match validate_for_connection_test(&self.connection_draft, &self.connection_secrets) {
@@ -9673,11 +9673,10 @@ impl ApplicationService {
             Ok(outcome) => {
                 self.unit_apply_rx = None;
                 self.unit_apply_busy = false;
+                self.unit_apply_needs_restart_prompt = outcome.needs_restart_prompt();
                 match outcome.result {
                     Ok(()) => {
                         self.show_status_message("Unit file applied.");
-                        self.unit_apply_needs_restart_prompt =
-                            outcome.was_running && !outcome.enable_and_start;
                         self.unit_host_probe = Some(crate::init::UnitHostProbe {
                             etc_unit_exists: true,
                             can_write_unit_dir: self

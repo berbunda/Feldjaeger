@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn cancel_clears_draft_semantics() {
         let mut draft = LogSettings::defaults();
-        draft.access = LogOutput::Disabled;
+        draft.access = LogOutput::Stdout;
         let loaded = LogSettings::defaults();
         // Cancel means the page model is rebuilt without a draft → view of loaded defaults.
         let model = build_log_settings_page_model(
