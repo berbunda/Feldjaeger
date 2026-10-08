@@ -189,7 +189,11 @@ fn describe_security(parsed: &ParsedShareUri, warnings: &mut Vec<String>) -> Str
                 parts.push(format!("sni={sni}"));
             }
             if *insecure {
-                parts.push("allowInsecure".to_owned());
+                warnings.push(
+                    "allowInsecure / insecure in the link is a client-side setting and a removed \
+                     Xray-core feature (v26.1.31) — not applied to the server inbound."
+                        .to_owned(),
+                );
             }
             if !alpn.is_empty() {
                 parts.push(format!("alpn={}", alpn.join(",")));
@@ -285,6 +289,15 @@ mod tests {
         let parsed = parse_share_uri("trojan://pw@host:443?security=tls&sni=example.com").expect("parse");
         let preview = build_import_preview(parsed);
         assert!(preview.warnings.iter().any(|w| w.contains("certificateFile")));
+    }
+
+    #[test]
+    fn tls_import_warns_about_insecure_and_does_not_apply_it() {
+        let parsed =
+            parse_share_uri("trojan://pw@host:443?security=tls&sni=example.com&allowInsecure=1").expect("parse");
+        let preview = build_import_preview(parsed);
+        assert!(preview.warnings.iter().any(|w| w.contains("not applied")));
+        assert!(!preview.security_summary.contains("allowInsecure"));
     }
 
     #[test]

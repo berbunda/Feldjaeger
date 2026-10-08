@@ -9990,3 +9990,44 @@ Restore backup. Все шесть страниц вызывают `show_help_dia
 Тесты (+2): `balancer_info_always_passes_the_tag` (`api_ops.rs`),
 `restart_prompt_follows_was_running_only` (`service_control.rs`). Итог: **1402 passed / 0
 failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не проверялся.
+
+# 124	Inbound TLS: `allowInsecure` — removed feature (Roadmap §2.3) (0.5.60-0)
+
+## 124.1	Проверка
+
+`xray run -test` 26.9.30 (`xray-bin/xray.exe`), VLESS inbound, `security: tls`, сертификат из
+`xray tls cert`:
+
+| `tlsSettings.allowInsecure` | результат |
+|---|---|
+| `true` | отказ: «The feature "allowInsecure" has been removed and migrated to "pinnedPeerCertSha256"(pcs) and "verifyPeerCertByName"(vcn)» |
+| `false` | `Configuration OK.` |
+
+То есть `TLSConfig.Build()` отвергает ключ на любой стороне, а не только у клиента. На сервере он
+и раньше ничего не делал — проверку сертификата выполняет клиент.
+
+## 124.2	Изменения (тот же подход, что у outbound, §94)
+
+- Inbound TLS-редактор (`inbounds.rs`): чекбокс `allowInsecure` убран. Если на диске стоит `true`,
+  над сеткой `tlsSettings` — жёлтое предупреждение со справкой и кнопка «Remove allowInsecure»,
+  которая снимает флаг (сериализация пишет ключ только при `true`, поэтому Save удаляет его).
+  Редактор флаг не выставляет — поле модели `InboundTlsSettings::allow_insecure` только читается
+  с диска и сохраняется как есть до явного удаления.
+- `HELP_TLS_ALLOW_INSECURE` (EN+RU) переписан: что делал ключ, что ядро его удалило, что
+  использовать клиентам (`pinnedPeerCertSha256` / `verifyPeerCertByName`).
+- Предупреждения: проверка вынесена из `outbound_stream_warnings` в общую
+  `tls_allow_insecure_warning(stream, …)`, `inbound_warnings` вызывает её последней — тот же
+  `TlsAllowInsecureRemoved` с местом `streamSettings.tlsSettings.allowInsecure`. Только при
+  `security: tls` (ядро строит TLS-настройки только тогда); `false` не предупреждает.
+- Импорт share-ссылки в Add Inbound: флаг ссылки `allowInsecure` / `insecure` больше не
+  переносится в inbound (это подсказка клиенту, и с ней конфигурация не загрузилась бы).
+  `build_import_preview` вместо `allowInsecure` в сводке security добавляет предупреждение
+  «… not applied to the server inbound». Генерация ссылок не менялась — `insecure` там всегда
+  `false`.
+
+## 124.3	Итог
+
+Тесты (+2): `flags_allow_insecure_on_inbounds` (`warnings.rs`),
+`tls_import_warns_about_insecure_and_does_not_apply_it` (`inbound_import.rs`). clippy lib 65 (без
+изменений). Итог тестов — в §125 (обе версии проверялись вместе). GUI в запущенном приложении не
+проверялся.

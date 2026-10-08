@@ -170,7 +170,8 @@ pub struct TlsSettingsDraft {
     pub verify_peer_cert_by_name: String,
     /// `rejectUnknownSni`.
     pub reject_unknown_sni: bool,
-    /// `allowInsecure` (client; deprecated in Xray docs).
+    /// `allowInsecure` as found on disk — a removed feature (Xray-core v26.1.31 rejects it on
+    /// either side); never set by the editor, only cleared by an explicit "Remove allowInsecure".
     pub allow_insecure: bool,
     /// `alpn` array.
     pub alpn: Vec<String>,

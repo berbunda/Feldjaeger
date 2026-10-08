@@ -332,7 +332,8 @@ impl CompatibilityWarning {
 }
 
 /// All non-blocking warnings for one inbound JSON object, in a stable order (an open proxy first,
-/// then config order: `streamSettings.finalmask`, then `streamSettings.kcpSettings`). `core` is the installed
+/// then config order: `streamSettings.finalmask`, then `streamSettings.kcpSettings`, REALITY, then
+/// `streamSettings.tlsSettings`). `core` is the installed
 /// Xray-core version from Discovery; `None` = unknown, treated as the current core.
 pub fn inbound_warnings(inbound: &Value, core: Option<XrayCoreVersion>) -> Vec<CompatibilityWarning> {
     let mut warnings = Vec::new();
@@ -445,7 +446,28 @@ pub fn inbound_warnings(inbound: &Value, core: Option<XrayCoreVersion>) -> Vec<C
             }
         }
     }
+    tls_allow_insecure_warning(stream, &mut warnings);
     warnings
+}
+
+/// `tlsSettings.allowInsecure: true` with `security: tls` — `TLSConfig.Build()` rejects it on
+/// either side since v26.1.31 (checked with `xray run -test` 26.9.30 on a VLESS inbound).
+fn tls_allow_insecure_warning(stream: &Value, warnings: &mut Vec<CompatibilityWarning>) {
+    let tls = stream
+        .get("security")
+        .and_then(Value::as_str)
+        .is_some_and(|security| security.trim().eq_ignore_ascii_case("tls"));
+    let allow_insecure = stream
+        .get("tlsSettings")
+        .and_then(|tls| tls.get("allowInsecure"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if tls && allow_insecure {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::TlsAllowInsecureRemoved,
+            location: "streamSettings.tlsSettings.allowInsecure".to_owned(),
+        });
+    }
 }
 
 /// All non-blocking warnings for one outbound JSON object, in config order. `core` is the
@@ -575,21 +597,7 @@ fn outbound_stream_warnings(stream: &Value, warnings: &mut Vec<CompatibilityWarn
             });
         }
     }
-    let tls = stream
-        .get("security")
-        .and_then(Value::as_str)
-        .is_some_and(|security| security.trim().eq_ignore_ascii_case("tls"));
-    let allow_insecure = stream
-        .get("tlsSettings")
-        .and_then(|tls| tls.get("allowInsecure"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if tls && allow_insecure {
-        warnings.push(CompatibilityWarning {
-            id: CompatibilityWarningId::TlsAllowInsecureRemoved,
-            location: "streamSettings.tlsSettings.allowInsecure".to_owned(),
-        });
-    }
+    tls_allow_insecure_warning(stream, warnings);
 }
 
 /// FinalMask warnings for one side of a connection: [`inbound_warnings`] and, for the client
@@ -1293,6 +1301,23 @@ mod tests {
         assert!(outbound_warnings(&reality, None).is_empty());
         let off = json!({"streamSettings": {"security": "tls", "tlsSettings": {"allowInsecure": false}}});
         assert!(outbound_warnings(&off, None).is_empty());
+    }
+
+    /// Roadmap §2.3: the server side rejects `allowInsecure: true` as well.
+    #[test]
+    fn flags_allow_insecure_on_inbounds() {
+        let inbound = json!({"protocol": "trojan", "streamSettings": {
+            "network": "raw", "security": "tls", "tlsSettings": {"allowInsecure": true}
+        }});
+        let found: Vec<_> = inbound_warnings(&inbound, None).into_iter().map(|w| (w.id, w.location)).collect();
+        assert_eq!(
+            found,
+            vec![(CompatibilityWarningId::TlsAllowInsecureRemoved, "streamSettings.tlsSettings.allowInsecure".to_owned())]
+        );
+        let reality = json!({"protocol": "vless", "streamSettings": {"security": "reality", "tlsSettings": {"allowInsecure": true}}});
+        assert!(inbound_warnings(&reality, None).is_empty());
+        let off = json!({"protocol": "vless", "streamSettings": {"security": "tls", "tlsSettings": {"allowInsecure": false}}});
+        assert!(inbound_warnings(&off, None).is_empty());
     }
 
     /// Roadmap §4.2: `VLessOutboundConfig.Build()` takes one `vnext[]` server with one user.

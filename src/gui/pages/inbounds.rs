@@ -447,10 +447,16 @@ const HELP_TLS_REJECT_UNKNOWN_SNI: HelpText = HelpText::new(
      доменом настроенных сертификатов. По умолчанию false.",
 );
 const HELP_TLS_ALLOW_INSECURE: HelpText = HelpText::new(
-    "Skips TLS certificate verification. Only meaningful client-side; on a server inbound this \
-     essentially never has any effect and should stay off.",
-    "Отключает проверку TLS-сертификата. Имеет смысл только на стороне клиента; на серверном \
-     inbound практически ни на что не влияет и должно оставаться выключенным.",
+    "Used to skip TLS certificate verification on the client side. Xray-core v26.1.31 removed \
+     it: a config with allowInsecure: true fails to load on either side, including a server \
+     inbound, where it never did anything. The editor does not offer it; \"Remove allowInsecure\" \
+     deletes the key. Clients pin the certificate with pinnedPeerCertSha256 or accept its names \
+     with verifyPeerCertByName instead.",
+    "Раньше отключал проверку TLS-сертификата на стороне клиента. Удалён в Xray-core v26.1.31: \
+     конфигурация с allowInsecure: true не загружается ни на одной стороне, в том числе на \
+     серверном inbound, где он никогда ничего не делал. Редактор его не предлагает; «Remove \
+     allowInsecure» удаляет ключ. Вместо него клиенты закрепляют сертификат через \
+     pinnedPeerCertSha256 или принимают его имена через verifyPeerCertByName.",
 );
 const HELP_TLS_MIN_VERSION: HelpText = HelpText::new(
     "Minimum TLS version Xray will accept during the handshake.",
@@ -3777,6 +3783,24 @@ fn show_tls_settings_edit(ui: &mut Ui, tls: &mut TlsSettingsDraft) -> bool {
     ui.add_space(8.0);
     ui.strong("tlsSettings");
 
+    // Read from disk only: the editor never sets it, it can only be removed (Roadmap §2.3).
+    if tls.allow_insecure {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(
+                RichText::new(
+                    "allowInsecure: true is a removed feature — Xray-core v26.1.31+ refuses to \
+                     load the config, on a server inbound as well.",
+                )
+                .color(Color32::from_rgb(210, 170, 40)),
+            );
+            super::help_button(ui, "allowInsecure", HELP_TLS_ALLOW_INSECURE);
+        });
+        if ui.button("Remove allowInsecure").clicked() {
+            tls.allow_insecure = false;
+            dirty = true;
+        }
+    }
+
     egui::Grid::new("tls_edit_grid")
         .num_columns(2)
         .spacing([16.0, 6.0])
@@ -3803,12 +3827,6 @@ fn show_tls_settings_edit(ui: &mut Ui, tls: &mut TlsSettingsDraft) -> bool {
 
             super::field_label(ui, "rejectUnknownSni", HELP_TLS_REJECT_UNKNOWN_SNI);
             if ui.checkbox(&mut tls.reject_unknown_sni, "").changed() {
-                dirty = true;
-            }
-            ui.end_row();
-
-            super::field_label(ui, "allowInsecure", HELP_TLS_ALLOW_INSECURE);
-            if ui.checkbox(&mut tls.allow_insecure, "").changed() {
                 dirty = true;
             }
             ui.end_row();
@@ -5221,16 +5239,13 @@ fn apply_import_to_new_inbound(ui: &Ui, service: &mut ApplicationService, previe
                 ShareSecurity::None => {
                     security.mode = InboundSecurityMode::None;
                 }
-                ShareSecurity::Tls {
-                    server_name,
-                    insecure,
-                    alpn,
-                } => {
+                // The link's `insecure` flag is a client hint and a removed core feature — never
+                // applied to the server (Roadmap §2.3); the preview warns about it.
+                ShareSecurity::Tls { server_name, alpn, .. } => {
                     security.mode = InboundSecurityMode::Tls;
                     if let Some(sni) = server_name.as_deref().filter(|s| !s.is_empty()) {
                         security.tls.server_name = sni.to_owned();
                     }
-                    security.tls.allow_insecure = *insecure;
                     if !alpn.is_empty() {
                         security.tls.alpn = alpn.clone();
                     }
