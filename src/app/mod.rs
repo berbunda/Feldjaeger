@@ -74,7 +74,7 @@ pub use crate::xray::{
     InboundSecurityDraft, InboundSecurityMode, InboundStreamDraft, KNOWN_DEST_OVERRIDE, LogLevel,
     LogOutput, LogSettings, MaskAddress, NoiseDraft, OutboundGeneral, OutboundKind, OutboundMux,
     MUX_CONCURRENCY_EFFECTIVE_MAX, MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX, MUX_XUDP_PROXY_UDP443_VALUES,
-    validate_outbound_mux,
+    validate_outbound_mux, HYSTERIA_OUTBOUND_VERSION,
     OutboundSettingsDraft, ProxySettingsMigration, RealitySettingsDraft, ReverseSniffingDraft,
     ReverseTagDraft, SecretFieldDraft, SecretString, SniffingSettings,
     StreamMethod, TrojanClientSummary, UpdateInboundGeneralRequest, UpdateInboundShellRequest,

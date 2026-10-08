@@ -377,6 +377,9 @@ impl OutboundStreamDraft {
             draft.transport = Some(OutboundTransport::Hysteria);
             draft.disk_transport = OutboundTransport::Hysteria;
             draft.security.mode = InboundSecurityMode::Tls;
+            // Written even untouched: without the hysteria transport Xray-core does not start
+            // ("not hysteria transport"), without TLS no connection works (Roadmap §4.2).
+            draft.write = true;
         }
         draft
     }

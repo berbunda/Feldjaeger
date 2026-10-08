@@ -163,6 +163,15 @@ pub enum CompatibilityWarningId {
     /// A non-empty Trojan outbound `flow` — a removed feature: `Build()` fails ("The feature Flow
     /// for Trojan has been removed"); the editor offers "Remove flow" (Roadmap §4.2).
     TrojanFlowRemoved,
+    /// Hysteria outbound `settings.version` other than the number 2 — `HysteriaClientConfig.Build()`
+    /// fails ("version != 2"), so the config does not load (Roadmap §4.2).
+    HysteriaOutboundVersion,
+    /// Hysteria outbound without `streamSettings.network: "hysteria"` — Xray fails to start
+    /// ("not hysteria transport", `xray run -test` 26.9.30).
+    HysteriaOutboundNeedsTransport,
+    /// Hysteria outbound on its transport without `security: "tls"` — loads, but every connection
+    /// fails ("tls config is nil", live check with Xray 26.9.30).
+    HysteriaOutboundNeedsTls,
 }
 
 /// How a warning is shown: [`Self::Danger`] gets the red road-sign style in the GUI and
@@ -353,6 +362,18 @@ impl CompatibilityWarningId {
                 "rejected by Xray-core: flow for Trojan is a removed feature and the config does \
                  not load — use \"Remove flow\" in the editor (XTLS Vision needs VLESS)"
             }
+            Self::HysteriaOutboundVersion => {
+                "rejected by Xray-core: a Hysteria outbound needs `version` 2 (a number) and the \
+                 config does not load; Save in the editor writes it"
+            }
+            Self::HysteriaOutboundNeedsTransport => {
+                "Xray-core does not start: a Hysteria outbound needs the hysteria transport \
+                 (`streamSettings.network`) — pick it under Stream / Security"
+            }
+            Self::HysteriaOutboundNeedsTls => {
+                "breaks the outbound: Hysteria runs over QUIC, which needs TLS — without \
+                 `security: tls` every connection fails (\"tls config is nil\")"
+            }
         };
         Cow::Borrowed(text)
     }
@@ -542,6 +563,7 @@ pub fn outbound_warnings(outbound: &Value, core: Option<XrayCoreVersion>) -> Vec
         });
     }
     trojan_outbound_warnings(outbound, &mut warnings);
+    hysteria_outbound_warnings(outbound, &mut warnings);
     wireguard_outbound_warnings(outbound, core, &mut warnings);
     let is_freedom = outbound
         .get("protocol")
@@ -652,6 +674,43 @@ fn vless_vnext_not_single(outbound: &Value) -> Option<String> {
     }
     let users = servers[0].get("users").and_then(Value::as_array);
     (users.map_or(0, Vec::len) != 1).then(|| "settings.vnext[0].users".to_owned())
+}
+
+/// Hysteria outbound: `version`, the transport and TLS (see the warning ids).
+fn hysteria_outbound_warnings(outbound: &Value, warnings: &mut Vec<CompatibilityWarning>) {
+    let is_hysteria = outbound
+        .get("protocol")
+        .and_then(Value::as_str)
+        .is_some_and(|protocol| protocol.trim().eq_ignore_ascii_case("hysteria"));
+    if !is_hysteria {
+        return;
+    }
+    let version = outbound.get("settings").and_then(|settings| settings.get("version"));
+    if version.and_then(Value::as_u64) != Some(2) {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::HysteriaOutboundVersion,
+            location: "settings.version".to_owned(),
+        });
+    }
+    let stream = outbound.get("streamSettings");
+    let text = |key: &str| {
+        stream
+            .and_then(|stream| stream.get(key))
+            .and_then(Value::as_str)
+            .map(|value| value.trim().to_ascii_lowercase())
+            .unwrap_or_default()
+    };
+    if text("network") != "hysteria" {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::HysteriaOutboundNeedsTransport,
+            location: "streamSettings.network".to_owned(),
+        });
+    } else if text("security") != "tls" {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::HysteriaOutboundNeedsTls,
+            location: "streamSettings.security".to_owned(),
+        });
+    }
 }
 
 /// Trojan outbound `settings` the core refuses: `servers[]` other than one entry (when read — a
@@ -1483,6 +1542,43 @@ mod tests {
         assert!(ids(plain).is_empty());
     }
 
+    /// Roadmap §4.2: Hysteria outbound — `version`, transport (`xray run -test` 26.9.30) and TLS
+    /// (live check).
+    #[test]
+    fn flags_hysteria_outbound_version_transport_and_tls() {
+        let ids = |settings: Value, stream: Value| -> Vec<_> {
+            let outbound = json!({"protocol": "hysteria", "settings": settings, "streamSettings": stream});
+            outbound_warnings(&outbound, None).into_iter().map(|w| (w.id, w.location)).collect()
+        };
+        let ok = json!({"version": 2, "address": "a", "port": 443});
+        let tls = json!({"network": "hysteria", "security": "tls"});
+        assert!(ids(ok.clone(), tls.clone()).is_empty());
+        for version in [json!({"address": "a"}), json!({"version": 1}), json!({"version": "2"})] {
+            assert_eq!(
+                ids(version, tls.clone()),
+                vec![(CompatibilityWarningId::HysteriaOutboundVersion, "settings.version".to_owned())]
+            );
+        }
+        for stream in [json!(null), json!({"network": "raw", "security": "tls"})] {
+            assert_eq!(
+                ids(ok.clone(), stream),
+                vec![(CompatibilityWarningId::HysteriaOutboundNeedsTransport, "streamSettings.network".to_owned())]
+            );
+        }
+        assert_eq!(
+            ids(ok.clone(), json!({"network": "Hysteria"})),
+            vec![(CompatibilityWarningId::HysteriaOutboundNeedsTls, "streamSettings.security".to_owned())]
+        );
+        // Not a Hysteria outbound: nothing.
+        let vless = json!({"protocol": "vless", "streamSettings": {"network": "raw"}});
+        assert!(outbound_warnings(&vless, None).iter().all(|w| !matches!(
+            w.id,
+            CompatibilityWarningId::HysteriaOutboundVersion
+                | CompatibilityWarningId::HysteriaOutboundNeedsTransport
+                | CompatibilityWarningId::HysteriaOutboundNeedsTls
+        )));
+    }
+
     /// Roadmap §4.2: Trojan shapes `xray run -test` 26.9.30 refuses.
     #[test]
     fn flags_trojan_servers_and_flow() {
@@ -1615,7 +1711,8 @@ mod tests {
             ]
         );
         // udphop is a client mask: no "client only" warning on an outbound.
-        let hysteria = json!({"protocol": "hysteria", "streamSettings": {"network": "hysteria",
+        let hysteria = json!({"protocol": "hysteria", "settings": {"version": 2, "address": "a", "port": 1},
+            "streamSettings": {"network": "hysteria", "security": "tls",
             "finalmask": {"udp": [{"type": "udphop", "settings": {"mode": "intervalRemote"}}],
                           "quicParams": {"congestion": "bbr"}}}});
         assert!(ids(hysteria).is_empty());

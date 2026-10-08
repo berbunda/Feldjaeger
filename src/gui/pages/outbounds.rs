@@ -12,7 +12,8 @@ use crate::app::{
     DnsRuleDraft, FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS,
     FREEDOM_FINAL_RULE_NETWORKS, FREEDOM_NOISE_TYPES, FREEDOM_PROXY_PROTOCOL_VERSIONS,
     FragmentDraft, FreedomFinalRuleDraft, MISSING_FIELD, MUX_CONCURRENCY_EFFECTIVE_MAX,
-    MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX, MUX_XUDP_PROXY_UDP443_VALUES, NoiseDraft, OutboundKind,
+    HYSTERIA_OUTBOUND_VERSION, MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX, MUX_XUDP_PROXY_UDP443_VALUES,
+    NoiseDraft, OutboundKind,
     OutboundMux, OutboundSettingsDraft, OutboundsPageState, OutboundsSortColumn,
     outbound_row_display, validate_outbound_mux,
 };
@@ -339,6 +340,27 @@ const HELP_TROJAN_EMAIL: HelpText = HelpText::new(
     "Метка пользователя в журналах и статистике на этой стороне; пусто — ключа нет.",
 );
 
+// Hysteria (Roadmap §4.2), checked with `xray run -test` 26.9.30 (`infra/conf/hysteria.go`) and a
+// live client / server pair.
+const HELP_HYSTERIA_ADDRESS: HelpText = HelpText::new(
+    "Server address: IPv4, IPv6 or domain name. Required.",
+    "Адрес сервера: IPv4, IPv6 или доменное имя. Обязательно.",
+);
+const HELP_HYSTERIA_PORT: HelpText = HelpText::new(
+    "Server UDP port, one number 1–65535 (Xray refuses a range here). For port hopping add the \
+     udphop mask under Stream / Security → FinalMask.",
+    "UDP-порт сервера, одно число 1–65535 (диапазон Xray здесь отвергает). Для смены портов \
+     (port hopping) добавьте маску udphop в Stream / Security → FinalMask.",
+);
+const HELP_HYSTERIA_VERSION: HelpText = HelpText::new(
+    "Protocol version. Xray-core supports only Hysteria 2 and refuses the config otherwise, so \
+     Save always writes 2. The password, the hysteria transport and TLS (required — QUIC does not \
+     work without it) are set under Stream / Security.",
+    "Версия протокола. Xray-core поддерживает только Hysteria 2 и иначе отвергает конфигурацию, \
+     поэтому Save всегда пишет 2. Пароль, транспорт hysteria и TLS (обязателен — QUIC без него \
+     не работает) задаются в Stream / Security.",
+);
+
 /// Renders the Outbounds page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     service.tick_outbounds_page_status();
@@ -448,6 +470,18 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
                     .clicked()
                 {
                     if let Err(e) = service.begin_add_outbound_trojan() {
+                        service.show_status_message(e);
+                    }
+                    ui.close();
+                }
+                if ui
+                    .button("Hysteria")
+                    .on_hover_text(
+                        "Client of a Hysteria 2 server (QUIC) — https://xtls.github.io/en/config/outbounds/hysteria.html",
+                    )
+                    .clicked()
+                {
+                    if let Err(e) = service.begin_add_outbound_hysteria() {
                         service.show_status_message(e);
                     }
                     ui.close();
@@ -1094,6 +1128,7 @@ fn outbound_protocol_label(settings: &OutboundSettingsDraft) -> &'static str {
         OutboundSettingsDraft::Vless(_) => "VLESS",
         OutboundSettingsDraft::Loopback(_) => "Loopback",
         OutboundSettingsDraft::Trojan(_) => "Trojan",
+        OutboundSettingsDraft::Hysteria(_) => "Hysteria",
     }
 }
 
@@ -1122,6 +1157,7 @@ fn show_outbound_editor_pane(ui: &mut Ui, service: &mut ApplicationService) {
         Some(OutboundSettingsDraft::Vless(_)) => show_vless_settings_edit(ui, service),
         Some(OutboundSettingsDraft::Loopback(_)) => show_loopback_settings_edit(ui, service),
         Some(OutboundSettingsDraft::Trojan(_)) => show_trojan_settings_edit(ui, service),
+        Some(OutboundSettingsDraft::Hysteria(_)) => show_hysteria_settings_edit(ui, service),
         None => {}
     }
     // Stream / Security for protocols that dial through a transport (Roadmap §4.2).
@@ -1978,7 +2014,49 @@ fn is_shell_kind(kind: OutboundKind) -> bool {
             | OutboundKind::Vless
             | OutboundKind::Loopback
             | OutboundKind::Trojan
+            | OutboundKind::Hysteria
     )
+}
+
+/// Hysteria Protocol section (Roadmap §4.2): server address and port; `version` is always 2,
+/// the password lives under Stream / Security (`auth`).
+fn show_hysteria_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
+    let Some(session) = service.outbound_editor_session_mut() else {
+        return;
+    };
+    let OutboundSettingsDraft::Hysteria(settings) = &mut session.settings else {
+        return;
+    };
+    if let Some(version) = settings.version_on_disk_label() {
+        ui.label(
+            RichText::new(format!(
+                "settings.version is {version} — Xray-core accepts only 2 and refuses to load the \
+                 config; Save writes 2."
+            ))
+            .color(Color32::from_rgb(210, 170, 40)),
+        );
+    }
+    egui::Grid::new("hysteria_outbound_settings_edit_grid")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            super::field_label(ui, "address", HELP_HYSTERIA_ADDRESS);
+            ui.text_edit_singleline(&mut settings.address);
+            ui.end_row();
+
+            super::field_label(ui, "port", HELP_HYSTERIA_PORT);
+            ui.add(egui::TextEdit::singleline(&mut settings.port).desired_width(80.0).hint_text("443"));
+            ui.end_row();
+
+            super::field_label(ui, "version", HELP_HYSTERIA_VERSION);
+            ui.label(HYSTERIA_OUTBOUND_VERSION.to_string());
+            ui.end_row();
+        });
+    ui.label(
+        RichText::new("The password (auth) is under Stream / Security → hysteria.")
+            .size(12.0)
+            .color(Color32::from_rgb(140, 140, 140)),
+    );
 }
 
 /// Trojan Protocol section (Roadmap §4.2): flat `settings`; `flow` from disk can only be removed.

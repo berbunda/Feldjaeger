@@ -1,5 +1,5 @@
-//! Outbound Protocol tab (Freedom, Blackhole, DNS, VLESS, Loopback, Trojan; Roadmap §2.4:94–96,
-//! §2.1:58, §4.2).
+//! Outbound Protocol tab (Freedom, Blackhole, DNS, VLESS, Loopback, Trojan, Hysteria; Roadmap
+//! §2.4:94–96, §2.1:58, §4.2).
 //!
 //! See <https://xtls.github.io/en/config/outbounds/freedom.html>,
 //! <https://xtls.github.io/en/config/outbounds/blackhole.html>,
@@ -18,6 +18,7 @@ use serde_json::{Map, Value};
 use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 
 mod freedom;
+mod hysteria;
 mod loopback;
 mod trojan;
 mod vless;
@@ -27,6 +28,7 @@ pub use freedom::{
     FreedomSettingsDraft, LegacyDomainStrategyMigration,
 };
 pub use loopback::{LoopbackRouting, LoopbackSettingsDraft, loopback_routing};
+pub use hysteria::{HYSTERIA_OUTBOUND_VERSION, HysteriaOutboundSettings};
 pub use trojan::TrojanOutboundSettings;
 pub use vless::VlessOutboundSettings;
 
@@ -43,7 +45,7 @@ pub const DNS_RULE_ACTIONS: &[&str] = &["direct", "hijack", "drop", "return"];
 pub const DNS_REWRITE_NETWORKS: &[&str] = &["tcp", "udp"];
 
 /// The protocols [`is_shell_editable_protocol`] accepts, for user-facing messages.
-pub const SHELL_EDITABLE_PROTOCOLS: &str = "Freedom, Blackhole, DNS, Loopback, VLESS and Trojan";
+pub const SHELL_EDITABLE_PROTOCOLS: &str = "Freedom, Blackhole, DNS, Loopback, VLESS, Trojan and Hysteria";
 
 /// Outbound protocols currently reachable through the Outbound Shell (Add/Edit).
 ///
@@ -55,7 +57,7 @@ pub const SHELL_EDITABLE_PROTOCOLS: &str = "Freedom, Blackhole, DNS, Loopback, V
 pub fn is_shell_editable_protocol(protocol: &str) -> bool {
     matches!(
         protocol.trim().to_ascii_lowercase().as_str(),
-        "freedom" | "blackhole" | "dns" | "vless" | "loopback" | "trojan"
+        "freedom" | "blackhole" | "dns" | "vless" | "loopback" | "trojan" | "hysteria"
     )
 }
 
@@ -142,6 +144,9 @@ pub enum OutboundSettingsDraft {
     Loopback(LoopbackSettingsDraft),
     /// Trojan: client of a Trojan server (Roadmap §4.2, see [`trojan`]).
     Trojan(TrojanOutboundSettings),
+    /// Hysteria: client of a Hysteria 2 server (Roadmap §4.2, see [`hysteria`]); the password and
+    /// transport are in the stream draft.
+    Hysteria(HysteriaOutboundSettings),
 }
 
 impl OutboundSettingsDraft {
@@ -179,6 +184,7 @@ impl OutboundSettingsDraft {
             Self::Vless(_) => "vless",
             Self::Loopback(_) => "loopback",
             Self::Trojan(_) => "trojan",
+            Self::Hysteria(_) => "hysteria",
         }
     }
 
@@ -196,6 +202,11 @@ impl OutboundSettingsDraft {
     pub fn trojan_default() -> Self {
         Self::Trojan(TrojanOutboundSettings::default())
     }
+
+    /// Default for Add Hysteria.
+    pub fn hysteria_default() -> Self {
+        Self::Hysteria(HysteriaOutboundSettings::default())
+    }
 }
 
 /// Reads a Protocol draft from an outbound object, when the protocol is shell-editable.
@@ -212,6 +223,7 @@ pub fn parse_outbound_settings(outbound: &Value) -> Option<OutboundSettingsDraft
         "vless" => vless::parse_vless_outbound_settings(outbound).map(OutboundSettingsDraft::Vless),
         "loopback" => Some(OutboundSettingsDraft::Loopback(loopback::parse_loopback_settings(outbound))),
         "trojan" => trojan::parse_trojan_outbound_settings(outbound).map(OutboundSettingsDraft::Trojan),
+        "hysteria" => Some(OutboundSettingsDraft::Hysteria(hysteria::parse_hysteria_outbound_settings(outbound))),
         _ => None,
     }
 }
@@ -351,6 +363,7 @@ pub fn apply_outbound_settings(
         }
         OutboundSettingsDraft::Loopback(settings) => loopback::apply_loopback_settings(outbound, settings),
         OutboundSettingsDraft::Trojan(settings) => trojan::apply_trojan_outbound_settings(outbound, settings),
+        OutboundSettingsDraft::Hysteria(settings) => hysteria::apply_hysteria_outbound_settings(outbound, settings),
     }
 }
 

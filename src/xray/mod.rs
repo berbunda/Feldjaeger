@@ -42,7 +42,7 @@ pub use config::{
     validate_outbound_stream,
     add_outbound_shell, apply_outbound_general, apply_outbound_settings, is_shell_editable_protocol,
     outbound_shell_blocker, parse_outbound_general, parse_outbound_settings, update_outbound_shell,
-    SHELL_EDITABLE_PROTOCOLS,
+    SHELL_EDITABLE_PROTOCOLS, HYSTERIA_OUTBOUND_VERSION,
     validate_send_through,
     ALPN_PRESETS, BurstObservatorySummary, BurstPingConfigSummary, CERT_USAGE_PRESETS,
     CompatibilityGateId, CompatibilityWarning, CompatibilityWarningId, WarningSeverity, inbound_warnings,

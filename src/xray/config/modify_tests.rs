@@ -3889,6 +3889,75 @@ fn trojan_outbound_shell_add_edit_duplicate() {
     assert_eq!(config.sections().outbounds().len(), 2);
 }
 
+/// Roadmap §4.2 "Outbounds Shell: Hysteria": Add writes `version` 2 plus the hysteria transport
+/// with TLS without the stream being touched; Edit keeps unknown keys; Duplicate accepts it.
+#[test]
+fn hysteria_outbound_shell_add_edit_duplicate() {
+    use super::modify::{DuplicateOutboundRequest, duplicate_outbound};
+    use super::outbound_edit::{OutboundGeneral, OutboundRef, parse_outbound_general};
+    use super::outbound_protocol::{OutboundSettingsDraft, parse_outbound_settings};
+    use super::outbound_stream::{OutboundStreamDraft, parse_outbound_stream};
+
+    let mut config = single_file_editable(r#"{"outbounds":[]}"#);
+    let OutboundSettingsDraft::Hysteria(mut draft) = OutboundSettingsDraft::hysteria_default() else {
+        panic!("hysteria draft expected");
+    };
+    draft.address = "example.com".to_owned();
+    draft.port = "443".to_owned();
+    let mut stream = OutboundStreamDraft::default_for_protocol("hysteria");
+    stream.hysteria.auth = "secret".to_owned();
+    add_outbound_shell(
+        &mut config,
+        AddOutboundShellRequest {
+            general: OutboundGeneral { tag: Some("hy".to_owned()), ..OutboundGeneral::default() },
+            settings: OutboundSettingsDraft::Hysteria(draft),
+            stream,
+            core_version: None,
+            preferred_source_file: None,
+        },
+    )
+    .expect("add hysteria");
+    let added = config.sections().outbounds()[0].value().clone();
+    assert_eq!(added["settings"], serde_json::json!({"version": 2, "address": "example.com", "port": 443}));
+    assert_eq!(added["streamSettings"]["network"], "hysteria");
+    assert_eq!(added["streamSettings"]["security"], "tls");
+    assert_eq!(added["streamSettings"]["hysteriaSettings"]["version"], 2);
+    assert_eq!(added["streamSettings"]["hysteriaSettings"]["auth"], "secret");
+    assert!(crate::xray::outbound_warnings(&added, None).is_empty(), "a complete Hysteria outbound");
+
+    // Edit: new port; the unknown settings key stays.
+    let mut config = single_file_editable(
+        r#"{"outbounds":[{"tag":"hy","protocol":"hysteria","settings":{"version":2,"address":"a",
+            "port":443,"future":1},"streamSettings":{"network":"hysteria","security":"tls",
+            "hysteriaSettings":{"version":2,"auth":"p"}}}]}"#,
+    );
+    let original = config.sections().outbounds()[0].value().clone();
+    let mut settings = parse_outbound_settings(&original).expect("hysteria is shell-editable");
+    let OutboundSettingsDraft::Hysteria(draft) = &mut settings else {
+        panic!("hysteria draft expected");
+    };
+    draft.port = "8443".to_owned();
+    let expected_fingerprint = config.outbound_object_fingerprint(0).expect("fingerprint");
+    update_outbound_shell(
+        &mut config,
+        UpdateOutboundShellRequest {
+            outbound_ref: OutboundRef { outbound_index: 0, expected_fingerprint },
+            general: parse_outbound_general(&original),
+            settings,
+            stream: parse_outbound_stream(&original),
+            core_version: None,
+        },
+    )
+    .expect("edit hysteria");
+    let edited = config.sections().outbounds()[0].value();
+    assert_eq!(edited["settings"]["port"], 8443);
+    assert_eq!(edited["settings"]["future"], 1);
+    assert_eq!(edited["streamSettings"], original["streamSettings"]);
+
+    duplicate_outbound(&mut config, DuplicateOutboundRequest { outbound_index: 0 }).expect("duplicate hysteria");
+    assert_eq!(config.sections().outbounds().len(), 2);
+}
+
 #[test]
 fn duplicate_outbound_allows_vless_legacy_vnext_form() {
     use super::modify::{DuplicateOutboundRequest, duplicate_outbound};

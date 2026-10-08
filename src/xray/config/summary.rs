@@ -1208,8 +1208,17 @@ fn outbound_description(protocol: Option<&str>, value: &Value) -> String {
                 (None, _) => "Summary unavailable".to_owned(),
             }
         }
+        OutboundKind::Hysteria => {
+            let settings = value.get("settings");
+            let address = settings.and_then(|s| s.get("address")).and_then(Value::as_str);
+            let port = settings.and_then(|s| s.get("port")).and_then(Value::as_u64);
+            match (address, port) {
+                (Some(address), Some(port)) => format!("{address}:{port}"),
+                (Some(address), None) => address.to_owned(),
+                (None, _) => "Summary unavailable".to_owned(),
+            }
+        }
         OutboundKind::Http
-        | OutboundKind::Hysteria
         | OutboundKind::Shadowsocks
         | OutboundKind::Vmess
         | OutboundKind::Unknown => "Summary unavailable".to_owned(),

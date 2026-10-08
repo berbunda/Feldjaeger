@@ -7113,6 +7113,12 @@ impl ApplicationService {
         self.begin_add_outbound(OutboundSettingsDraft::trojan_default())
     }
 
+    /// Opens an Add session for a new Hysteria outbound (Roadmap §4.2); the stream draft starts on
+    /// the hysteria transport with TLS.
+    pub fn begin_add_outbound_hysteria(&mut self) -> Result<(), String> {
+        self.begin_add_outbound(OutboundSettingsDraft::hysteria_default())
+    }
+
     fn begin_add_outbound(&mut self, settings: OutboundSettingsDraft) -> Result<(), String> {
         if self.is_any_remote_busy() {
             return Err("Another operation is already running.".to_owned());

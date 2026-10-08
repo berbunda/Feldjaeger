@@ -10231,3 +10231,63 @@ Flow, etc.)", "VLESS with Flow & Seed")`. Документация (`config/outb
 `warnings` — 1, `modify_tests` — 1 (Add с Mux → Edit с сохранением `mux` и чужого ключа →
 Duplicate), `tests` — 1 (сводка). Итог: **1424 passed / 0 failed**, clippy lib 65 (без
 изменений). GUI в запущенном приложении не проверялся.
+
+# 128	Outbounds Shell: Hysteria (Roadmap §4.2) (0.5.63-0)
+
+## 128.1	Сверка с ядром
+
+Xray-core v26.9.30: `infra/conf/hysteria.go` — `HysteriaClientConfig { version int32, address
+*Address, port uint16 }`, `Build()` проверяет только `version != 2`. Пароль (`auth`), транспорт и
+TLS — в `streamSettings` (общий stream-модуль, §94): `transport/internet/hysteria/dialer.go`
+возвращает «tls config is nil», если TLS нет.
+
+`xray run -test` 26.9.30 (`streamSettings` — hysteria + tls, если не указано иное):
+
+| случай | результат |
+|---|---|
+| `version` 2, `address`, `port` | OK |
+| без `version` / `version: 1` | отказ: `version != 2` |
+| `version: "2"` / `port: "443"` / `port: "443-445"` | отказ: `cannot unmarshal string …` |
+| без `address` / без `port` | OK (сервера у outbound нет) |
+| неизвестный ключ, `mux.enabled` | OK |
+| без `streamSettings` / `network: raw` | отказ при создании: `proxy/hysteria: not hysteria transport` |
+| без `security` | OK |
+| `security: reality` | отказ: `REALITY only supports RAW, XHTTP and gRPC` |
+| без `auth` | OK |
+
+Живая пара на 127.0.0.1 (Hysteria-сервер с TLS и самоподписанным сертификатом, клиент через
+Socks, `curl` к https://example.com): клиент с TLS (`pinnedPeerCertSha256`, ALPN h3) — 200; без
+`security` — 000, в журнале клиента «transport/internet/hysteria: tls config is nil».
+
+## 128.2	Модель (`outbound_protocol/hysteria.rs`)
+
+- `HysteriaOutboundSettings { address, port, version_on_disk }`; `OutboundSettingsDraft::Hysteria`,
+  `hysteria_default()`, `is_shell_editable_protocol` и `SHELL_EDITABLE_PROTOCOLS` включают
+  `hysteria`.
+- `version_on_disk` — значение с диска, если оно не число 2 (`null` = нет ключа); запись всегда
+  ставит `version: 2`, `address` (trim, обязателен) и `port` числом 1–65535 (диапазон — отказ с
+  подсказкой про udphop). Прочие ключи `settings` и соседи outbound не трогаются.
+- `OutboundStreamDraft::default_for_protocol("hysteria")` теперь ставит `write = true`: новый
+  outbound сразу получает `network: hysteria`, `security: tls` и `hysteriaSettings.version: 2`.
+  Раньше этот путь не использовался (Add Hysteria не было), а без `write` Add записал бы outbound
+  без транспорта — Xray не запустился бы.
+
+## 128.3	Предупреждения, сводка, GUI
+
+- `HysteriaOutboundVersion` (`settings.version` не число 2), `HysteriaOutboundNeedsTransport`
+  (`streamSettings.network` не `hysteria`), `HysteriaOutboundNeedsTls` (транспорт hysteria, но
+  `security` не `tls`). Фикстура теста FinalMask `flags_outbound_finalmask_by_dial_chain` дополнена
+  до полного Hysteria outbound — в ней не было `settings` и TLS.
+- `summary.rs`: `address:port`.
+- `outbounds.rs`: «Hysteria» в «Add Outbound», `is_shell_kind`; `show_hysteria_settings_edit` —
+  `address`, `port`, `version` только для чтения (2), янтарная пометка про неверный `version` на
+  диске, серая подсказка, что пароль — в Stream / Security. Справка EN+RU — 3 текста.
+  `begin_add_outbound_hysteria` в сервисе. `docs/ui.md` дополнен.
+
+## 128.4	Итог
+
+Тесты (+6): `hysteria.rs` — 4 (Save без правок байт в байт с чужими ключами; неверный `version`
+показан и исправлен; запись нового; отказы как в ядре), `warnings` — 1, `modify_tests` — 1 (Add пишет
+транспорт и TLS без правки stream, у результата нет предупреждений; Edit; Duplicate). Итог:
+**1430 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не
+проверялся.
