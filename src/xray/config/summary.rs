@@ -1136,7 +1136,19 @@ fn outbound_description(protocol: Option<&str>, value: &Value) -> String {
                 .unwrap_or(0);
             format!("Peers: {peers}")
         }
-        OutboundKind::Socks => "Proxy server configured".to_owned(),
+        OutboundKind::Socks => {
+            // The flat form wins over servers[] when `address` is set, as in the core.
+            let settings = value.get("settings");
+            let flat = settings.filter(|s| s.get("address").is_some_and(|a| !a.is_null()));
+            let entry = flat.or_else(|| settings.and_then(|s| s.pointer("/servers/0")));
+            let address = entry.and_then(|e| e.get("address")).and_then(Value::as_str);
+            let port = entry.and_then(|e| e.get("port")).and_then(Value::as_u64);
+            match (address, port) {
+                (Some(address), Some(port)) => format!("{address}:{port}"),
+                (Some(address), None) => address.to_owned(),
+                (None, _) => "Summary unavailable".to_owned(),
+            }
+        }
         OutboundKind::Dns => {
             let settings = value.get("settings");
             let rewrite_address = settings

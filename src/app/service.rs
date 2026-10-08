@@ -7119,6 +7119,11 @@ impl ApplicationService {
         self.begin_add_outbound(OutboundSettingsDraft::hysteria_default())
     }
 
+    /// Opens an Add session for a new SOCKS outbound (Roadmap §4.2).
+    pub fn begin_add_outbound_socks(&mut self) -> Result<(), String> {
+        self.begin_add_outbound(OutboundSettingsDraft::socks_default())
+    }
+
     fn begin_add_outbound(&mut self, settings: OutboundSettingsDraft) -> Result<(), String> {
         if self.is_any_remote_busy() {
             return Err("Another operation is already running.".to_owned());

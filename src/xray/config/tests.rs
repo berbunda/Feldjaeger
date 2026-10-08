@@ -301,7 +301,7 @@ fn outbound_summary_protocol_descriptions_and_send_through() {
     assert_eq!(summaries[0].description, "Direct connection");
     assert_eq!(summaries[1].description, "Response: http");
     assert_eq!(summaries[2].description, "Peers: 2");
-    assert_eq!(summaries[3].description, "Proxy server configured");
+    assert_eq!(summaries[3].description, "127.0.0.1:1080");
     assert_eq!(summaries[4].description, "Summary unavailable");
     assert!(summaries[4].send_through.is_none());
 }

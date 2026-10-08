@@ -1,5 +1,5 @@
-//! Outbound Protocol tab (Freedom, Blackhole, DNS, VLESS, Loopback, Trojan, Hysteria; Roadmap
-//! §2.4:94–96, §2.1:58, §4.2).
+//! Outbound Protocol tab (Freedom, Blackhole, DNS, VLESS, Loopback, Trojan, Hysteria, SOCKS;
+//! Roadmap §2.4:94–96, §2.1:58, §4.2).
 //!
 //! See <https://xtls.github.io/en/config/outbounds/freedom.html>,
 //! <https://xtls.github.io/en/config/outbounds/blackhole.html>,
@@ -20,6 +20,7 @@ use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind
 mod freedom;
 mod hysteria;
 mod loopback;
+mod socks;
 mod trojan;
 mod vless;
 pub use freedom::{
@@ -29,6 +30,7 @@ pub use freedom::{
 };
 pub use loopback::{LoopbackRouting, LoopbackSettingsDraft, loopback_routing};
 pub use hysteria::{HYSTERIA_OUTBOUND_VERSION, HysteriaOutboundSettings};
+pub use socks::SocksOutboundSettings;
 pub use trojan::TrojanOutboundSettings;
 pub use vless::VlessOutboundSettings;
 
@@ -45,7 +47,8 @@ pub const DNS_RULE_ACTIONS: &[&str] = &["direct", "hijack", "drop", "return"];
 pub const DNS_REWRITE_NETWORKS: &[&str] = &["tcp", "udp"];
 
 /// The protocols [`is_shell_editable_protocol`] accepts, for user-facing messages.
-pub const SHELL_EDITABLE_PROTOCOLS: &str = "Freedom, Blackhole, DNS, Loopback, VLESS, Trojan and Hysteria";
+pub const SHELL_EDITABLE_PROTOCOLS: &str =
+    "Freedom, Blackhole, DNS, Loopback, VLESS, Trojan, Hysteria and SOCKS";
 
 /// Outbound protocols currently reachable through the Outbound Shell (Add/Edit).
 ///
@@ -57,7 +60,7 @@ pub const SHELL_EDITABLE_PROTOCOLS: &str = "Freedom, Blackhole, DNS, Loopback, V
 pub fn is_shell_editable_protocol(protocol: &str) -> bool {
     matches!(
         protocol.trim().to_ascii_lowercase().as_str(),
-        "freedom" | "blackhole" | "dns" | "vless" | "loopback" | "trojan" | "hysteria"
+        "freedom" | "blackhole" | "dns" | "vless" | "loopback" | "trojan" | "hysteria" | "socks"
     )
 }
 
@@ -147,6 +150,8 @@ pub enum OutboundSettingsDraft {
     /// Hysteria: client of a Hysteria 2 server (Roadmap §4.2, see [`hysteria`]); the password and
     /// transport are in the stream draft.
     Hysteria(HysteriaOutboundSettings),
+    /// SOCKS: chain to a SOCKS proxy, e.g. Tor on this server (Roadmap §4.2, see [`socks`]).
+    Socks(SocksOutboundSettings),
 }
 
 impl OutboundSettingsDraft {
@@ -185,6 +190,7 @@ impl OutboundSettingsDraft {
             Self::Loopback(_) => "loopback",
             Self::Trojan(_) => "trojan",
             Self::Hysteria(_) => "hysteria",
+            Self::Socks(_) => "socks",
         }
     }
 
@@ -207,6 +213,11 @@ impl OutboundSettingsDraft {
     pub fn hysteria_default() -> Self {
         Self::Hysteria(HysteriaOutboundSettings::default())
     }
+
+    /// Default for Add SOCKS.
+    pub fn socks_default() -> Self {
+        Self::Socks(SocksOutboundSettings::default())
+    }
 }
 
 /// Reads a Protocol draft from an outbound object, when the protocol is shell-editable.
@@ -224,6 +235,7 @@ pub fn parse_outbound_settings(outbound: &Value) -> Option<OutboundSettingsDraft
         "loopback" => Some(OutboundSettingsDraft::Loopback(loopback::parse_loopback_settings(outbound))),
         "trojan" => trojan::parse_trojan_outbound_settings(outbound).map(OutboundSettingsDraft::Trojan),
         "hysteria" => Some(OutboundSettingsDraft::Hysteria(hysteria::parse_hysteria_outbound_settings(outbound))),
+        "socks" => socks::parse_socks_outbound_settings(outbound).map(OutboundSettingsDraft::Socks),
         _ => None,
     }
 }
@@ -364,6 +376,7 @@ pub fn apply_outbound_settings(
         OutboundSettingsDraft::Loopback(settings) => loopback::apply_loopback_settings(outbound, settings),
         OutboundSettingsDraft::Trojan(settings) => trojan::apply_trojan_outbound_settings(outbound, settings),
         OutboundSettingsDraft::Hysteria(settings) => hysteria::apply_hysteria_outbound_settings(outbound, settings),
+        OutboundSettingsDraft::Socks(settings) => socks::apply_socks_outbound_settings(outbound, settings),
     }
 }
 
@@ -376,6 +389,8 @@ pub fn outbound_shell_blocker(outbound: &Value) -> Option<String> {
             .map(|reason| format!("Legacy VLESS vnext[] cannot be converted: {reason}")),
         "trojan" => trojan::legacy_servers_blocker(outbound)
             .map(|reason| format!("Trojan servers[] cannot be converted: {reason}")),
+        "socks" => socks::legacy_servers_blocker(outbound)
+            .map(|reason| format!("SOCKS servers[] cannot be converted: {reason}")),
         _ => None,
     }
 }

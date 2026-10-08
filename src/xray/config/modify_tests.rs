@@ -3958,6 +3958,65 @@ fn hysteria_outbound_shell_add_edit_duplicate() {
     assert_eq!(config.sections().outbounds().len(), 2);
 }
 
+/// Roadmap §4.2 "Outbounds Shell: Socks": Add writes the flat form for a local chain (Tor), Edit
+/// converts the `servers[]` form, Duplicate accepts the protocol.
+#[test]
+fn socks_outbound_shell_add_edit_duplicate() {
+    use super::modify::{DuplicateOutboundRequest, duplicate_outbound};
+    use super::outbound_edit::{OutboundGeneral, OutboundRef, parse_outbound_general};
+    use super::outbound_protocol::{OutboundSettingsDraft, parse_outbound_settings};
+    use super::outbound_stream::parse_outbound_stream;
+
+    let mut config = single_file_editable(r#"{"outbounds":[]}"#);
+    let OutboundSettingsDraft::Socks(mut draft) = OutboundSettingsDraft::socks_default() else {
+        panic!("socks draft expected");
+    };
+    draft.address = "127.0.0.1".to_owned();
+    draft.port = "9050".to_owned();
+    add_outbound_shell(
+        &mut config,
+        AddOutboundShellRequest {
+            general: OutboundGeneral { tag: Some("tor".to_owned()), ..OutboundGeneral::default() },
+            settings: OutboundSettingsDraft::Socks(draft),
+            stream: Default::default(),
+            core_version: None,
+            preferred_source_file: None,
+        },
+    )
+    .expect("add socks");
+    assert_eq!(
+        config.sections().outbounds()[0].value().clone(),
+        serde_json::json!({"protocol": "socks", "tag": "tor", "settings": {"address": "127.0.0.1", "port": 9050}})
+    );
+
+    // Edit: the servers[] form is rewritten flat, with its single user.
+    let mut config = single_file_editable(
+        r#"{"outbounds":[{"tag":"tor","protocol":"socks","settings":{"servers":[{"address":"127.0.0.1",
+            "port":1080,"users":[{"user":"u","pass":"p"}]}]}}]}"#,
+    );
+    let original = config.sections().outbounds()[0].value().clone();
+    let settings = parse_outbound_settings(&original).expect("convertible servers[]");
+    let expected_fingerprint = config.outbound_object_fingerprint(0).expect("fingerprint");
+    update_outbound_shell(
+        &mut config,
+        UpdateOutboundShellRequest {
+            outbound_ref: OutboundRef { outbound_index: 0, expected_fingerprint },
+            general: parse_outbound_general(&original),
+            settings,
+            stream: parse_outbound_stream(&original),
+            core_version: None,
+        },
+    )
+    .expect("edit socks");
+    assert_eq!(
+        config.sections().outbounds()[0].value()["settings"],
+        serde_json::json!({"address": "127.0.0.1", "port": 1080, "user": "u", "pass": "p"})
+    );
+
+    duplicate_outbound(&mut config, DuplicateOutboundRequest { outbound_index: 0 }).expect("duplicate socks");
+    assert_eq!(config.sections().outbounds().len(), 2);
+}
+
 #[test]
 fn duplicate_outbound_allows_vless_legacy_vnext_form() {
     use super::modify::{DuplicateOutboundRequest, duplicate_outbound};

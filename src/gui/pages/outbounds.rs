@@ -361,6 +361,47 @@ const HELP_HYSTERIA_VERSION: HelpText = HelpText::new(
      не работает) задаются в Stream / Security.",
 );
 
+// SOCKS (Roadmap §4.2), checked with `xray run -test` 26.9.30 (`infra/conf/socks.go`).
+const HELP_SOCKS: HelpText = HelpText::new(
+    "Sends traffic on to a SOCKS5 proxy. Kept for one server-side use: chaining to a proxy on \
+     this server or a private network, e.g. Tor at 127.0.0.1:9050 (route .onion domains here). \
+     SOCKS has no encryption — the user name, password and traffic travel in the clear — so do \
+     not point it at a public address.",
+    "Передаёт трафик дальше на SOCKS5-прокси. Оставлен для одного серверного сценария: цепочка на \
+     прокси на этом сервере или в частной сети, например Tor на 127.0.0.1:9050 (сюда направляют \
+     домены .onion). SOCKS ничего не шифрует — имя, пароль и трафик идут открыто, — поэтому не \
+     указывайте публичный адрес.",
+);
+const HELP_SOCKS_ADDRESS: HelpText = HelpText::new(
+    "Address of the SOCKS server: IP or domain name. Required.",
+    "Адрес SOCKS-сервера: IP или доменное имя. Обязательно.",
+);
+const HELP_SOCKS_PORT: HelpText = HelpText::new(
+    "Port of the SOCKS server, 1–65535 (Tor: 9050). Required; written as a number.",
+    "Порт SOCKS-сервера, 1–65535 (Tor: 9050). Обязательно; записывается числом.",
+);
+const HELP_SOCKS_USER: HelpText = HelpText::new(
+    "User name, only if the server requires authentication; empty = no authentication. Kept \
+     exactly as typed.",
+    "Имя пользователя — только если сервер требует аутентификацию; пусто — без аутентификации. \
+     Сохраняется точно как набрано.",
+);
+const HELP_SOCKS_PASS: HelpText = HelpText::new(
+    "Password for the user. Without a user Xray-core ignores it. Kept exactly as typed.",
+    "Пароль пользователя. Без имени пользователя Xray-core его игнорирует. Сохраняется точно как \
+     набран.",
+);
+const HELP_SOCKS_LEVEL: HelpText = HelpText::new(
+    "User level: index into policy.levels; used only with a user; empty = key absent (level 0).",
+    "Уровень пользователя: индекс в policy.levels; действует только вместе с именем \
+     пользователя; пусто — ключа нет (уровень 0).",
+);
+const HELP_SOCKS_EMAIL: HelpText = HelpText::new(
+    "User label in logs and statistics; used only with a user; empty = key absent.",
+    "Метка пользователя в журналах и статистике; действует только вместе с именем пользователя; \
+     пусто — ключа нет.",
+);
+
 /// Renders the Outbounds page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     service.tick_outbounds_page_status();
@@ -482,6 +523,19 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
                     .clicked()
                 {
                     if let Err(e) = service.begin_add_outbound_hysteria() {
+                        service.show_status_message(e);
+                    }
+                    ui.close();
+                }
+                if ui
+                    .button("SOCKS")
+                    .on_hover_text(
+                        "Chain to a SOCKS proxy, e.g. Tor on this server — \
+                         https://xtls.github.io/en/config/outbounds/socks.html",
+                    )
+                    .clicked()
+                {
+                    if let Err(e) = service.begin_add_outbound_socks() {
                         service.show_status_message(e);
                     }
                     ui.close();
@@ -1129,6 +1183,7 @@ fn outbound_protocol_label(settings: &OutboundSettingsDraft) -> &'static str {
         OutboundSettingsDraft::Loopback(_) => "Loopback",
         OutboundSettingsDraft::Trojan(_) => "Trojan",
         OutboundSettingsDraft::Hysteria(_) => "Hysteria",
+        OutboundSettingsDraft::Socks(_) => "SOCKS",
     }
 }
 
@@ -1158,6 +1213,7 @@ fn show_outbound_editor_pane(ui: &mut Ui, service: &mut ApplicationService) {
         Some(OutboundSettingsDraft::Loopback(_)) => show_loopback_settings_edit(ui, service),
         Some(OutboundSettingsDraft::Trojan(_)) => show_trojan_settings_edit(ui, service),
         Some(OutboundSettingsDraft::Hysteria(_)) => show_hysteria_settings_edit(ui, service),
+        Some(OutboundSettingsDraft::Socks(_)) => show_socks_settings_edit(ui, service),
         None => {}
     }
     // Stream / Security for protocols that dial through a transport (Roadmap §4.2).
@@ -2015,7 +2071,72 @@ fn is_shell_kind(kind: OutboundKind) -> bool {
             | OutboundKind::Loopback
             | OutboundKind::Trojan
             | OutboundKind::Hysteria
+            | OutboundKind::Socks
     )
+}
+
+/// SOCKS Protocol section (Roadmap §4.2): flat `settings`; `pass` / `level` / `email` only count
+/// with a `user`.
+fn show_socks_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
+    let Some(session) = service.outbound_editor_session_mut() else {
+        return;
+    };
+    let OutboundSettingsDraft::Socks(settings) = &mut session.settings else {
+        return;
+    };
+    ui.horizontal(|ui| {
+        super::help_button(ui, "SOCKS", HELP_SOCKS);
+        ui.label(
+            RichText::new("No encryption: for a proxy on this server or a private network (e.g. Tor at 127.0.0.1:9050).")
+                .size(12.0)
+                .color(Color32::from_rgb(140, 140, 140)),
+        );
+    });
+    if settings.legacy_servers {
+        ui.label(
+            RichText::new(
+                "This outbound uses the servers[] form. Save rewrites it into the flat settings \
+                 form — same server and user for Xray-core. \"Preview changes\" shows the rewrite.",
+            )
+            .italics(),
+        );
+    }
+    ui.add_space(4.0);
+    egui::Grid::new("socks_outbound_settings_edit_grid")
+        .num_columns(2)
+        .spacing([16.0, 6.0])
+        .show(ui, |ui| {
+            super::field_label(ui, "address", HELP_SOCKS_ADDRESS);
+            ui.add(egui::TextEdit::singleline(&mut settings.address).hint_text("127.0.0.1"));
+            ui.end_row();
+
+            super::field_label(ui, "port", HELP_SOCKS_PORT);
+            ui.add(egui::TextEdit::singleline(&mut settings.port).desired_width(80.0).hint_text("9050"));
+            ui.end_row();
+
+            super::field_label(ui, "user", HELP_SOCKS_USER);
+            ui.text_edit_singleline(&mut settings.user);
+            ui.end_row();
+
+            super::field_label(ui, "pass", HELP_SOCKS_PASS);
+            ui.add(egui::TextEdit::singleline(&mut settings.pass).password(true));
+            ui.end_row();
+
+            super::field_label(ui, "level", HELP_SOCKS_LEVEL);
+            ui.add(egui::TextEdit::singleline(&mut settings.level).desired_width(80.0).hint_text("0"));
+            ui.end_row();
+
+            super::field_label(ui, "email", HELP_SOCKS_EMAIL);
+            ui.text_edit_singleline(&mut settings.email);
+            ui.end_row();
+        });
+    if settings.has_ignored_user_fields() {
+        ui.label(
+            RichText::new("pass, level and email are ignored by Xray-core without a user.")
+                .size(12.0)
+                .color(Color32::from_rgb(210, 170, 40)),
+        );
+    }
 }
 
 /// Hysteria Protocol section (Roadmap §4.2): server address and port; `version` is always 2,

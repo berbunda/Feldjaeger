@@ -172,6 +172,10 @@ pub enum CompatibilityWarningId {
     /// Hysteria outbound on its transport without `security: "tls"` — loads, but every connection
     /// fails ("tls config is nil", live check with Xray 26.9.30).
     HysteriaOutboundNeedsTls,
+    /// A SOCKS outbound read from `servers[]` (no flat `address`) with other than one entry, or
+    /// with more than one `users[]` member — `SocksClientConfig.Build()` refuses it, so the config
+    /// does not load (Roadmap §4.2).
+    SocksServersNotSingle,
 }
 
 /// How a warning is shown: [`Self::Danger`] gets the red road-sign style in the GUI and
@@ -370,6 +374,11 @@ impl CompatibilityWarningId {
                 "Xray-core does not start: a Hysteria outbound needs the hysteria transport \
                  (`streamSettings.network`) — pick it under Stream / Security"
             }
+            Self::SocksServersNotSingle => {
+                "rejected by Xray-core: a SOCKS outbound takes exactly one servers[] entry with at \
+                 most one user, and the config does not load; split it into one outbound per \
+                 server/user and pick between them with a routing balancer"
+            }
             Self::HysteriaOutboundNeedsTls => {
                 "breaks the outbound: Hysteria runs over QUIC, which needs TLS — without \
                  `security: tls` every connection fails (\"tls config is nil\")"
@@ -564,6 +573,12 @@ pub fn outbound_warnings(outbound: &Value, core: Option<XrayCoreVersion>) -> Vec
     }
     trojan_outbound_warnings(outbound, &mut warnings);
     hysteria_outbound_warnings(outbound, &mut warnings);
+    if let Some(location) = socks_servers_not_single(outbound) {
+        warnings.push(CompatibilityWarning {
+            id: CompatibilityWarningId::SocksServersNotSingle,
+            location,
+        });
+    }
     wireguard_outbound_warnings(outbound, core, &mut warnings);
     let is_freedom = outbound
         .get("protocol")
@@ -674,6 +689,25 @@ fn vless_vnext_not_single(outbound: &Value) -> Option<String> {
     }
     let users = servers[0].get("users").and_then(Value::as_array);
     (users.map_or(0, Vec::len) != 1).then(|| "settings.vnext[0].users".to_owned())
+}
+
+/// Location of the `servers[]` / `users[]` array a SOCKS outbound has too many (or no) entries in,
+/// when the core reads it — a non-null flat `address` makes the core ignore `servers`.
+fn socks_servers_not_single(outbound: &Value) -> Option<String> {
+    let is_socks = outbound
+        .get("protocol")
+        .and_then(Value::as_str)
+        .is_some_and(|protocol| protocol.trim().eq_ignore_ascii_case("socks"));
+    let settings = outbound.get("settings").filter(|_| is_socks)?;
+    if settings.get("address").is_some_and(|address| !address.is_null()) {
+        return None;
+    }
+    let servers = settings.get("servers").filter(|servers| !servers.is_null())?;
+    let Some([server]) = servers.as_array().map(Vec::as_slice) else {
+        return Some("settings.servers".to_owned());
+    };
+    let users = server.get("users").and_then(Value::as_array);
+    (users.map_or(0, Vec::len) > 1).then(|| "settings.servers[0].users".to_owned())
 }
 
 /// Hysteria outbound: `version`, the transport and TLS (see the warning ids).
@@ -1577,6 +1611,28 @@ mod tests {
                 | CompatibilityWarningId::HysteriaOutboundNeedsTransport
                 | CompatibilityWarningId::HysteriaOutboundNeedsTls
         )));
+    }
+
+    /// Roadmap §4.2: SOCKS `servers[]` / `users[]` counts `xray run -test` 26.9.30 refuses.
+    #[test]
+    fn flags_socks_servers_and_users_not_single() {
+        let ids = |settings: Value| -> Vec<_> {
+            let outbound = json!({"protocol": "socks", "settings": settings});
+            outbound_warnings(&outbound, None).into_iter().map(|w| (w.id, w.location)).collect()
+        };
+        let server = json!({"address": "127.0.0.1", "port": 9050});
+        assert!(ids(json!({"address": "127.0.0.1", "port": 9050})).is_empty());
+        assert!(ids(json!({"servers": [server.clone()]})).is_empty());
+        assert!(ids(json!({"servers": [{"address": "a", "port": 1, "users": [{"user": "u"}]}]})).is_empty());
+        let at = |location: &str| vec![(CompatibilityWarningId::SocksServersNotSingle, location.to_owned())];
+        assert_eq!(ids(json!({"servers": []})), at("settings.servers"));
+        assert_eq!(ids(json!({"servers": [server.clone(), server.clone()]})), at("settings.servers"));
+        assert_eq!(
+            ids(json!({"servers": [{"address": "a", "port": 1, "users": [{"user": "u"}, {"user": "v"}]}]})),
+            at("settings.servers[0].users")
+        );
+        // A flat address wins: servers[] is ignored by the core.
+        assert!(ids(json!({"address": "a", "port": 1, "servers": []})).is_empty());
     }
 
     /// Roadmap §4.2: Trojan shapes `xray run -test` 26.9.30 refuses.

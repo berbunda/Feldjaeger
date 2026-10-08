@@ -10291,3 +10291,64 @@ Socks, `curl` к https://example.com): клиент с TLS (`pinnedPeerCertSha25
 транспорт и TLS без правки stream, у результата нет предупреждений; Edit; Duplicate). Итог:
 **1430 passed / 0 failed**, clippy lib 65 (без изменений). GUI в запущенном приложении не
 проверялся.
+
+# 129	Outbounds Shell: Socks (Roadmap §4.2) (0.5.64-0)
+
+## 129.1	Сверка с ядром
+
+Xray-core v26.9.30, `infra/conf/socks.go`: `SocksClientConfig` — плоские `address`, `port`
+(`uint16`), `level` (`uint32`), `email`, `user`, `pass` и `servers[]` из `SocksRemoteConfig
+{address, port, users[]}`. При `v.Address != nil` `Build()` строит один сервер из плоских ключей
+(`servers` игнорируется), а пользователя — только при непустом `user`; лишь тогда применяются
+`pass`, `level` и `email`. Иначе `servers` — ровно один элемент, `users` — не больше одного (`{user,
+pass, level, email}`). Документация (`config/outbounds/socks.md`, Context7) — плоская форма; `user` /
+`pass` / `email` — «только если сервер требует аутентификацию».
+
+`xray run -test` 26.9.30, адрес 127.0.0.1:
+
+| `settings` | результат |
+|---|---|
+| плоская форма; с `user`/`pass`/`level`/`email` | OK |
+| `pass` без `user`; `level` без `user` | OK — ядро их не использует |
+| `level: "1"` / `level: -1` | отказ: `… of type uint32` |
+| `port: "9050"` / `user: 5` | отказ: `… of type uint16` / `… of type string` |
+| `port: 0` / без `port` | OK — outbound никуда не подключится |
+| `servers` из 1 (с пользователем и без) | OK |
+| `servers` из 2 | отказ: `"servers" should have one and only one member` |
+| `users` из 2 | отказ: `"users" should have one member at most` |
+| плоский `address` + `servers` из 2 | OK — `servers` игнорируется |
+| неизвестный ключ | OK |
+
+## 129.2	Модель (`outbound_protocol/socks.rs`)
+
+- `SocksOutboundSettings { address, port, user, pass, level, email, legacy_servers }`;
+  `OutboundSettingsDraft::Socks`, `socks_default()`, `protocol_name() = "socks"`;
+  `is_shell_editable_protocol`, `SHELL_EDITABLE_PROTOCOLS` и `outbound_shell_blocker` включают
+  `socks`.
+- Запись: `address` (trim, обязателен), `port` числом 1–65535 (0 ядро принимает, но такой outbound
+  бесполезен), `user` и `pass` как набраны (пусто — ключ удаляется), `level` `uint32`, `email`
+  (trim); при `legacy_servers` удаляется `servers`. `has_ignored_user_fields()` — `pass` / `level` /
+  `email` без `user`: Save их пишет (ядро принимает), GUI предупреждает.
+- Конвертация `servers[]` (ядро читает его при отсутствующем или `null` `address`): один сервер с
+  ключами ⊆ `address`/`port`/`users`, не больше одного пользователя с ключами ⊆
+  `user`/`pass`/`level`/`email`, строки — строки, и непустой `user`: плоская форма без `user` не
+  создаёт пользователя, а `servers[0].users[0]` с пустым именем создаёт. Иначе — Raw JSON с причиной.
+
+## 129.3	Предупреждения, сводка, GUI
+
+- `SocksServersNotSingle` (`settings.servers` или `settings.servers[0].users`).
+- `summary.rs`: `address:port` (плоская форма побеждает `servers[0]`) вместо «Proxy server
+  configured»; тест `outbound_summary_protocol_descriptions_and_send_through` обновлён.
+- `outbounds.rs`: «SOCKS» в «Add Outbound», `is_shell_kind`; `show_socks_settings_edit` — серая
+  пометка про отсутствие шифрования и сценарий (Tor), курсивная пометка о конвертации
+  `servers[]`, поля `address`, `port`, `user`, `pass` (маскированный), `level`, `email`, янтарная
+  подсказка про поля без `user`. Справка EN+RU — 7 текстов. `docs/ui.md` дополнен.
+- Roadmap: абзац «После FinalMask» переписан под текущее состояние.
+
+## 129.4	Итог
+
+Тесты (+9): `socks.rs` — 7 (круговой Save без обрезки `user`/`pass`; удаление пустых; подсказка
+полей без `user`; отказы без частичной записи; конвертация `servers[0]` без и с пользователем;
+плоский `address` побеждает; 8 блокеров), `warnings` — 1, `modify_tests` — 1 (Add для Tor → Edit с
+конвертацией → Duplicate). Итог: **1439 passed / 0 failed**, clippy lib 65 (без изменений). GUI в
+запущенном приложении не проверялся.
