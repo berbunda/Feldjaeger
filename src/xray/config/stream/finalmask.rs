@@ -222,9 +222,10 @@ pub fn validate_finalmask_layers(
 ///   that Go decoding rejects; so is `xmc` (stage 2.4, [`super::finalmask_xmc`]) — `hostname`
 ///   length matters only on the client side, hence `direction`, and the pre-v26.7.28
 ///   `usernames` schema is not refused;
-/// - `xdns` (stage 1.3) needs `resolvers` only on the client side, hence `direction`; settings in
-///   the pre-v26.9.30 schema are not refused — they are right for an older core, and the
-///   version-aware warning covers a newer one;
+/// - `xdns` (stages 1.3 / 1.6) needs `resolvers` only on the client side, hence `direction`;
+///   settings in an older schema (strings, or the v26.9.30 `name` / `type` objects) are not
+///   refused — they are right for an older core, and the version-aware warning covers a newer
+///   one;
 /// - `sudoku` (both chains) has no `Build()` checks; its `ascii` mode and custom tables are read
 ///   only when the core builds the byte tables (stage 2.5), so those are runtime checks.
 ///
@@ -430,7 +431,8 @@ mod tests {
             (Tcp, "sudoku", json!({"customTable": "xxppvvv"}), "customTable"),
             (Udp, "sudoku", json!({"ascii": "binary"}), "ascii"),
             (Udp, "xicmp", json!({"ips": ["10.0.0.0/8"]}), "ips"),
-            (Udp, "xdns", json!({"domains": [{"name": "t.example.com"}]}), "types"),
+            (Udp, "xdns", json!({"domains": [{"names": []}]}), "names"),
+            (Udp, "xdns", json!({"domains": [{"names": ["t.example.com"], "types": [15]}]}), "types"),
             (Udp, "fragment", json!({}), "finalmask.tcp mask"),
             (Tcp, "salamander", json!({}), "finalmask.udp mask"),
             (Tcp, "Noise", json!({}), "not accept it in finalmask.tcp"),
@@ -447,9 +449,10 @@ mod tests {
             (Tcp, "sudoku", json!({"ascii": "prefer_ascii", "customTable": "bad"})),
             (Udp, "salamander", json!({"password": "pass"})),
             (Udp, "future-mask", json!({"anything": 1})),
-            // The pre-v26.9.30 xdns schema is right for an older core (a warning covers newer).
+            // Older xdns schemas are right for an older core (a warning covers newer).
             (Udp, "xdns", json!({"domains": ["t.example.com:txt"]})),
             (Udp, "xdns", json!({"domains": [{"name": "t.example.com", "types": [16]}]})),
+            (Udp, "xdns", json!({"domains": [{"names": ["t.example.com"]}]})),
             (Udp, "", json!({})),
             // Unrepresentable typed settings are left to the core.
             (Tcp, "fragment", json!({"packets": 1})),
@@ -461,10 +464,10 @@ mod tests {
         assert!(err.message().contains("finalmask.udp[1] (salamander): packetSize"), "{}", err.message());
     }
 
-    /// Roadmap §2.6 stage 1.3: the xdns client needs resolvers, the server does not.
+    /// Roadmap §2.6 stages 1.3 / 1.6: the xdns client needs resolvers, the server does not.
     #[test]
     fn xdns_resolvers_are_required_on_the_client_side_only() {
-        let settings = json!({"domains": [{"name": "t.example.com", "types": [16]}]});
+        let settings = json!({"domains": [{"names": ["t.example.com"]}]});
         assert_eq!(validate_finalmask_layer(FinalMaskChain::Udp, StreamDirection::Inbound, "xdns", &settings), Ok(()));
         let error = validate_finalmask_layer(FinalMaskChain::Udp, StreamDirection::Outbound, "xdns", &settings).unwrap_err();
         assert!(error.contains("resolvers"), "{error}");

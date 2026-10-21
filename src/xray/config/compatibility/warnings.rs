@@ -33,7 +33,8 @@ use crate::xray::config::stream::{
     quic_transport_of,
     FinalMaskChain, NOISE_EXP_KIND, StreamDirection, finalmask_layer_type_applies,
     finalmask_tcp_layer_faces_probes,
-    xdns_has_legacy_fields, xmc_has_legacy_usernames,
+    xdns_has_string_schema, xdns_has_v26_9_30_objects, xdns_uses_names_addrs,
+    xmc_has_legacy_usernames,
 };
 
 use crate::xray::config::inbound_stream::{KCP_IGNORED_FIELDS, KCP_LEGACY_OBFUSCATION_FIELDS};
@@ -97,6 +98,12 @@ pub enum CompatibilityWarningId {
     /// `domain`) on a core with the object schema (XTLS/Xray-core#6718): strings fail to decode,
     /// `domain` is ignored. The editor offers a migration.
     XdnsLegacySchema,
+    /// `xdns` settings in the v26.9.30 object schema (`domains[].name`, `resolvers[].type` +
+    /// `settings`) on a core with `names` / `addrs` (XTLS/Xray-core#7090): the old keys are
+    /// ignored, so `xray run -test` passes but the layer has no domains / resolvers and fails
+    /// when Xray starts ("empty domains" — on an inbound Xray does not start at all, checked with
+    /// `xray.exe` 26.10.10); [`WarningSeverity::Danger`]. The editor offers a migration.
+    XdnsV26930Schema,
     /// `xmc` settings in the pre-v26.7.28 schema (`usernames` without `profiles`) on a core with
     /// signed profiles (XTLS/Xray-core#6487): `usernames` is ignored and the layer is refused
     /// without `profiles`. The editor can start profiles from the usernames.
@@ -192,7 +199,9 @@ impl CompatibilityWarningId {
     /// Display severity (see [`WarningSeverity`]).
     pub fn severity(self) -> WarningSeverity {
         match self {
-            Self::OpenProxyInbound | Self::WireGuardRemoteDnsNotIp => WarningSeverity::Danger,
+            Self::OpenProxyInbound | Self::WireGuardRemoteDnsNotIp | Self::XdnsV26930Schema => {
+                WarningSeverity::Danger
+            }
             _ => WarningSeverity::Caution,
         }
     }
@@ -268,8 +277,14 @@ impl CompatibilityWarningId {
             }
             Self::XdnsLegacySchema => {
                 "pre-v26.9.30 xdns schema: Xray-core v26.9.30+ rejects string domains / resolvers \
-                 and ignores `domain` (XTLS/Xray-core#6718); use \"Migrate to the v26.9.30 schema\" \
-                 in the editor"
+                 and ignores `domain` (XTLS/Xray-core#6718); use \"Migrate to the v26.10.10 schema\" \
+                 in the editor (the result needs Xray-core v26.10.10+)"
+            }
+            Self::XdnsV26930Schema => {
+                "v26.9.30 xdns schema: Xray-core v26.10.10+ ignores `domains[].name` and \
+                 `resolvers[].type` / `settings` (XTLS/Xray-core#7090) — the config passes \
+                 `xray run -test`, but the layer has no domains / resolvers and Xray fails to start \
+                 (\"empty domains\"); use \"Migrate to the v26.10.10 schema\" in the editor"
             }
             Self::XmcLegacyUsernames => {
                 "pre-v26.7.28 xmc schema: Xray-core v26.7.28+ ignores `usernames` and refuses the \
@@ -608,6 +623,15 @@ pub fn outbound_warnings(outbound: &Value, core: Option<XrayCoreVersion>) -> Vec
             outbound_finalmask_warnings(outbound, stream, finalmask, core, &mut warnings);
         }
         outbound_stream_warnings(stream, &mut warnings);
+        // An older core does not know the key and keeps trusting the OS store anyway.
+        if stream.get("tlsSettings").and_then(|tls| tls.get("useSystemCA")).and_then(Value::as_bool) == Some(true) {
+            push_if_core_too_old(
+                CoreFeature::TlsUseSystemCa,
+                core,
+                "streamSettings.tlsSettings.useSystemCA".to_owned(),
+                &mut warnings,
+            );
+        }
     }
     mux_warnings(outbound, &mut warnings);
     warnings
@@ -894,24 +918,30 @@ fn finalmask_warnings(
                 continue;
             }
             if layer_is(layer, "xdns") {
-                let settings = layer.get("settings").filter(|settings| settings.is_object());
+                let Some(settings) = layer.get("settings").filter(|settings| settings.is_object()) else {
+                    continue;
+                };
+                // Three schema generations: strings (up to v26.9.29), objects with `name` /
+                // `type` + `settings` (v26.9.30), `names` / `addrs` (v26.10.10+).
                 let location = format!("streamSettings.finalmask.udp[{index}].settings");
-                if settings.is_some_and(xdns_has_legacy_fields)
-                    && CoreFeature::XdnsObjectSchema.available_in(core)
-                {
+                if xdns_has_string_schema(settings) && CoreFeature::XdnsObjectSchema.available_in(core) {
                     warnings.push(CompatibilityWarning {
                         id: CompatibilityWarningId::XdnsLegacySchema,
                         location: location.clone(),
                     });
                 }
-                let has_objects = |key: &str| {
-                    settings
-                        .and_then(|settings| settings.get(key))
-                        .and_then(Value::as_array)
-                        .is_some_and(|items| items.iter().any(Value::is_object))
-                };
-                if has_objects("domains") || has_objects("resolvers") {
-                    push_if_core_too_old(CoreFeature::XdnsObjectSchema, core, location, warnings);
+                if xdns_has_v26_9_30_objects(settings) {
+                    if !CoreFeature::XdnsObjectSchema.available_in(core) {
+                        push_if_core_too_old(CoreFeature::XdnsObjectSchema, core, location.clone(), warnings);
+                    } else if CoreFeature::XdnsNamesAddrsSchema.available_in(core) {
+                        warnings.push(CompatibilityWarning {
+                            id: CompatibilityWarningId::XdnsV26930Schema,
+                            location: location.clone(),
+                        });
+                    }
+                }
+                if xdns_uses_names_addrs(settings) {
+                    push_if_core_too_old(CoreFeature::XdnsNamesAddrsSchema, core, location, warnings);
                 }
                 continue;
             }
@@ -1661,6 +1691,24 @@ mod tests {
         assert!(ids(json!({"address": "10.0.0.1", "port": 1, "password": "p", "flow": ""})).is_empty());
     }
 
+    /// Audit v26.10.10 D: `useSystemCA` needs v26.10.10; an older core ignores it.
+    #[test]
+    fn use_system_ca_requires_26_10_10() {
+        let outbound = json!({"protocol": "trojan", "settings": {"address": "10.0.0.1", "port": 443, "password": "p"},
+            "streamSettings": {"security": "tls", "tlsSettings": {"useSystemCA": true}}});
+        let ids = |core| -> Vec<_> { outbound_warnings(&outbound, core).into_iter().map(|w| (w.id, w.location)).collect() };
+        let old = XrayCoreVersion::new(26, 9, 30);
+        assert_eq!(
+            ids(Some(old)),
+            vec![(
+                CompatibilityWarningId::RequiresNewerCore { feature: CoreFeature::TlsUseSystemCa, installed: old },
+                "streamSettings.tlsSettings.useSystemCA".to_owned()
+            )]
+        );
+        assert!(ids(Some(XrayCoreVersion::new(26, 10, 10))).is_empty());
+        assert!(ids(None).is_empty());
+    }
+
     /// Roadmap §2.3: the server side rejects `allowInsecure: true` as well.
     #[test]
     fn flags_allow_insecure_on_inbounds() {
@@ -1913,29 +1961,48 @@ mod tests {
         );
     }
 
-    /// Roadmap §2.6 stage 1.3: the xdns schema switch of #6718 (v26.9.30), both directions.
+    /// Roadmap §2.6 stages 1.3 / 1.6: the xdns schema switches of #6718 (v26.9.30) and #7090
+    /// (v26.10.10), in both directions.
     #[test]
     fn xdns_schema_follows_the_core_version() {
         let with = |settings: Value| json!({"streamSettings": {"finalmask": {"udp": [{"type": "xdns", "settings": settings}]}}});
-        let legacy = with(json!({"domains": ["t.example.com:txt"]}));
+        let strings = with(json!({"domains": ["t.example.com:txt"]}));
         let objects = with(json!({"domains": [{"name": "t.example.com", "types": [16]}]}));
+        let resolver_objects = with(json!({"domains": [{"names": ["t.example.com"]}],
+                                           "resolvers": [{"type": "udp", "settings": {"addr": "1.1.1.1:53"}}]}));
+        let names = with(json!({"domains": [{"names": ["t.example.com"]}], "resolvers": [{"addrs": ["1.1.1.1"]}]}));
         let ids = |inbound: &Value, core| -> Vec<_> {
             inbound_warnings(inbound, core).into_iter().map(|w| (w.id, w.location)).collect()
         };
         let at = "streamSettings.finalmask.udp[0].settings".to_owned();
-        let new_core = Some(XrayCoreVersion::new(26, 9, 30));
+        let v26_10_10 = XrayCoreVersion::new(26, 10, 10);
+        let v26_9_30 = XrayCoreVersion::new(26, 9, 30);
         let old_core = XrayCoreVersion::new(26, 9, 20);
-        assert_eq!(ids(&legacy, new_core), vec![(CompatibilityWarningId::XdnsLegacySchema, at.clone())]);
-        assert_eq!(ids(&legacy, None), vec![(CompatibilityWarningId::XdnsLegacySchema, at.clone())]);
-        assert!(ids(&legacy, Some(old_core)).is_empty());
-        assert!(ids(&objects, new_core).is_empty());
+        let too_old = |feature, installed| CompatibilityWarningId::RequiresNewerCore { feature, installed };
+
+        assert_eq!(ids(&strings, Some(v26_9_30)), vec![(CompatibilityWarningId::XdnsLegacySchema, at.clone())]);
+        assert_eq!(ids(&strings, None), vec![(CompatibilityWarningId::XdnsLegacySchema, at.clone())]);
+        assert!(ids(&strings, Some(old_core)).is_empty());
+
+        assert!(ids(&objects, Some(v26_9_30)).is_empty());
+        assert_eq!(ids(&objects, Some(v26_10_10)), vec![(CompatibilityWarningId::XdnsV26930Schema, at.clone())]);
+        assert_eq!(ids(&objects, None), vec![(CompatibilityWarningId::XdnsV26930Schema, at.clone())]);
+        assert_eq!(ids(&objects, Some(old_core)), vec![(too_old(CoreFeature::XdnsObjectSchema, old_core), at.clone())]);
+        assert_eq!(CompatibilityWarningId::XdnsV26930Schema.severity(), WarningSeverity::Danger);
+
+        // A half-migrated layer: `names` already, resolvers still v26.9.30.
         assert_eq!(
-            ids(&objects, Some(old_core)),
-            vec![(
-                CompatibilityWarningId::RequiresNewerCore { feature: CoreFeature::XdnsObjectSchema, installed: old_core },
-                at
-            )]
+            ids(&resolver_objects, Some(v26_10_10)),
+            vec![(CompatibilityWarningId::XdnsV26930Schema, at.clone())]
         );
+        assert_eq!(
+            ids(&resolver_objects, Some(v26_9_30)),
+            vec![(too_old(CoreFeature::XdnsNamesAddrsSchema, v26_9_30), at.clone())]
+        );
+
+        assert!(ids(&names, Some(v26_10_10)).is_empty());
+        assert!(ids(&names, None).is_empty());
+        assert_eq!(ids(&names, Some(v26_9_30)), vec![(too_old(CoreFeature::XdnsNamesAddrsSchema, v26_9_30), at)]);
     }
 
     /// Roadmap §2.6 stage 1.4: `noise` `type: "exp"` (#6862) needs v26.9.30.

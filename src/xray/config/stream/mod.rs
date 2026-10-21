@@ -62,9 +62,10 @@ pub use finalmask_layers::{
     realm_ip_mode_is_known, realm_settings_to_value, salamander_settings_to_value,
     sudoku_settings_to_value, udphop_settings_to_value, validate_realm_settings,
     validate_udphop_settings, xdns_settings_to_value, xicmp_settings_to_value,
-    NOISE_EXP_KIND, XDNS_DEFAULT_LABEL_LIMIT, XDNS_DEFAULT_LEN_LIMIT, XDNS_RECORD_TYPES,
-    XDNS_RESOLVER_KINDS, XdnsDomain, XdnsResolver, migrate_legacy_xdns_settings,
-    xdns_has_legacy_fields, xdns_record_type_name,
+    NOISE_EXP_KIND, XDNS_DEFAULT_LABEL_LIMIT, XDNS_DEFAULT_LEN_LIMIT, XDNS_DEFAULT_RESOLVER_PORT,
+    XDNS_RECORD_TYPES, XDNS_RESOLVER_KINDS, XdnsDomain, XdnsResolver, migrate_legacy_xdns_settings,
+    validate_xdns_resolver_addr, xdns_default_types, xdns_has_legacy_fields, xdns_has_string_schema,
+    xdns_has_v26_9_30_objects, xdns_record_type_name, xdns_uses_names_addrs,
 };
 pub use finalmask_header_custom::{
     HEADER_CUSTOM_UDP_DEFAULT_MODE, HeaderCustomItem, HeaderCustomItemKind, HeaderCustomItems,

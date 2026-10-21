@@ -24,8 +24,8 @@ use crate::xray::{
     range_values_to_lines, realm_ip_mode_is_known, realm_settings_to_value,
     salamander_settings_to_value, sudoku_settings_to_value, udphop_settings_to_value,
     validate_finalmask_layer, xdns_settings_to_value, xicmp_settings_to_value,
-    XDNS_RECORD_TYPES, XDNS_RESOLVER_KINDS, XdnsDomain, XdnsResolver, migrate_legacy_xdns_settings,
-    xdns_has_legacy_fields, xdns_record_type_name,
+    XDNS_RECORD_TYPES, XdnsDomain, XdnsResolver, migrate_legacy_xdns_settings,
+    xdns_has_legacy_fields, xdns_has_string_schema, xdns_record_type_name,
     HeaderCustomItem, HeaderCustomItemKind, HeaderCustomSequences, HeaderCustomTcpGroup,
     PacketValue, escape_packet_text, header_custom_tcp_settings_to_value,
     parse_header_custom_tcp_settings, unescape_packet_text,
@@ -481,23 +481,27 @@ const HELP_REALM_TLS: HelpText = HelpText::new(
      по умолчанию.",
 );
 
-// FinalMask `xdns` layer (DNS tunnelling, v26.9.30 schema).
+// FinalMask `xdns` layer (DNS tunnelling, v26.10.10 schema).
 const HELP_XDNS_DOMAINS: HelpText = HelpText::new(
-    "Tunnel domains, needed on both sides. name — a domain the server is authoritative for; types \
-     — DNS record types to carry data (TXT holds the most); lenLimit / labelLimit — maximum query \
-     name / label length (empty = 255 / 63; the name must leave at least 17 payload bytes); edns0 \
-     — EDNS0 UDP payload size, 0 = off, 512–4096.",
-    "Домены туннеля, нужны на обеих сторонах. name — домен, на котором сервер авторитетен; \
-     types — типы DNS-записей для передачи данных (больше всего вмещает TXT); lenLimit / \
-     labelLimit — максимальная длина имени запроса / метки (пусто — 255 / 63; имя должно \
-     оставлять не меньше 17 байт полезной нагрузки); edns0 — размер полезной нагрузки EDNS0 \
-     UDP, 0 — выключено, 512–4096.",
+    "Tunnel domains, needed on both sides. names — domains the server is authoritative for, one \
+     per line; the settings of the group apply to each. types — DNS record types to carry data \
+     (TXT holds the most); none ticked = TXT on the client, all four on the server. lenLimit / \
+     labelLimit — maximum query name / label length (empty = 255 / 63; each name must leave at \
+     least 17 payload bytes); edns0 — EDNS0 UDP payload size, 0 = off, 512–4096.",
+    "Домены туннеля, нужны на обеих сторонах. names — домены, на которых сервер авторитетен, по \
+     одному в строке; настройки группы действуют на каждый. types — типы DNS-записей для \
+     передачи данных (больше всего вмещает TXT); ничего не отмечено — TXT на клиенте, все четыре \
+     на сервере. lenLimit / labelLimit — максимальная длина имени запроса / метки (пусто — 255 / \
+     63; каждое имя должно оставлять не меньше 17 байт полезной нагрузки); edns0 — размер \
+     полезной нагрузки EDNS0 UDP, 0 — выключено, 512–4096.",
 );
 const HELP_XDNS_RESOLVERS: HelpText = HelpText::new(
-    "DNS resolvers the client sends its queries through: udp or tcp, address host:port (IPv6 in \
-     brackets). Required on the client (outbound) side, ignored by the server.",
-    "DNS-резолверы, через которые клиент отправляет запросы: udp или tcp, адрес host:port (IPv6 \
-     в квадратных скобках). Обязательно на стороне клиента (outbound), сервер игнорирует.",
+    "DNS resolvers the client sends its queries through, one address per line: \
+     [udp|tcp://]host[:port] — no scheme means udp, no port means 53, IPv6 in brackets \
+     (udp://[2606:4700::1111]:53). Required on the client (outbound) side, ignored by the server.",
+    "DNS-резолверы, через которые клиент отправляет запросы, по одному адресу в строке: \
+     [udp|tcp://]host[:port] — без схемы это udp, без порта — 53, IPv6 в квадратных скобках \
+     (udp://[2606:4700::1111]:53). Обязательно на стороне клиента (outbound), сервер игнорирует.",
 );
 const HELP_XDNS_EXTRA_POLL: HelpText = HelpText::new(
     "Additional polling queries the client keeps in flight, 0–3 (empty = 0).",
@@ -1902,9 +1906,9 @@ fn noise_item_note(item: &NoiseMaskItem) -> Option<String> {
     Some(note)
 }
 
-/// `xdns` form (Roadmap §2.6 stage 1.3, v26.9.30 schema): domains with record-type checkboxes and
-/// limits, resolvers (client side), `extraPoll`. Settings in the pre-v26.9.30 schema stay on the
-/// raw-JSON editor with an explicit "Migrate" button.
+/// `xdns` form (Roadmap §2.6 stages 1.3 / 1.6, v26.10.10 schema): domain groups (names, record-type
+/// checkboxes, limits), resolver addresses (client side), `extraPoll`. Settings in an older schema
+/// stay on the raw-JSON editor with an explicit "Migrate" button.
 fn show_xdns_settings_edit(
     ui: &mut Ui,
     direction: StreamDirection,
@@ -1913,7 +1917,7 @@ fn show_xdns_settings_edit(
     idx: usize,
 ) -> bool {
     if xdns_has_legacy_fields(settings) {
-        return show_legacy_xdns_edit(ui, settings, id_suffix, idx);
+        return show_legacy_xdns_edit(ui, direction, settings, id_suffix, idx);
     }
     let Some(mut form) = FinalMaskForm::begin(ui, settings, id_suffix, idx, parse_xdns_settings) else {
         return show_finalmask_raw_json_edit(ui, settings, id_suffix, idx);
@@ -1928,12 +1932,10 @@ fn show_xdns_settings_edit(
         for (domain_idx, domain) in draft.domains.iter_mut().enumerate() {
             ui.push_id(("domain", domain_idx), |ui| {
                 ui.group(|ui| {
+                    persistent_multiline_list_row(ui, "names (one per line, e.g. t.example.com)", &mut domain.names, "names");
                     egui::Grid::new("grid").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
-                        ui.label("name");
-                        ui.add(egui::TextEdit::singleline(&mut domain.name).hint_text("t.example.com"));
-                        ui.end_row();
                         ui.label("types");
-                        xdns_types_edit(ui, &mut domain.types);
+                        xdns_types_edit(ui, direction, &mut domain.types);
                         ui.end_row();
                         ui.label("lenLimit");
                         optional_i64_field(ui, &mut domain.len_limit, "255");
@@ -1955,7 +1957,7 @@ fn show_xdns_settings_edit(
             draft.domains.remove(domain_idx);
         }
         if ui.button("Add domain").clicked() {
-            draft.domains.push(XdnsDomain { types: vec![16], ..XdnsDomain::default() });
+            draft.domains.push(XdnsDomain::default());
         }
 
         ui.add_space(4.0);
@@ -1974,16 +1976,7 @@ fn show_xdns_settings_edit(
         for (resolver_idx, resolver) in draft.resolvers.iter_mut().enumerate() {
             ui.push_id(("resolver", resolver_idx), |ui| {
                 ui.horizontal(|ui| {
-                    egui::ComboBox::from_id_salt("type")
-                        .selected_text(if resolver.kind.is_empty() { "(type)" } else { resolver.kind.as_str() })
-                        .show_ui(ui, |ui| {
-                            for kind in XDNS_RESOLVER_KINDS {
-                                ui.selectable_value(&mut resolver.kind, (*kind).to_owned(), *kind);
-                            }
-                        });
-                    if ui.add(egui::TextEdit::singleline(&mut resolver.addr).hint_text("1.1.1.1:53")).changed() {
-                        resolver.has_settings = true;
-                    }
+                    persistent_multiline_list_row(ui, "addrs (one per line, e.g. udp://1.1.1.1:53)", &mut resolver.addrs, "addrs");
                     if ui.button("Remove").clicked() {
                         remove_resolver = Some(resolver_idx);
                     }
@@ -1994,7 +1987,7 @@ fn show_xdns_settings_edit(
             draft.resolvers.remove(resolver_idx);
         }
         if ui.button("Add resolver").clicked() {
-            draft.resolvers.push(XdnsResolver { kind: "udp".to_owned(), has_settings: true, ..XdnsResolver::default() });
+            draft.resolvers.push(XdnsResolver::default());
         }
 
         ui.add_space(4.0);
@@ -2009,8 +2002,8 @@ fn show_xdns_settings_edit(
 
 /// Record-type checkboxes (A, CNAME, TXT, AAAA). A box is ticked when any entry casts to its
 /// code (the core's `uint16` cast); unticking removes those entries, other codes are kept and
-/// shown.
-fn xdns_types_edit(ui: &mut Ui, types: &mut Vec<i64>) {
+/// shown. With none ticked, a hint names the side's default (`xdns_default_types`).
+fn xdns_types_edit(ui: &mut Ui, direction: StreamDirection, types: &mut Vec<i64>) {
     ui.horizontal(|ui| {
         for &(code, name) in XDNS_RECORD_TYPES {
             let mut on = types.iter().any(|kind| xdns_record_type_name(*kind) == Some(name));
@@ -2030,25 +2023,47 @@ fn xdns_types_edit(ui: &mut Ui, types: &mut Vec<i64>) {
         if !others.is_empty() {
             ui.colored_label(WARNING_COLOR, format!("unsupported: {}", others.join(", ")));
         }
+        if types.is_empty() {
+            let default = match direction {
+                StreamDirection::Outbound => "none = TXT (client default)",
+                StreamDirection::Inbound => "none = all four (server default)",
+            };
+            ui.label(RichText::new(default).size(11.0).color(HINT_COLOR));
+        }
     });
 }
 
-/// Pre-v26.9.30 `xdns` settings: explanation, a "Migrate" button (enabled when the conversion is
-/// unambiguous) and the raw-JSON editor.
-fn show_legacy_xdns_edit(ui: &mut Ui, settings: &mut serde_json::Value, id_suffix: &str, idx: usize) -> bool {
+/// `xdns` settings in an older schema (strings, or v26.9.30 objects): explanation, a "Migrate"
+/// button (enabled when the conversion is unambiguous) and the raw-JSON editor.
+fn show_legacy_xdns_edit(
+    ui: &mut Ui,
+    direction: StreamDirection,
+    settings: &mut serde_json::Value,
+    id_suffix: &str,
+    idx: usize,
+) -> bool {
     let mut changed = false;
-    ui.label(
-        RichText::new(
-            "Pre-v26.9.30 xdns schema (string domains / resolvers or `domain`). Xray-core v26.9.30+ \
-             reads only the object form (XTLS/Xray-core#6718) — migrate once the server runs it.",
-        )
-        .color(WARNING_COLOR),
-    );
+    let explanation = if xdns_has_string_schema(settings) {
+        "Pre-v26.9.30 xdns schema (string domains / resolvers or `domain`). Xray-core v26.9.30+ \
+         reads only objects (XTLS/Xray-core#6718), v26.10.10+ only `names` / `addrs` \
+         (XTLS/Xray-core#7090) — migrate once the server runs v26.10.10 or newer."
+    } else {
+        "v26.9.30 xdns schema (`domains[].name`, `resolvers[].type` + `settings`). Xray-core \
+         v26.10.10+ ignores these keys (XTLS/Xray-core#7090): `xray run -test` passes, but Xray \
+         fails to start with \"empty domains\" — migrate once the server runs v26.10.10 or newer."
+    };
+    ui.label(RichText::new(explanation).color(WARNING_COLOR));
     match migrate_legacy_xdns_settings(settings) {
         Ok(migrated) => {
+            let hover = match direction {
+                StreamDirection::Inbound => "Converts to domains[].names; review the result before Save.",
+                StreamDirection::Outbound => {
+                    "Converts to domains[].names and resolvers[].addrs; review the result before Save."
+                }
+            };
             if ui
-                .button("Migrate to the v26.9.30 schema")
-                .on_hover_text("Converts the strings to domains[] / resolvers[] objects; review the result before Save.")
+                .button("Migrate to the v26.10.10 schema")
+                .on_hover_text(hover)
                 .clicked()
                 && migrated != *settings
             {
@@ -2790,6 +2805,8 @@ mod finalmask_form_tests {
             ("xdns", json!({"domains": ["t.example.com", ""]})),
             ("xdns", json!({"domains": [{"name": "t.example.com", "types": [16, 65552], "edns0": 1232}],
                             "resolvers": [{"type": "UDP", "settings": {"addr": "1.1.1.1:53"}}]})),
+            ("xdns", json!({"domains": [{"names": [" t.example.com ", ""], "types": [16, 65552]}],
+                            "resolvers": [{"addrs": ["UDP://1.1.1.1:53", ""]}]})),
             ("noise", json!({"reset": 0, "noise": [{"packet": [1, 2]}]})),
             ("salamander", json!({"password": "p", "packetSize": "512-1200"})),
             ("header-custom", json!({"client": [{"rand": 4}]})),

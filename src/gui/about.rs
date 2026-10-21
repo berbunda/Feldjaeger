@@ -2,6 +2,8 @@
 
 use egui::{RichText, Ui};
 
+use crate::xray::BASELINE_XRAY_CORE;
+
 fn about_open_id() -> egui::Id {
     egui::Id::new("about_dialog_open")
 }
@@ -37,6 +39,7 @@ pub fn show(ui: &mut Ui) {
             ui.separator();
 
             ui.label(format!("Version: {}", env!("CARGO_PKG_VERSION")));
+            ui.label(format!("Developed against Xray-core: {BASELINE_XRAY_CORE}"));
             ui.label(format!("License: {}", env!("CARGO_PKG_LICENSE")));
             ui.label(format!(
                 "Platform: {} / {}",
@@ -63,8 +66,9 @@ pub fn show(ui: &mut Ui) {
             ui.horizontal(|ui| {
                 if ui.button("Copy Version Info").clicked() {
                     let text = format!(
-                        "Feldjäger {}\nLicense: {}\nPlatform: {} / {}",
+                        "Feldjäger {}\nDeveloped against Xray-core: {}\nLicense: {}\nPlatform: {} / {}",
                         env!("CARGO_PKG_VERSION"),
+                        BASELINE_XRAY_CORE,
                         env!("CARGO_PKG_LICENSE"),
                         std::env::consts::OS,
                         std::env::consts::ARCH,

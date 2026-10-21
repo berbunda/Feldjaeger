@@ -63,6 +63,7 @@ const TLS_CLIENT_KEYS: &[&str] = &[
     "cipherSuites",
     "curvePreferences",
     "disableSystemRoot",
+    "useSystemCA",
     "enableSessionResumption",
     "masterKeyLog",
     "allowInsecure",
@@ -106,6 +107,9 @@ pub struct TlsClientDraft {
     pub curve_preferences: Vec<String>,
     /// `disableSystemRoot`.
     pub disable_system_root: bool,
+    /// `useSystemCA` — trust the OS root CAs instead of Xray-core's built-in set, the default
+    /// since v26.10.10 (XTLS/Xray-core#7105); no effect with `disableSystemRoot`.
+    pub use_system_ca: bool,
     /// `enableSessionResumption`.
     pub enable_session_resumption: bool,
     /// `masterKeyLog` — path for TLS key logging (debugging).
@@ -226,6 +230,7 @@ fn parse_tls_client(tls: &Map<String, Value>) -> TlsClientDraft {
         cipher_suites: string_field(tls.get("cipherSuites")),
         curve_preferences: string_list(tls.get("curvePreferences")),
         disable_system_root: bool_field(tls.get("disableSystemRoot")),
+        use_system_ca: bool_field(tls.get("useSystemCA")),
         enable_session_resumption: bool_field(tls.get("enableSessionResumption")),
         master_key_log: string_field(tls.get("masterKeyLog")),
         allow_insecure: bool_field(tls.get("allowInsecure")),
@@ -391,6 +396,7 @@ fn tls_client_to_object(tls: &TlsClientDraft, previous: &Map<String, Value>) -> 
     insert_non_empty(&mut object, "cipherSuites", &tls.cipher_suites);
     insert_string_list(&mut object, "curvePreferences", &tls.curve_preferences, previous.get("curvePreferences"));
     insert_true(&mut object, "disableSystemRoot", tls.disable_system_root);
+    insert_true(&mut object, "useSystemCA", tls.use_system_ca);
     insert_true(&mut object, "enableSessionResumption", tls.enable_session_resumption);
     insert_non_empty(&mut object, "masterKeyLog", &tls.master_key_log);
     insert_true(&mut object, "allowInsecure", tls.allow_insecure);
@@ -499,6 +505,20 @@ mod tests {
         assert_eq!(s["tlsSettings"]["alpn"], "h2,http/1.1");
         assert_eq!(s["tlsSettings"]["certificates"][0]["usage"], "verify");
         assert_eq!(s["tlsSettings"]["future"], 1);
+    }
+
+    /// Audit v26.10.10 D: `useSystemCA` is typed, written only when true, removed when cleared.
+    #[test]
+    fn tls_use_system_ca_round_trips() {
+        let mut s = stream(json!({"security": "tls", "tlsSettings": {"serverName": "a", "useSystemCA": true}}));
+        let mut draft = parse_outbound_security(&s);
+        assert!(draft.tls.use_system_ca);
+        assert!(!draft.tls.extras.contains_key("useSystemCA"));
+        apply_outbound_security(&mut s, &draft);
+        assert_eq!(s["tlsSettings"]["useSystemCA"], true);
+        draft.tls.use_system_ca = false;
+        apply_outbound_security(&mut s, &draft);
+        assert!(s["tlsSettings"].get("useSystemCA").is_none());
     }
 
     #[test]

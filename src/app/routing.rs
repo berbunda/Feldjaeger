@@ -148,6 +148,9 @@ pub struct RoutingPageModel {
     pub change_summary: Vec<String>,
     /// Last classified save/validation error for the page.
     pub error_message: Option<String>,
+    /// Version-aware notes on `routing.script` (Lua, Xray-core v26.10.10+); filled by the
+    /// service, which knows the installed core.
+    pub script_notes: Vec<String>,
 }
 
 /// Derives the Routing page state from connection, discovery, and config state.
@@ -263,6 +266,7 @@ pub fn build_routing_page_model(
         editing,
         change_summary,
         error_message,
+        script_notes: Vec::new(),
     }
 }
 

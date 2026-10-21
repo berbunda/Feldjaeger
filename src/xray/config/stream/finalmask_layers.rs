@@ -935,12 +935,14 @@ pub fn noise_mask_settings_to_value(draft: &NoiseMaskSettings) -> Value {
 }
 
 // ─── xdns (UDP) ─────────────────────────────────────────────────────────────
-// Lives in `super::finalmask_xdns` (Roadmap §2.6 stage 1.3: v26.9.30 schema + migration).
+// Lives in `super::finalmask_xdns` (Roadmap §2.6 stages 1.3 / 1.6: v26.10.10 schema + migration).
 
 pub use super::finalmask_xdns::{
-    XDNS_DEFAULT_LABEL_LIMIT, XDNS_DEFAULT_LEN_LIMIT, XDNS_RECORD_TYPES, XDNS_RESOLVER_KINDS,
-    XdnsDomain, XdnsResolver, XdnsSettings, migrate_legacy_xdns_settings, parse_xdns_settings,
-    validate_xdns_settings, xdns_has_legacy_fields, xdns_record_type_name, xdns_settings_to_value,
+    XDNS_DEFAULT_LABEL_LIMIT, XDNS_DEFAULT_LEN_LIMIT, XDNS_DEFAULT_RESOLVER_PORT, XDNS_RECORD_TYPES,
+    XDNS_RESOLVER_KINDS, XdnsDomain, XdnsResolver, XdnsSettings, migrate_legacy_xdns_settings,
+    parse_xdns_settings, validate_xdns_resolver_addr, validate_xdns_settings, xdns_default_types,
+    xdns_has_legacy_fields, xdns_has_string_schema, xdns_has_v26_9_30_objects,
+    xdns_record_type_name, xdns_settings_to_value, xdns_uses_names_addrs,
 };
 
 // ─── xicmp (UDP) ────────────────────────────────────────────────────────────
@@ -1051,7 +1053,7 @@ mod tests {
              |s| parse_udphop_settings(s).map(|d| udphop_settings_to_value(&d))),
             ("noise", json!({"reset": null, "noise": [{"type": "", "packet": [1], "rand": "1-2"}]}),
              |s| parse_noise_mask_settings(s).map(|d| noise_mask_settings_to_value(&d))),
-            ("xdns", json!({"domain": "legacy", "domains": [{"name": " t.example.com ", "types": [16]}], "resolvers": []}),
+            ("xdns", json!({"domains": [{"names": [" t.example.com ", ""], "types": [16]}], "resolvers": [{"addrs": []}]}),
              |s| parse_xdns_settings(s).map(|d| xdns_settings_to_value(&d))),
             ("xicmp", json!({"dgram": false, "ips": []}),
              |s| parse_xicmp_settings(s).map(|d| xicmp_settings_to_value(&d))),

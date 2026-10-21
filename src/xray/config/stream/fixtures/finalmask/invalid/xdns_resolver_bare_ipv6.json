@@ -1,0 +1,1 @@
+{"udp": [{"type": "xdns", "settings": {"domains": [{"names": ["t.example.com"]}], "resolvers": [{"addrs": ["2606:4700::1111"]}]}}]}

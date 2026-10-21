@@ -16,7 +16,13 @@
 //!
 //! Note the deliberate upstream casing inconsistency: the top-level EDNS client-subnet field is
 //! `clientIp`, but the per-server override is `clientIP` (capital IP) — both are reproduced here
-//! exactly as Xray-core expects them, not "fixed" to be consistent.
+//! exactly as Xray-core expects them, not "fixed" to be consistent. (Go matches JSON keys
+//! case-insensitively and `NameServerConfig` tags it `clientIp`, so a server's `clientIp` is read
+//! too; it is written back as the documented `clientIP`.)
+//!
+//! Every `servers[]` object keeps the keys this module does not type in
+//! [`DnsServerEntry::extra`] (e.g. the `expectIPs` alias of `expectedIPs`), so a server object is
+//! never rebuilt with fewer keys than it had on disk.
 
 use serde_json::{Map, Value};
 
@@ -132,7 +138,33 @@ pub struct DnsServerEntry {
     pub serve_stale: Option<bool>,
     /// Per-server `serveExpiredTTL` override. `None` omits the key (inherit top-level).
     pub serve_expired_ttl: Option<i64>,
+    /// `id` — the server's name for a Lua DNS script (`server.ID`, Xray-core v26.10.10+,
+    /// XTLS/Xray-core#6823). `None` omits the key.
+    pub id: Option<String>,
+    /// Keys this module does not type, preserved verbatim (same idiom as
+    /// `RoutingRuleEntry::extra`).
+    pub extra: Map<String, Value>,
 }
+
+/// `servers[]` object keys typed by [`DnsServerEntry`]; everything else lands in its `extra`.
+const KNOWN_SERVER_KEYS: &[&str] = &[
+    "address",
+    "port",
+    "domains",
+    "expectedIPs",
+    "unexpectedIPs",
+    "skipFallback",
+    "finalQuery",
+    "timeoutMs",
+    "tag",
+    "clientIP",
+    "clientIp",
+    "queryStrategy",
+    "disableCache",
+    "serveStale",
+    "serveExpiredTTL",
+    "id",
+];
 
 impl DnsServerEntry {
     /// A blank entry for the GUI "Add server" action.
@@ -152,6 +184,8 @@ impl DnsServerEntry {
             disable_cache: None,
             serve_stale: None,
             serve_expired_ttl: None,
+            id: None,
+            extra: Map::new(),
         }
     }
 
@@ -171,6 +205,8 @@ impl DnsServerEntry {
             && self.disable_cache.is_none()
             && self.serve_stale.is_none()
             && self.serve_expired_ttl.is_none()
+            && self.id.is_none()
+            && self.extra.is_empty()
     }
 
     fn to_value(&self) -> Value {
@@ -179,6 +215,9 @@ impl DnsServerEntry {
         }
 
         let mut object = Map::new();
+        if let Some(id) = &self.id {
+            object.insert("id".to_owned(), Value::String(id.clone()));
+        }
         object.insert("address".to_owned(), Value::String(self.address.clone()));
         if let Some(port) = self.port {
             object.insert("port".to_owned(), Value::from(port));
@@ -230,6 +269,9 @@ impl DnsServerEntry {
                 "serveExpiredTTL".to_owned(),
                 Value::from(serve_expired_ttl),
             );
+        }
+        for (key, value) in &self.extra {
+            object.entry(key.clone()).or_insert_with(|| value.clone());
         }
         Value::Object(object)
     }
@@ -292,6 +334,10 @@ pub struct DnsSettings {
     pub use_system_hosts: bool,
     /// `tag`. `None` omits the key.
     pub tag: Option<String>,
+    /// `script` — path of a Lua DNS script on the server (Xray-core v26.10.10+,
+    /// XTLS/Xray-core#6823); see [`super::compatibility`]'s `dns_script_notes`. `None` omits the
+    /// key.
+    pub script: Option<String>,
     /// `true` when a top-level `dns` object existed in the loaded config.
     pub section_present: bool,
     /// Source file owning the `dns` section, when known.
@@ -316,6 +362,7 @@ impl DnsSettings {
             enable_parallel_query: false,
             use_system_hosts: false,
             tag: None,
+            script: None,
             section_present: false,
             source_file: None,
             warnings: Vec::new(),
@@ -355,6 +402,7 @@ pub fn dns_settings_from_section(section: Option<&SourcedSection<Value>>) -> Dns
     let enable_parallel_query = bool_field(value.get("enableParallelQuery"));
     let use_system_hosts = bool_field(value.get("useSystemHosts"));
     let tag = string_field(value.get("tag"));
+    let script = string_field(value.get("script"));
 
     let servers = parse_servers(value.get("servers"), &mut warnings);
     let hosts = parse_hosts(value.get("hosts"), &mut warnings);
@@ -372,6 +420,7 @@ pub fn dns_settings_from_section(section: Option<&SourcedSection<Value>>) -> Dns
         enable_parallel_query,
         use_system_hosts,
         tag,
+        script,
         section_present: true,
         source_file: Some(section.source_file().to_owned()),
         warnings,
@@ -412,11 +461,23 @@ fn parse_servers(value: Option<&Value>, warnings: &mut Vec<String>) -> Vec<DnsSe
                         final_query: bool_field(entry.get("finalQuery")),
                         timeout_ms: u32_field(entry.get("timeoutMs")),
                         tag: string_field(entry.get("tag")),
-                        client_ip: string_field(entry.get("clientIP")),
+                        client_ip: string_field(entry.get("clientIP"))
+                            .or_else(|| string_field(entry.get("clientIp"))),
                         query_strategy,
                         disable_cache: bool_field_optional(entry.get("disableCache")),
                         serve_stale: bool_field_optional(entry.get("serveStale")),
                         serve_expired_ttl: int_field_optional(entry.get("serveExpiredTTL")),
+                        id: string_field(entry.get("id")),
+                        extra: entry
+                            .as_object()
+                            .map(|object| {
+                                object
+                                    .iter()
+                                    .filter(|(key, _)| !KNOWN_SERVER_KEYS.contains(&key.as_str()))
+                                    .map(|(key, value)| (key.clone(), value.clone()))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     })
                 }
                 _ => {
@@ -535,6 +596,14 @@ pub fn apply_dns_settings_to_value(target: &mut Value, settings: &DnsSettings) -
             object.remove("tag");
         }
     }
+    match &settings.script {
+        Some(script) => {
+            object.insert("script".to_owned(), Value::String(script.clone()));
+        }
+        None => {
+            object.remove("script");
+        }
+    }
 
     Ok(())
 }
@@ -611,6 +680,13 @@ pub fn dns_settings_change_summary(before: &DnsSettings, after: &DnsSettings) ->
             after.tag.as_deref().unwrap_or("(none)")
         ));
     }
+    if before.script != after.script {
+        lines.push(format!(
+            "script:\n{} → {}",
+            before.script.as_deref().unwrap_or("(none)"),
+            after.script.as_deref().unwrap_or("(none)")
+        ));
+    }
     if before.servers != after.servers {
         lines.push(format!(
             "DNS servers:\n{} → {} configured (see Preview changes for full detail)",
@@ -645,6 +721,7 @@ fn bool_change_line(label: &str, before: bool, after: bool) -> String {
 /// [`std::net::IpAddr`].
 pub fn validate_dns_settings(settings: &DnsSettings) -> ConfigModifyResult<()> {
     validate_optional_control_chars(&settings.tag, "tag")?;
+    validate_optional_control_chars(&settings.script, "script")?;
     validate_optional_ip(&settings.client_ip, "clientIp")?;
     if settings.serve_expired_ttl < 0 {
         return Err(ConfigModifyError::new(
@@ -672,6 +749,7 @@ pub fn validate_dns_settings(settings: &DnsSettings) -> ConfigModifyResult<()> {
             validate_control_chars(unexpected, &format!("DNS server {position} unexpectedIPs entry"))?;
         }
         validate_optional_control_chars(&server.tag, &format!("DNS server {position} tag"))?;
+        validate_optional_control_chars(&server.id, &format!("DNS server {position} id"))?;
         validate_optional_ip(&server.client_ip, &format!("DNS server {position} clientIP"))?;
         if let Some(ttl) = server.serve_expired_ttl
             && ttl < 0
@@ -1025,6 +1103,68 @@ mod tests {
         let mut value = json!({});
         apply_dns_settings_to_value(&mut value, &settings).unwrap();
         assert_eq!(value["servers"], json!(["8.8.8.8"]));
+    }
+
+    /// Audit v26.10.10 C: `script` is read, written, removed when cleared, and listed in the
+    /// change summary.
+    #[test]
+    fn script_round_trips_and_clears() {
+        let source = json!({"script": " /etc/xray/dns.lua ", "servers": ["1.1.1.1"]});
+        let settings = dns_settings_from_section(Some(&section(source.clone())));
+        assert_eq!(settings.script.as_deref(), Some("/etc/xray/dns.lua"));
+        let mut value = source.clone();
+        apply_dns_settings_to_value(&mut value, &settings).unwrap();
+        assert_eq!(value["script"], "/etc/xray/dns.lua");
+
+        let mut cleared = settings.clone();
+        cleared.script = None;
+        apply_dns_settings_to_value(&mut value, &cleared).unwrap();
+        assert!(value.get("script").is_none());
+        let summary = dns_settings_change_summary(&settings, &cleared);
+        assert_eq!(summary, vec!["script:\n/etc/xray/dns.lua → (none)".to_owned()]);
+
+        let mut bad = settings;
+        bad.script = Some("a\nb".to_owned());
+        assert!(validate_dns_settings(&bad).is_err());
+    }
+
+    /// Audit v26.10.10 B: a server object keeps `id` (typed) and every key Feldjäger does not
+    /// type — before, the object was rebuilt from typed fields only and lost them on Save.
+    #[test]
+    fn server_object_keeps_id_and_unknown_keys() {
+        let section = section(
+            json!({"servers": [
+                {"id": "cf", "address": "1.1.1.1", "expectIPs": ["geoip:us"], "futureKey": {"a": 1}},
+                {"address": "8.8.8.8", "clientIp": "1.2.3.4"},
+                {"address": "9.9.9.9", "futureKey": true}
+            ]}),
+        );
+        let settings = dns_settings_from_section(Some(&section));
+        assert_eq!(settings.servers[0].id.as_deref(), Some("cf"));
+        assert_eq!(settings.servers[0].extra.len(), 2);
+        assert_eq!(settings.servers[1].client_ip.as_deref(), Some("1.2.3.4"));
+        assert!(settings.servers[1].extra.is_empty());
+
+        let mut value = section.value().clone();
+        apply_dns_settings_to_value(&mut value, &settings).unwrap();
+        assert_eq!(
+            value["servers"],
+            json!([
+                {"id": "cf", "address": "1.1.1.1", "expectIPs": ["geoip:us"], "futureKey": {"a": 1}},
+                {"address": "8.8.8.8", "clientIP": "1.2.3.4"},
+                // An unknown key keeps the object form (no collapse to a bare string).
+                {"address": "9.9.9.9", "futureKey": true}
+            ])
+        );
+
+        let mut blank_id = settings.clone();
+        blank_id.servers[0].id = Some("bad\nid".to_owned());
+        assert!(validate_dns_settings(&blank_id).is_err());
+        let mut only_id = DnsSettings::defaults();
+        only_id.servers.push(DnsServerEntry { address: "1.1.1.1".to_owned(), id: Some("a".to_owned()), ..DnsServerEntry::blank() });
+        let mut value = json!({});
+        apply_dns_settings_to_value(&mut value, &only_id).unwrap();
+        assert_eq!(value["servers"], json!([{"id": "a", "address": "1.1.1.1"}]));
     }
 
     #[test]

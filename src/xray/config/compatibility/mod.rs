@@ -10,12 +10,14 @@
 //! from that release on (unknown version = current core).
 
 mod core_version;
+mod lua_script;
 mod matrix;
 mod open_proxy;
 mod plaintext_outbound;
 mod warnings;
 
-pub use core_version::{CORE_FEATURES, CoreFeature, XrayCoreVersion};
+pub use core_version::{BASELINE_XRAY_CORE, CORE_FEATURES, CoreFeature, XrayCoreVersion};
+pub use lua_script::{dns_script_notes, routing_script_notes};
 pub use warnings::{
     CompatibilityWarning, CompatibilityWarningId, WarningSeverity, inbound_warnings,
     is_netip_addr, outbound_warnings, with_warning_suffix,

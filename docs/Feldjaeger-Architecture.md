@@ -10352,3 +10352,282 @@ pass, level, email}`). Документация (`config/outbounds/socks.md`, Co
 плоский `address` побеждает; 8 блокеров), `warnings` — 1, `modify_tests` — 1 (Add для Tor → Edit с
 конвертацией → Duplicate). Итог: **1439 passed / 0 failed**, clippy lib 65 (без изменений). GUI в
 запущенном приложении не проверялся.
+
+# 130	Аудит дрейфа: Xray-core v26.10.10 (Roadmap §4.5) (документация, без изменения версии)
+
+## 130.1	Объём
+
+- Релиз: https://github.com/XTLS/Xray-core/compare/v26.9.30...v26.10.10 — 23 коммита (22 PR и
+  коммит релиза 701af60), 97 файлов, из них 5 в `infra/conf` (`dns.go`, `router.go`,
+  `transport_finalmask.go`, `transport_method.go`, `transport_security.go`).
+- Локальное ядро для проверок: `xray-bin/xray.exe` 26.10.10 (701af60, go1.27.2 windows/amd64).
+
+Метод тот же, что в §106: diff `infra/conf/*.go` и `.proto`, затем код самих PR; для каждого
+изменения — поиск по коду Feldjäger. Данные получены через `gh api` 2026-10-16. Документация
+(Context7 `/xtls/xray-docs-next`) уже описывает новую схему `xdns`, но ещё не описывает Lua
+`script` и `useSystemCA`.
+
+Проверки на `xray.exe` 26.10.10 (`run -test` и короткий `run`):
+
+| Конфиг | `run -test` | Запуск |
+|--------|-------------|--------|
+| xdns в схеме v26.9.30 (`domains[].name`) | `Configuration OK` | `xdns: empty domains` — `name` молча игнорируется |
+| xdns `resolvers[].addrs: ["doh://…"]` | `invalid protocol` | — |
+| xdns `addrs: ["2606:4700::1111"]` (IPv6 без скобок) | `Configuration OK` | `url.Parse` даёт host `2606:4700:` и port `1111` |
+| xdns `types: [15]` | `Configuration OK` | ошибка `NewDomain` в конструкторе |
+| `routing.script` на несуществующий файл | `failed to resolve routing script` | — |
+| `routing.script` с синтаксической ошибкой Lua | `Configuration OK` | `failed to initialize routing script … parse error` |
+| `tlsSettings.useSystemCA`, `dns.servers[].id` | `Configuration OK` | — |
+
+## 130.2	Требует работы
+
+| # | PR | Изменение в ядре | Что затрагивает в Feldjäger |
+|---|----|------------------|------------------------------|
+| A | #7090, #7095 | xdns: `domains[].name` → `names[]` (лимиты и типы общие для всех имён объекта); `resolvers[].type` + `settings.addr` → `addrs[]` — строки `[udp\|tcp://]host[:port]` (без схемы — udp, без порта — 53); `types` необязателен (клиент — `[16]`, сервер — `[1, 5, 16, 28]`); `Build()` проверяет имя со всеми четырьмя типами, а заданные `types` — только конструктор | `stream/finalmask_xdns.rs` (модель, проверки, миграция), `gui/pages/stream_finalmask.rs`, `compatibility/{core_version,warnings}.rs`, фикстуры. Открытый пункт FinalMask 1.6. Схема v26.9.30 на новом ядре проходит `run -test`, но сервер не стартует |
+| B | #6823 (часть) | `dns.servers[].id` — имя сервера для Lua (`server.ID`) | `DnsServerEntry` (`dns_settings.rs`) не хранит неизвестные ключи: объект сервера собирается заново, и `id` (как и любой будущий ключ) теряется при Save страницы DNS |
+| C | #6823 | `routing.script` и `dns.script` — путь к Lua-файлу. Если `routing.script` задан, `PickRoute` вызывает только `HandleRoute`, а `rules` не применяются (балансировщики доступны скрипту); если `dns.script` задан, выбор серверов делает `HandleDNSQuery` (`hosts` и кэш действуют до него). Относительный путь ищется в `XRAY_LOCATION_CONFDIR`, `XRAY_LOCATION_CONFIG`, cwd, каталоге xray. Файл должен существовать при `Build()`, компиляция — только при запуске | Модели `routing_settings.rs` / `dns_settings.rs` сохраняют ключ (объект меняется на месте), но не показывают его; страницы Routing/DNS не сообщают, что правила или серверы не действуют |
+| D | #7105 | TLS-клиент по умолчанию доверяет встроенному набору корневых CA (`x509roots/fallback`), а не хранилищу ОС; `tlsSettings.useSystemCA: true` возвращает прежнее поведение (на Windows — проверку средствами ОС) | `outbound_stream/security.rs` (`TLS_CLIENT_KEYS`), `gui/pages/outbound_stream.rs`: ключ сохраняется в extras, но не редактируется; outbound к серверу с частным CA, установленным в систему, перестанет подключаться |
+
+## 130.3	Не касается
+
+| PR | Причина |
+|----|---------|
+| #6878, aa7aa9a | MASQUE client: `masqueSettings.warp` (`privateKey`, `publicKey`, `address`). MASQUE по-прежнему ждёт документации (аудит v26.9.30 E); `masqueSettings` сохраняется в extras. Страница WARP — WireGuard через `wgcf-cli`, к MASQUE не относится |
+| #6246 | ECH DoH h2c и `verifyPeerCertByName: "fromMitm"` — `echConfigList` в Feldjäger свободная строка без проверки формата |
+| #7101 | Socks inbound: статистика UDP Associate — runtime |
+| #6822, #6871 | Mux client: гонки — runtime |
+| #6877 | gRPC client: повторное подключение — runtime |
+| #7089 | xdns: deadlock и утечки сокетов — runtime |
+| #7091 | DNS pubsub — runtime |
+| #6882 | QUIC sniffer — runtime |
+| #6874, #6883, #7092 | TUN на Windows / iOS — runtime |
+| #6855, #6856, #6881 | WireGuard inbound / kernelTun — WireGuard retired |
+| #7107 | Hysteria client: закрытое соединение — runtime |
+| #6863 | Тесты |
+| 701af60 | Коммит релиза v26.10.10 |
+
+Итого 23 коммита: 5 — в 130.2 (#7090 и #7095 — пункт A, #6823 — пункты B и C), 18 — в 130.3.
+
+## 130.4	Следствия
+
+Пункты A–D заведены в Roadmap §4.5 как дочерние пункты аудита, A — это FinalMask 1.6. Каждый —
+код со своей версией и разделом Architecture. Изменений кода в этом разделе нет.
+
+# 131	FinalMask `xdns`: схема v26.10.10 (Roadmap §2.6 этап 1.6, аудит v26.10.10 A) (0.5.65-0)
+
+## 131.1	Ядро
+
+`infra/conf/transport_finalmask.go` v26.10.10 (XTLS/Xray-core#7090, #7095):
+
+- `XDNSDomain{Names []string, LenLimit, LabelLimit, Types []int32, Edns0}` — `Build()` разворачивает
+  каждое имя в отдельный `DomainProto` с общими лимитами, типами и `edns0` и проверяет имя через
+  `NewDomain` **со всеми четырьмя типами**; заданные `types` проверяют только конструкторы.
+- `XDNSResolver{Addrs []string}` — каждая строка: без `://` к ней добавляется `udp://`, затем
+  `url.Parse`; схема только `udp` / `tcp` («invalid protocol»), порт по умолчанию 53,
+  `net.JoinHostPort(u.Hostname(), port)`.
+- `NewServer` / `NewClient`: «empty domains» / «empty resolvers»; пустые `types` — `[1, 5, 16, 28]`
+  на сервере и `[16]` на клиенте.
+- Ключи v26.9.30 (`name`, `type`, `settings`) Go молча пропускает. Проверено на `xray.exe` 26.10.10:
+  inbound в схеме v26.9.30 проходит `run -test`, а `run` падает целиком — `xdns: empty domains`.
+  Голый IPv6 в `addrs` тоже проходит `run -test`: `url.Parse` режет его по последнему двоеточию.
+
+## 131.2	Модель и проверки (`stream/finalmask_xdns.rs`)
+
+- `XdnsDomain.names: Vec<String>` вместо `name`; `XdnsResolver { addrs, extras }` вместо
+  `kind` / `addr` / `has_settings` / `settings_extras`. `parse_xdns_settings` возвращает `None` для
+  `domain`, `name`, `type`, `settings` — такие слои уходят в legacy-ветку, а не теряют ключи.
+- `validate_xdns_domain`: `names` не пуст, каждое имя — `validate_xdns_name` (прежние проверки
+  `NewDomain`: `..`, длина, `lenLimit`, ёмкость ≥ 17 байт); пустые `types` разрешены.
+- `validate_xdns_resolver_addr`: схема `udp` / `tcp` без учёта регистра, непустой host, порт 1–65535
+  или пусто (= 53), IPv6 только в скобках, без пути, запроса и user-части (ядро их молча
+  отбрасывает). Клиенту нужен хотя бы один непустой адрес (объект без адресов не считается).
+- `xdns_default_types(direction)`, `XDNS_DEFAULT_RESOLVER_PORT`; `XDNS_RESOLVER_KINDS` теперь
+  означает схемы адреса.
+- Детекция поколений: `xdns_has_string_schema` (строки, `domain`), `xdns_has_v26_9_30_objects`
+  (`name`, `type`, `settings`), `xdns_uses_names_addrs`; `xdns_has_legacy_fields` = первые две.
+- `migrate_legacy_xdns_settings` — две ступени: строки → объекты v26.9.30 (прежний код), затем
+  объекты → v26.10.10: `name` уходит первым элементом в `names` (объекты доменов не сливаются —
+  лимиты могут различаться), `{type, settings: {addr}}` → `{addrs: ["type://addr"]}` с сохранением
+  прочих ключей резолвера. В отличие от плана, резолверы не сливаются в один объект: так
+  преобразование без потерь. Лишний ключ в `settings`, неизвестный `type`, нестроковое `name` —
+  ошибка без изменений. Результат — неподвижная точка.
+
+## 131.3	Совместимость (`compatibility/`)
+
+- `CoreFeature::XdnsNamesAddrsSchema` (v26.10.10, PR 7090).
+- `finalmask_warnings`: строки при ядре ≥ v26.9.30 — `XdnsLegacySchema` (текст указывает на миграцию
+  в схему v26.10.10); объекты v26.9.30 при ядре < v26.9.30 — `RequiresNewerCore(XdnsObjectSchema)`,
+  при ядре ≥ v26.10.10 или неизвестном — новое `XdnsV26930Schema` (Danger: на inbound Xray не
+  стартует); ровно v26.9.30 — без предупреждений; `names` / `addrs` при ядре < v26.10.10 —
+  `RequiresNewerCore(XdnsNamesAddrsSchema)`.
+
+## 131.4	GUI (`gui/pages/stream_finalmask.rs`)
+
+- Группа домена: `names` — многострочный список (`persistent_multiline_list_row`), чекбоксы
+  `types` с подсказкой умолчания по стороне, лимиты, `edns0`. «Add domain» создаёт пустую группу.
+- Резолвер: многострочный список `addrs` вместо ComboBox `type` + поля `addr`.
+- `show_legacy_xdns_edit` различает строковую схему и v26.9.30, кнопка — «Migrate to the v26.10.10
+  schema». Справка `HELP_XDNS_DOMAINS` / `HELP_XDNS_RESOLVERS` EN+RU переписана.
+
+## 131.5	Фикстуры и проверка
+
+- `valid/xdns_{server,client}.json`, `invalid/xdns_extra_poll.json` — новая схема; новые
+  `invalid/xdns_resolver_scheme` (Build), `xdns_resolver_bare_ipv6`, `xdns_no_names`,
+  `xdns_record_type` (Runtime: `run -test` их пропускает). Все случаи — `XdnsNamesAddrsSchema`.
+- Паритет с `xray run -test` 26.10.10 — без расхождений. Живая пара VLESS / mKCP / xdns на
+  127.0.0.1 (сервер — `names` без `types`; клиент — `addrs: ["udp://127.0.0.1:45353"]`, `edns0`
+  1232 на обеих сторонах): `curl` через SOCKS → 200. Без `edns0` сервер пишет «err size 900» —
+  размер ответа ограничен 512 байтами; это настройка, а не ошибка схемы.
+
+## 131.6	Итог
+
+Тесты: 1439 → **1442 passed / 0 failed** (новые: адреса резолверов, умолчания `types`, миграция
+v26.9.30; переписаны проверки домена, формы, предупреждений), clippy lib 65 (без изменений). GUI в
+запущенном приложении не проверялся.
+
+# 132	Багфикс: DNS-сервер терял неизвестные ключи; `servers[].id` (Roadmap §4.5, аудит v26.10.10 B) (0.5.65-1)
+
+## 132.1	Проблема
+
+`DnsServerEntry` (`dns_settings.rs`) хранил только типизированные поля, а `to_value` собирал объект
+сервера заново. Любой другой ключ терялся при первом Save страницы DNS. Это нарушало правило «Unknown
+config sections must be preserved». В v26.10.10 это касается нового `id` (XTLS/Xray-core#6823 —
+имя сервера для Lua-скрипта DNS). То же уже было с ключами, которые ядро читает, а Feldjäger не
+типизирует: `expectIPs` (синоним `expectedIPs`) и `clientIp`. `NameServerConfig` помечает его
+тегом `clientIp`, а документация пишет `clientIP`; Go сопоставляет ключи без учёта регистра.
+
+## 132.2	Решение
+
+- `DnsServerEntry.id: Option<String>` (пишется первым ключом объекта, проверка на управляющие
+  символы) и `extra: Map<String, Value>` — всё вне `KNOWN_SERVER_KEYS`, по идиоме
+  `RoutingRuleEntry::extra`. `to_value` дописывает `extra`, не перезаписывая типизированные ключи.
+- `is_shorthand_eligible` учитывает `id` и `extra`: `{"address": "9.9.9.9", "futureKey": true}` не
+  схлопывается в строку `"9.9.9.9"`.
+- `clientIP` читается с запасным вариантом `clientIp` и пишется как документированный `clientIP`.
+- GUI (`gui/pages/dns.rs`): поле `id` в форме сервера и строка в просмотре, справка
+  `HELP_SERVER_ID` EN+RU (без `dns.script` ни на что не влияет; v26.10.10+); строка
+  «other keys … (kept as is)», когда у сервера есть нетипизированные ключи.
+- Предупреждение о версии ядра для `id` — в §133 вместе с `script` (одна `CoreFeature`).
+
+## 132.3	Итог
+
+Тесты: +1 (`server_object_keeps_id_and_unknown_keys`: `id`, `expectIPs`, неизвестный ключ,
+`clientIp` → `clientIP`, запрет схлопывания, отказ на управляющем символе в `id`). Итог: **1443
+passed / 0 failed**, clippy lib 65. GUI в запущенном приложении не проверялся.
+
+# 133	Lua `script` в `routing` и `dns` (Roadmap §4.5, аудит v26.10.10 C) (0.5.66-0)
+
+## 133.1	Ядро
+
+XTLS/Xray-core#6823 (v26.10.10): `RouterConfig.Script` и `DNSConfig.Script` — путь к Lua-файлу,
+`NameServerConfig.ID` — имя сервера для скрипта.
+
+- `Build()` вызывает `platform.ResolveLuaFile`: абсолютный путь берётся как есть, относительный
+  ищется в `XRAY_LOCATION_CONFDIR`, `XRAY_LOCATION_CONFIG`, рабочем каталоге и каталоге xray. Если
+  файла нет, `run -test` падает («failed to resolve routing script»).
+- Скрипт компилируется в `Start()`, поэтому синтаксическая ошибка Lua проходит `run -test`, а `run`
+  останавливается с «failed to initialize routing script … parse error» (проверено на `xray.exe`
+  26.10.10).
+- `Router.PickRoute` при скрипте вызывает только `HandleRoute` — `rules` не применяются;
+  балансировщики доступны через `xray.router.PickOutbound`. `DNS.LookupIP` после `hosts` и кэша
+  вызывает `HandleDNSQuery`; серверы доступны скрипту через `xray.dns` (`server.ID`).
+- Живая проверка: правило `inboundTag → blackhole` — `curl` 000; то же со скриптом, возвращающим
+  `direct`, — 200.
+
+## 133.2	Модели
+
+- `RoutingSettings.script` и `DnsSettings.script` (`Option<String>`, обрезка пробелов, пусто =
+  ключа нет). `apply_*` пишет или удаляет ключ, остальные ключи объекта не трогаются. Сводка
+  изменений показывает строку `script`, проверка — только управляющие символы (`\n`, `\r`, `\0`),
+  как у прочих строк этих страниц.
+- `CoreFeature::LuaScript` (v26.10.10, PR 6823) — и для `script`, и для `servers[].id` (§132).
+
+## 133.3	Заметки по версии ядра (`compatibility/lua_script.rs`)
+
+`routing_script_notes` / `dns_script_notes` — заметки, а не блокировка Save (пользователь может
+сначала обновить ядро или загрузить файл):
+
+- ядро ≥ v26.10.10 или неизвестно: что делает скрипт — «rules below are not applied» с оговоркой,
+  что теги из скрипта Feldjäger не видит; для DNS — «servers are queried only when the script
+  calls them»;
+- ядро < v26.10.10: «needs Xray-core v26.10.10 … ignores it», правила / серверы действуют как
+  обычно;
+- путь не начинается с `/`: где Xray будет его искать (у systemd-юнита рабочий каталог `/`);
+- `servers[].id` без `dns.script` — «takes effect only with dns.script»; на старом ядре — «needs
+  v26.10.10».
+
+`DnsPageModel.script_notes` / `RoutingPageModel.script_notes` заполняет `ApplicationService`
+(он знает версию ядра из Discovery); построители моделей оставляют их пустыми.
+
+## 133.4	Ссылки на теги
+
+`tag_refs::routing_script_reference` — строка `routing.script "…" (Lua — not inspected)`. Она
+добавляется только в предпросмотр переименования outbound (`outbound_tag_reference_preview`):
+переименование не блокируется, а диалог показывает, что скрипт может ссылаться на старый тег.
+Удаление outbound по-прежнему блокируют только ссылки из `rules` / `balancers`: блокировать каждое
+удаление из-за скрипта, который Feldjäger не читает, было бы слишком жёстко.
+
+## 133.5	GUI
+
+- DNS: поле `script` в общих настройках, строка в просмотре; Routing: поле `script` под
+  `domainStrategy`. Справка `HELP_SCRIPT` EN+RU на обеих страницах (сигнатура функции, что
+  перестаёт действовать, абсолютный путь, `run -test` не компилирует Lua).
+- Заметки выводятся янтарным под предупреждениями страницы в обоих режимах.
+- Редактора содержимого `.lua` нет: файл кладётся на сервер отдельно.
+
+## 133.6	Итог
+
+Тесты (+5): `lua_script` — 2 (версия ядра, относительный путь, `id` без скрипта),
+`dns_settings` / `routing_settings` — круговой Save, удаление, сводка, проверка, `tag_refs` — 1.
+Итог: **1448 passed / 0 failed**, clippy lib 65. GUI в запущенном приложении не проверялся.
+
+# 134	Outbound TLS `useSystemCA` (Roadmap §4.5, аудит v26.10.10 D) (0.5.67-0)
+
+## 134.1	Ядро
+
+XTLS/Xray-core#7105 (v26.10.10), `transport/internet/tls`:
+
+- `loadCA(useSystem)`: по умолчанию — встроенный набор корневых CA (`golang.org/x/crypto/x509roots/
+  fallback`, корни Mozilla), с `useSystemCA: true` — `x509.SystemCertPool()` (при ошибке — тот же
+  встроенный набор). На Windows `useSystemCA` без `certificates` оставляет `RootCAs = nil` — проверку
+  делает ОС.
+- `disableSystemRoot: true` по-прежнему означает только сертификаты `certificates` с `usage: verify`
+  (`loadSelfCertPool`), `useSystemCA` тогда не действует.
+- `certificates` при обычном режиме добавляются к выбранному набору (раньше — всегда к пулу ОС).
+- Следствие для серверов Feldjäger: outbound к серверу с сертификатом частного CA, который был
+  установлен в хранилище ОС, после обновления до v26.10.10 перестаёт проходить проверку, пока не
+  включён `useSystemCA` (или CA не указан в `certificates`). `run -test` принимает ключ (§130.1).
+
+## 134.2	Изменения
+
+- `TlsClientDraft.use_system_ca` (`outbound_stream/security.rs`), ключ в `TLS_CLIENT_KEYS` (раньше
+  он сохранялся в `extras`), пишется только `true` — как `disableSystemRoot`.
+- `CoreFeature::TlsUseSystemCa` (v26.10.10, PR 7105); `outbound_warnings` — `RequiresNewerCore` для
+  `tlsSettings.useSystemCA: true` при ядре < v26.10.10 (старое ядро ключа не знает и так доверяет ОС).
+- GUI (`gui/pages/outbound_stream.rs`): флажок `useSystemCA` под `disableSystemRoot`, неактивен,
+  пока включён `disableSystemRoot` (если ключ уже стоит, его можно снять). Справка
+  `HELP_TLS_USE_SYSTEM_CA` EN+RU; `HELP_TLS_DISABLE_SYSTEM_ROOT` уточнена: «ни встроенному набору,
+  ни хранилищу ОС — только `certificates` (usage verify)».
+- Inbound TLS не меняется: пул корневых CA серверу для проверки не нужен.
+
+## 134.3	Итог
+
+Тесты (+2): круговой Save `useSystemCA`, предупреждение по версии ядра. Итог: **1450 passed / 0
+failed**, clippy lib 65. Живой проверки с частным CA в хранилище ОС не было — это потребовало бы
+менять хранилище сертификатов машины. GUI в запущенном приложении не проверялся.
+
+# 135	About: версия Xray-core, на основе которой разрабатывается Feldjäger (Roadmap §4.4) (0.5.68-0)
+
+## 135.1	Изменения
+
+- `BASELINE_XRAY_CORE: XrayCoreVersion = v26.10.10` (`xray/config/compatibility/core_version.rs`),
+  реэкспорт через `compatibility` → `config` → `xray`. Одна константа — меняется при переходе на
+  новый релиз ядра; формат вывода — `Display` типа (`v26.10.10`).
+- `gui/about.rs`: строка «Developed against Xray-core: v26.10.10» (на этом ядре проверены §131–134) под «Version»; та же строка в тексте
+  «Copy Version Info».
+- Константа не влияет на предупреждения совместимости: они по-прежнему сверяются с версией ядра,
+  которую прочитал Discovery (§ `CORE_FEATURES`).
+
+## 135.2	Итог
+
+Тесты: **1450 passed / 0 failed**. GUI в запущенном приложении не проверялся.

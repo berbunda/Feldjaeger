@@ -137,6 +137,26 @@ const HELP_SERVER_TAG: HelpText = HelpText::new(
     "Inbound tag of this server's queries for routing rules; empty = the global tag.",
     "Тег inbound для запросов этого сервера в правилах маршрутизации; пусто — глобальный tag.",
 );
+const HELP_SCRIPT: HelpText = HelpText::new(
+    "Path of a Lua script on the server that answers DNS lookups (Xray-core v26.10.10+). It must \
+     define HandleDNSQuery(domain, ipv4, ipv6, fake) returning (ips, ttl, err); it reaches the \
+     servers below through the xray.dns module (server.ID = their id). With a script the servers \
+     are not queried on their own; hosts and the cache still answer first. Use an absolute path: \
+     the file must exist when the config loads, and Lua errors show only when Xray starts \
+     (xray run -test does not compile the script). Empty = no script.",
+    "Путь к Lua-скрипту на сервере, который отвечает на DNS-запросы (Xray-core v26.10.10+). \
+     Скрипт должен определить HandleDNSQuery(domain, ipv4, ipv6, fake), возвращающую (ips, ttl, \
+     err); к серверам ниже он обращается через модуль xray.dns (server.ID — их id). Со скриптом \
+     серверы сами не опрашиваются; hosts и кэш по-прежнему отвечают первыми. Указывайте \
+     абсолютный путь: файл должен существовать при загрузке конфигурации, а ошибки Lua видны \
+     только при запуске Xray (xray run -test скрипт не компилирует). Пусто — без скрипта.",
+);
+const HELP_SERVER_ID: HelpText = HelpText::new(
+    "Name of this server for a Lua DNS script (dns.script), which sees it as server.ID; \
+     Xray-core v26.10.10+. Without a script it has no effect. Empty = no id.",
+    "Имя этого сервера для Lua-скрипта DNS (dns.script), который видит его как server.ID; \
+     Xray-core v26.10.10+. Без скрипта ни на что не влияет. Пусто — без id.",
+);
 const HELP_SERVER_CLIENT_IP: HelpText = HelpText::new(
     "EDNS Client Subnet IP for this server; empty = the global clientIp.",
     "IP для EDNS Client Subnet у этого сервера; пусто — глобальный clientIp.",
@@ -318,6 +338,9 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
             for warning in &model.settings.warnings {
                 ui.label(RichText::new(warning.clone()).size(14.0).color(WARN_COLOR));
             }
+            for note in &model.script_notes {
+                ui.label(RichText::new(note.clone()).size(13.0).color(WARN_COLOR));
+            }
             if let Some(error) = &model.error_message {
                 ui.label(RichText::new(error.clone()).size(14.0).color(ERROR_COLOR));
             }
@@ -427,6 +450,7 @@ fn show_view(ui: &mut Ui, settings: &DnsSettings) {
                 bool_str(settings.enable_parallel_query),
             );
             view_row(ui, "useSystemHosts", bool_str(settings.use_system_hosts));
+            view_row(ui, "script", settings.script.as_deref().unwrap_or("(none)"));
             view_row(ui, "tag", settings.tag.as_deref().unwrap_or("(none)"));
         });
 
@@ -507,6 +531,11 @@ fn show_server_view_row(ui: &mut Ui, index: usize, server: &DnsServerEntry) {
                             .unwrap_or_else(|| "(default 4000)".to_owned()),
                     );
                     view_row(ui, "tag", server.tag.as_deref().unwrap_or("(none)"));
+                    view_row(ui, "id", server.id.as_deref().unwrap_or("(none)"));
+                    if !server.extra.is_empty() {
+                        let keys: Vec<&str> = server.extra.keys().map(String::as_str).collect();
+                        view_row(ui, "other keys", &format!("{} (kept as is)", keys.join(", ")));
+                    }
                     view_row(ui, "clientIP", server.client_ip.as_deref().unwrap_or("(none)"));
                     view_row(
                         ui,
@@ -568,6 +597,7 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
     ui.add_space(4.0);
 
     super::optional_text_row(ui, "clientIp", HELP_CLIENT_IP, &mut draft.client_ip, "1.2.3.4", 220.0, "dns_client_ip");
+    super::optional_text_row(ui, "script", HELP_SCRIPT, &mut draft.script, "/usr/local/etc/xray/dns.lua", 320.0, "dns_script");
 
     ui.horizontal(|ui| {
         field_label(ui, "queryStrategy", HELP_QUERY_STRATEGY);
@@ -691,6 +721,7 @@ fn show_server_edit_form(
     help_checkbox(ui, "finalQuery", HELP_SERVER_FINAL_QUERY, &mut server.final_query);
     optional_u32_row(ui, "timeoutMs", HELP_SERVER_TIMEOUT, &mut server.timeout_ms, ("dns_server_timeout", index));
     super::optional_text_row(ui, "tag", HELP_SERVER_TAG, &mut server.tag, "server-tag", 220.0, ("dns_server_tag", index));
+    super::optional_text_row(ui, "id", HELP_SERVER_ID, &mut server.id, "cloudflare", 220.0, ("dns_server_id", index));
     super::optional_text_row(ui, "clientIP", HELP_SERVER_CLIENT_IP, &mut server.client_ip, "1.2.3.4", 220.0, ("dns_server_client_ip", index));
 
     ui.horizontal(|ui| {

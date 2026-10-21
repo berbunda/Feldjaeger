@@ -1071,7 +1071,7 @@ impl ApplicationService {
 
     /// Read-only / edit model for the DNS page.
     pub fn dns_page_model(&self) -> DnsPageModel {
-        build_dns_page_model(
+        let mut model = build_dns_page_model(
             self.ssh_status,
             &self.discovery,
             &self.loaded_config,
@@ -1079,7 +1079,9 @@ impl ApplicationService {
             self.is_dns_settings_mutation_busy(),
             self.dns_settings_error.clone(),
             self.dns_settings_saved_flash,
-        )
+        );
+        model.script_notes = crate::xray::dns_script_notes(&model.settings, self.xray_core_version());
+        model
     }
 
     /// `true` while a dns-settings save is in flight.
@@ -3760,7 +3762,7 @@ impl ApplicationService {
 
     /// Builds the Routing page model for the GUI (browsing + edit, Roadmap §2.1:48).
     pub fn routing_page_model(&self) -> RoutingPageModel {
-        build_routing_page_model(
+        let mut model = build_routing_page_model(
             self.ssh_status,
             &self.discovery,
             &self.loaded_config,
@@ -3769,7 +3771,9 @@ impl ApplicationService {
             self.is_routing_settings_mutation_busy(),
             self.routing_settings_error.clone(),
             self.routing_settings_saved_flash,
-        )
+        );
+        model.script_notes = crate::xray::routing_script_notes(&model.routing_settings, self.xray_core_version());
+        model
     }
 
     /// Builds the Policy page model for the GUI (browsing + edit, Roadmap §2.1:49).
@@ -5482,7 +5486,9 @@ impl ApplicationService {
         else {
             return Vec::new();
         };
-        crate::xray::outbound_tag_references(editable.sections(), tag)
+        let mut references = crate::xray::outbound_tag_references(editable.sections(), tag);
+        references.extend(crate::xray::routing_script_reference(editable.sections()));
+        references
     }
 
     /// Renames an outbound's tag by merged index (any protocol; Roadmap §2.4:99).

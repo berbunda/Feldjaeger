@@ -45,6 +45,9 @@ impl fmt::Display for XrayCoreVersion {
     }
 }
 
+/// The Xray-core release Feldjäger is developed and verified against (shown in the About dialog).
+pub const BASELINE_XRAY_CORE: XrayCoreVersion = XrayCoreVersion::new(26, 10, 10);
+
 /// A config feature (or a schema change) that appeared in a specific Xray-core release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CoreFeature {
@@ -92,6 +95,14 @@ pub enum CoreFeature {
     /// mode of `remoteDNS`: every entry must be an IP address, anything else panics at start —
     /// XTLS/Xray-core#6771.
     WireGuardRemoteDnsIpOnly,
+    /// `xdns` `domains[].names` / `resolvers[].addrs` replacing the v26.9.30 `name` / `type` +
+    /// `settings.addr`, and default `types` — XTLS/Xray-core#7090.
+    XdnsNamesAddrsSchema,
+    /// Lua `script` in `routing` and `dns`, and `dns.servers[].id` for it — XTLS/Xray-core#6823.
+    LuaScript,
+    /// TLS client `tlsSettings.useSystemCA`: from this release the client trusts Xray-core's
+    /// built-in root CAs by default instead of the OS store — XTLS/Xray-core#7105.
+    TlsUseSystemCa,
 }
 
 /// The table of Roadmap §2.6 stage 0.7, oldest first.
@@ -110,6 +121,9 @@ pub const CORE_FEATURES: &[CoreFeature] = &[
     CoreFeature::XdnsObjectSchema,
     CoreFeature::TunAutoSystemDnsAndLeakBlock,
     CoreFeature::WireGuardRemoteDnsIpOnly,
+    CoreFeature::XdnsNamesAddrsSchema,
+    CoreFeature::LuaScript,
+    CoreFeature::TlsUseSystemCa,
 ];
 
 impl CoreFeature {
@@ -130,6 +144,9 @@ impl CoreFeature {
             Self::XdnsObjectSchema => XrayCoreVersion::new(26, 9, 30),
             Self::TunAutoSystemDnsAndLeakBlock => XrayCoreVersion::new(26, 9, 30),
             Self::WireGuardRemoteDnsIpOnly => XrayCoreVersion::new(26, 9, 30),
+            Self::XdnsNamesAddrsSchema => XrayCoreVersion::new(26, 10, 10),
+            Self::LuaScript => XrayCoreVersion::new(26, 10, 10),
+            Self::TlsUseSystemCa => XrayCoreVersion::new(26, 10, 10),
         }
     }
 
@@ -150,6 +167,9 @@ impl CoreFeature {
             Self::XdnsObjectSchema => 6718,
             Self::TunAutoSystemDnsAndLeakBlock => 6853,
             Self::WireGuardRemoteDnsIpOnly => 6771,
+            Self::XdnsNamesAddrsSchema => 7090,
+            Self::LuaScript => 6823,
+            Self::TlsUseSystemCa => 7105,
         }
     }
 
@@ -170,6 +190,9 @@ impl CoreFeature {
             Self::XdnsObjectSchema => "`xdns` object schema (domains[] / resolvers[] objects)",
             Self::TunAutoSystemDnsAndLeakBlock => "TUN `autoSystemDnsToGateway` / `autoSystemWfpBlockLeak`",
             Self::WireGuardRemoteDnsIpOnly => "WireGuard outbound without `domainStrategy`, `remoteDNS` IPs only",
+            Self::XdnsNamesAddrsSchema => "`xdns` names[] / addrs[] schema",
+            Self::LuaScript => "Lua `script` in `routing` / `dns`, `dns.servers[].id`",
+            Self::TlsUseSystemCa => "TLS `useSystemCA` (OS root CAs instead of the built-in set)",
         }
     }
 

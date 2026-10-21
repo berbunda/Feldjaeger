@@ -115,8 +115,8 @@ const CASES: &[Case] = &[
     case!("valid/noise_exp_udp", Outbound, Valid, NoiseExpPacket),
     case!("valid/salamander_udp", Inbound, Valid),
     case!("valid/sudoku_udp", Inbound, Valid),
-    case!("valid/xdns_server", Inbound, Valid, XdnsObjectSchema),
-    case!("valid/xdns_client", Outbound, Valid, XdnsObjectSchema),
+    case!("valid/xdns_server", Inbound, Valid, XdnsNamesAddrsSchema),
+    case!("valid/xdns_client", Outbound, Valid, XdnsNamesAddrsSchema),
     case!("valid/xicmp_udp", Outbound, Valid),
     case!("valid/realm_udp", Inbound, Valid),
     case!("valid/realm_udp", Outbound, Valid),
@@ -137,9 +137,16 @@ const CASES: &[Case] = &[
     case!("invalid/salamander_short_password", Outbound, runtime("password is 3 bytes")),
     // On `udp[]` the tables are built when the listener / dialer is created (`NewUDPConn`).
     case!("invalid/sudoku_ascii_mode", Inbound, runtime("ascii: unknown mode \"binary\"")),
-    case!("invalid/xdns_extra_poll", Inbound, build("extraPoll must lie within 0–3"), XdnsObjectSchema),
+    case!("invalid/xdns_extra_poll", Inbound, build("extraPoll must lie within 0–3"), XdnsNamesAddrsSchema),
     // The server fixture on the client side: resolvers are checked by `NewClient`, not `Build()`.
-    case!("valid/xdns_server", Outbound, runtime("resolvers: the client side needs at least one resolver"), XdnsObjectSchema),
+    case!("valid/xdns_server", Outbound, runtime("resolvers: the client side needs at least one resolver"), XdnsNamesAddrsSchema),
+    case!("invalid/xdns_resolver_scheme", Outbound, build("scheme \"doh\" must be udp or tcp"), XdnsNamesAddrsSchema),
+    // `url.Parse` splits a bare IPv6 address at its last colon; the dial goes nowhere.
+    case!("invalid/xdns_resolver_bare_ipv6", Outbound, runtime("an IPv6 address needs brackets"), XdnsNamesAddrsSchema),
+    // No names → no domains: `NewServer` fails with "empty domains" when Xray starts.
+    case!("invalid/xdns_no_names", Inbound, runtime("names: at least one tunnel domain"), XdnsNamesAddrsSchema),
+    // `Build()` checks the names with all four types; the configured ones only `NewDomain` at start.
+    case!("invalid/xdns_record_type", Inbound, runtime("unsupported DNS record type 15"), XdnsNamesAddrsSchema),
     case!("invalid/xicmp_cidr", Outbound, build("ips: invalid IP address \"10.0.0.0/8\"")),
     case!("invalid/realm_no_stun", Inbound, build("stunServers: at least one host:port is required")),
     case!("invalid/realm_stun_port_name", Outbound, runtime("port must be a number 1–65535")),

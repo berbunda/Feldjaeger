@@ -73,6 +73,9 @@ pub struct DnsPageModel {
     pub error_message: Option<String>,
     /// Non-fatal configuration warnings from discovery.
     pub config_warnings: Vec<String>,
+    /// Version-aware notes on `dns.script` / `servers[].id` (Lua, Xray-core v26.10.10+); filled
+    /// by the service, which knows the installed core.
+    pub script_notes: Vec<String>,
 }
 
 /// Builds the DNS page model.
@@ -93,6 +96,7 @@ pub fn build_dns_page_model(
             change_summary: Vec::new(),
             error_message: None,
             config_warnings: Vec::new(),
+            script_notes: Vec::new(),
         };
     }
 
@@ -108,6 +112,7 @@ pub fn build_dns_page_model(
                 change_summary: Vec::new(),
                 error_message: None,
                 config_warnings: Vec::new(),
+                script_notes: Vec::new(),
             };
         }
         DiscoveryState::Succeeded(_) => {}
@@ -121,6 +126,7 @@ pub fn build_dns_page_model(
             change_summary: Vec::new(),
             error_message: None,
             config_warnings: config.warnings().to_vec(),
+            script_notes: Vec::new(),
         };
     };
 
@@ -161,6 +167,7 @@ pub fn build_dns_page_model(
         change_summary,
         error_message,
         config_warnings: config.warnings().to_vec(),
+        script_notes: Vec::new(),
     }
 }
 

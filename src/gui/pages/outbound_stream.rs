@@ -156,8 +156,22 @@ const HELP_TLS_CURVES: HelpText = HelpText::new(
     "curvePreferences — группы обмена ключами, по порядку.",
 );
 const HELP_TLS_DISABLE_SYSTEM_ROOT: HelpText = HelpText::new(
-    "Do not trust the operating system's CA store.",
-    "Не доверять хранилищу корневых сертификатов операционной системы.",
+    "Trust no public root CAs — neither the built-in set nor the OS store — only the \
+     certificates listed in tlsSettings.certificates (usage verify).",
+    "Не доверять никаким публичным корневым CA — ни встроенному набору, ни хранилищу ОС — \
+     только сертификатам из tlsSettings.certificates (usage verify).",
+);
+const HELP_TLS_USE_SYSTEM_CA: HelpText = HelpText::new(
+    "Since Xray-core v26.10.10 the client trusts Xray's built-in root CA set (Mozilla's) instead \
+     of the server's OS store, so a CA injected into the OS no longer counts. Tick to trust the \
+     OS store again — e.g. for a server whose certificate comes from a private CA installed on \
+     this machine. No effect with disableSystemRoot; older cores ignore the key (they always use \
+     the OS store).",
+    "С Xray-core v26.10.10 клиент доверяет встроенному в Xray набору корневых CA (от Mozilla), \
+     а не хранилищу ОС сервера, поэтому внедрённый в ОС CA больше не учитывается. Отметьте, \
+     чтобы снова доверять хранилищу ОС — например, для сервера с сертификатом от частного CA, \
+     установленного на этой машине. При disableSystemRoot не действует; старые ядра ключ \
+     игнорируют (они всегда используют хранилище ОС).",
 );
 const HELP_TLS_SESSION_RESUMPTION: HelpText = HelpText::new(
     "Allow TLS session resumption.",
@@ -661,6 +675,11 @@ fn show_tls_client_edit(ui: &mut Ui, stream: &mut OutboundStreamDraft) -> bool {
                 ui.end_row();
                 super::field_label(ui, "disableSystemRoot", HELP_TLS_DISABLE_SYSTEM_ROOT);
                 dirty |= ui.checkbox(&mut tls.disable_system_root, "").changed();
+                ui.end_row();
+                super::field_label(ui, "useSystemCA", HELP_TLS_USE_SYSTEM_CA);
+                ui.add_enabled_ui(!tls.disable_system_root || tls.use_system_ca, |ui| {
+                    dirty |= ui.checkbox(&mut tls.use_system_ca, "").changed();
+                });
                 ui.end_row();
                 super::field_label(ui, "enableSessionResumption", HELP_TLS_SESSION_RESUMPTION);
                 dirty |= ui.checkbox(&mut tls.enable_session_resumption, "").changed();

@@ -30,6 +30,13 @@ pub fn outbound_tag_references(sections: &XrayConfigSections, outbound_tag: &str
     refs
 }
 
+/// `routing.script` as a reference that cannot be checked: the Lua `HandleRoute` may return any
+/// outbound tag (XTLS/Xray-core#6823). For the rename preview only — never a Delete block.
+pub fn routing_script_reference(sections: &XrayConfigSections) -> Option<String> {
+    let script = sections.routing()?.value().get("script")?.as_str()?.trim();
+    (!script.is_empty()).then(|| format!("routing.script \"{script}\" (Lua — not inspected)"))
+}
+
 fn collect_inbound_tag_refs(routing: &Value, inbound_tag: &str, refs: &mut Vec<String>) {
     let Some(rules) = routing.get("rules").and_then(Value::as_array) else {
         return;
@@ -114,6 +121,19 @@ mod tests {
         let outcome = parser.parse_single_file("/etc/xray/config.json", &json);
         assert!(outcome.is_success(), "{:?}", outcome.errors());
         outcome.into_sections()
+    }
+
+    /// Audit v26.10.10 C: the Lua routing script is a rename-preview line, never a Delete block.
+    #[test]
+    fn routing_script_is_an_uncheckable_reference() {
+        let with_script = sections_from(json!({"routing": {"script": "/etc/xray/route.lua"}, "outbounds": [{"tag": "proxy", "protocol": "freedom"}]}));
+        assert_eq!(
+            routing_script_reference(&with_script).as_deref(),
+            Some("routing.script \"/etc/xray/route.lua\" (Lua — not inspected)")
+        );
+        assert!(outbound_tag_references(&with_script, "proxy").is_empty());
+        let without = sections_from(json!({"routing": {"rules": []}}));
+        assert_eq!(routing_script_reference(&without), None);
     }
 
     #[test]

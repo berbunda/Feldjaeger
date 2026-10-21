@@ -536,6 +536,10 @@ pub struct RoutingSettings {
     pub rules: Vec<RoutingRuleEntry>,
     /// Configured balancers, in source/edit order.
     pub balancers: Vec<BalancerEntry>,
+    /// `script` — path of a Lua routing script on the server (Xray-core v26.10.10+,
+    /// XTLS/Xray-core#6823); with it `rules` are not applied, see [`super::compatibility`]'s
+    /// `routing_script_notes`. `None` omits the key.
+    pub script: Option<String>,
     /// `true` when a top-level `routing` object existed in the loaded config.
     pub section_present: bool,
     /// Source file owning the `routing` section, when known.
@@ -551,6 +555,7 @@ impl RoutingSettings {
             domain_strategy: DomainStrategy::default_effective(),
             rules: Vec::new(),
             balancers: Vec::new(),
+            script: None,
             section_present: false,
             source_file: None,
             warnings: Vec::new(),
@@ -584,11 +589,13 @@ pub fn routing_settings_from_section(section: Option<&SourcedSection<Value>>) ->
 
     let rules = parse_rules(value.get("rules"), &mut warnings);
     let balancers = parse_balancers(value.get("balancers"), &mut warnings);
+    let script = string_field(value.get("script"));
 
     RoutingSettings {
         domain_strategy,
         rules,
         balancers,
+        script,
         section_present: true,
         source_file: Some(section.source_file().to_owned()),
         warnings,
@@ -892,6 +899,15 @@ pub fn apply_routing_settings_to_value(
         object.insert("balancers".to_owned(), Value::Array(balancers));
     }
 
+    match &settings.script {
+        Some(script) => {
+            object.insert("script".to_owned(), Value::String(script.clone()));
+        }
+        None => {
+            object.remove("script");
+        }
+    }
+
     Ok(())
 }
 
@@ -930,6 +946,13 @@ pub fn routing_settings_change_summary(before: &RoutingSettings, after: &Routing
             after.balancers.len()
         ));
     }
+    if before.script != after.script {
+        lines.push(format!(
+            "script:\n{} → {}",
+            before.script.as_deref().unwrap_or("(none)"),
+            after.script.as_deref().unwrap_or("(none)")
+        ));
+    }
 
     lines
 }
@@ -942,6 +965,7 @@ pub fn routing_settings_change_summary(before: &RoutingSettings, after: &Routing
 /// enforced is the documented one: every routing rule needs a target (`outboundTag` or
 /// `balancerTag`), and every balancer needs a non-empty, unique `tag`.
 pub fn validate_routing_settings(settings: &RoutingSettings) -> ConfigModifyResult<()> {
+    validate_optional_control_chars(&settings.script, "script")?;
     for (index, rule) in settings.rules.iter().enumerate() {
         let position = index + 1;
         validate_optional_control_chars(&rule.rule_tag, &format!("Routing rule {position} ruleTag"))?;
@@ -1145,6 +1169,32 @@ fn bool_field(value: Option<&Value>) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Audit v26.10.10 C: `script` is read, written next to the untouched keys, removed when
+    /// cleared, and listed in the change summary.
+    #[test]
+    fn script_round_trips_and_clears() {
+        let source = json!({"script": "/etc/xray/route.lua", "rules": [], "domainMatcher": "hybrid"});
+        let section = SourcedSection::new("/etc/xray/config.json", source.clone());
+        let settings = routing_settings_from_section(Some(&section));
+        assert_eq!(settings.script.as_deref(), Some("/etc/xray/route.lua"));
+        let mut value = source.clone();
+        apply_routing_settings_to_value(&mut value, &settings).unwrap();
+        assert_eq!(value["script"], "/etc/xray/route.lua");
+        assert_eq!(value["domainMatcher"], "hybrid");
+
+        let mut cleared = settings.clone();
+        cleared.script = None;
+        apply_routing_settings_to_value(&mut value, &cleared).unwrap();
+        assert!(value.get("script").is_none());
+        assert_eq!(
+            routing_settings_change_summary(&settings, &cleared),
+            vec!["script:\n/etc/xray/route.lua → (none)".to_owned()]
+        );
+        let mut bad = settings;
+        bad.script = Some("a\nb".to_owned());
+        assert!(validate_routing_settings(&bad).is_err());
+    }
 
     fn section(value: Value) -> SourcedSection<Value> {
         SourcedSection::new("/etc/xray/config.json", value)

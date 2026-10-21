@@ -26,6 +26,21 @@ use crate::xray::{
 // Condensed from https://xtls.github.io/config/routing.html and checked against Xray-core
 // (`infra/conf/router.go`, `router_strategy.go`; `app/router/condition.go` for attrs).
 
+const HELP_SCRIPT: HelpText = HelpText::new(
+    "Path of a Lua script on the server that picks the outbound for every connection (Xray-core \
+     v26.10.10+). It must define HandleRoute(...) returning (outboundTag, ruleTag, err). With a \
+     script the rules below are not applied; balancers stay reachable through the xray.router \
+     module (PickOutbound). Feldjäger cannot see the tags the script returns. Use an absolute \
+     path: the file must exist when the config loads, and Lua errors show only when Xray starts \
+     (xray run -test does not compile the script). Empty = no script.",
+    "Путь к Lua-скрипту на сервере, который выбирает outbound для каждого соединения (Xray-core \
+     v26.10.10+). Скрипт должен определить HandleRoute(...), возвращающую (outboundTag, \
+     ruleTag, err). Со скриптом правила ниже не применяются; балансировщики доступны через \
+     модуль xray.router (PickOutbound). Теги, которые возвращает скрипт, Feldjäger не видит. \
+     Указывайте абсолютный путь: файл должен существовать при загрузке конфигурации, а ошибки \
+     Lua видны только при запуске Xray (xray run -test скрипт не компилирует). Пусто — без \
+     скрипта.",
+);
 const HELP_DOMAIN_STRATEGY: HelpText = HelpText::new(
     "How a domain target meets ip rules. AsIs (default) — never resolved; IPIfNonMatch — if no \
      rule matched the domain, it is resolved and the rules are checked again with its IPs; \
@@ -231,6 +246,9 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     show_state_message(ui, model.state);
     for warning in &model.warnings {
         ui.label(RichText::new(warning.clone()).size(14.0).color(WARN_COLOR));
+    }
+    for note in &model.script_notes {
+        ui.label(RichText::new(note.clone()).size(13.0).color(WARN_COLOR));
     }
     if let Some(error) = &model.error_message {
         ui.label(RichText::new(error.clone()).size(14.0).color(ERROR_COLOR));
@@ -590,6 +608,7 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
         field_label(ui, "domainStrategy", HELP_DOMAIN_STRATEGY);
         domain_strategy_combo(ui, "routing_domain_strategy", &mut draft.domain_strategy);
     });
+    super::optional_text_row(ui, "script", HELP_SCRIPT, &mut draft.script, "/usr/local/etc/xray/route.lua", 320.0, "routing_script");
     ui.label(
         RichText::new("domainMatcher is preserved but not editable here — see View mode.")
             .size(12.0)

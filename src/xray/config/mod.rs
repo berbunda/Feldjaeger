@@ -56,8 +56,8 @@ pub use burst_observatory_settings::{
 pub use compatibility::{
     CompatibilityWarning, CompatibilityWarningId, WarningSeverity, inbound_warnings, is_netip_addr,
     outbound_warnings,
-    with_warning_suffix, CORE_FEATURES, CoreFeature, XrayCoreVersion,
-    CompatibilityGateId, allowed_security_modes, allowed_stream_methods, check_inbound_compatibility,
+    with_warning_suffix, BASELINE_XRAY_CORE, CORE_FEATURES, CoreFeature, XrayCoreVersion, dns_script_notes,
+    routing_script_notes, CompatibilityGateId, allowed_security_modes, allowed_stream_methods, check_inbound_compatibility,
     check_outbound_compatibility, coerce_display_stream_method, coerce_security_mode_for_transport,
     effective_security, first_failing_gate, first_failing_outbound_gate, g10_hysteria_requires_tls, g11_shadowsocks_tcp_only,
     g9_hysteria_protocol_transport_ok, inbound_has_vision_flow, matrix_transport, normalized_method,
@@ -173,9 +173,10 @@ pub use stream::{
     FRAGMENT_PACKETS_TLSHELLO, FragmentPackets, fragment_packets_mode, NoiseItemPayload, SALAMANDER_MIN_PASSWORD_BYTES,
     SUDOKU_ASCII_MODES, SUDOKU_MAX_PADDING, validate_sudoku_custom_table, validate_sudoku_settings,
     NOISE_EXP_KIND,
-    XDNS_DEFAULT_LABEL_LIMIT, XDNS_DEFAULT_LEN_LIMIT, XDNS_RECORD_TYPES, XDNS_RESOLVER_KINDS,
-    XdnsDomain, XdnsResolver, migrate_legacy_xdns_settings, xdns_has_legacy_fields,
-    xdns_record_type_name,
+    XDNS_DEFAULT_LABEL_LIMIT, XDNS_DEFAULT_LEN_LIMIT, XDNS_DEFAULT_RESOLVER_PORT, XDNS_RECORD_TYPES,
+    XDNS_RESOLVER_KINDS, XdnsDomain, XdnsResolver, migrate_legacy_xdns_settings,
+    validate_xdns_resolver_addr, xdns_default_types, xdns_has_legacy_fields, xdns_has_string_schema,
+    xdns_has_v26_9_30_objects, xdns_record_type_name, xdns_uses_names_addrs,
 };
 pub use json_diff::{
     JsonDiffEntry, JsonDiffKind, redacted_json_diff, redacted_json_diff_bytes,
@@ -285,6 +286,7 @@ pub use summary::{
 };
 pub use tag_refs::{
     format_tag_reference_block, inbound_tag_references, outbound_tag_references,
+    routing_script_reference,
 };
 pub use users::{
     HysteriaClientSummary, InboundClientSummary, SUPPORTED_USER_PROTOCOL,
