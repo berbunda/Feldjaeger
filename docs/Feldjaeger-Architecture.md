@@ -10631,3 +10631,332 @@ failed**, clippy lib 65. Живой проверки с частным CA в х�
 ## 135.2	Итог
 
 Тесты: **1450 passed / 0 failed**. GUI в запущенном приложении не проверялся.
+
+# 136	Аудит дрейфа: Xray-core v26.10.21 (Roadmap §4.5) (документация, без изменения версии)
+
+## 136.1	Объём
+
+- Релиз: https://github.com/XTLS/Xray-core/compare/v26.9.30...v26.10.21. Пункты A–D аудита
+  v26.10.10 (§130–134) уже сделаны, поэтому здесь разобран остаток `701af60...1b1647c`:
+  35 коммитов (32 PR и коммиты релизов v26.10.17 `92ccc93` и v26.10.21 `1b1647c`), 182 файла, из них
+  8 в `infra/conf` (`dns.go`, `router.go`, `transport_finalmask.go`, `transport_internet.go`,
+  `transport_method.go`, `tun.go`, `xray.go`, тесты).
+- **Теги и релизы v26.10.10 и v26.10.17 удалены в XTLS/Xray-core** (на 2026-10-21 после v26.9.30 есть
+  только тег и релиз v26.10.21). Коммиты релизов остались в истории `main`, а собранные из них
+  бинарники `xray version` показывают как 26.10.10 / 26.10.17 — такие ядра могут стоять на серверах.
+  Поэтому `CoreFeature` по-прежнему датируются версией первого коммита релиза, который содержит PR
+  (а не первым существующим тегом); сравнение через `compare/<tag>...` для этих версий работает
+  только по SHA.
+- Ядра для проверок: `xray-bin/xray.exe` 26.10.10 (701af60) и 26.10.21 (1b1647c, go1.27.3,
+  `Xray-windows-64.zip` из релиза, SHA2-256 сверен с `.dgst`), во временном каталоге.
+
+Метод тот же, что в §106 / §130: diff `infra/conf/*.go` и `.proto`, затем код самих PR и
+`common/lua/program.go`, `common/platform/platform.go` v26.10.21; для каждого изменения — поиск по
+коду Feldjäger. Данные получены через `gh api` 2026-10-21. Документация (Context7
+`/xtls/xray-docs-next`) ещё не описывает слой `filter`, DoH в `xdns` и `script` у `noise`.
+
+Проверки `run -test` (50 конфигов, обе версии ядра):
+
+| Конфиг | 26.10.10 | 26.10.21 |
+|--------|----------|----------|
+| `routing.script` + `rules` (непустые) или + `domainStrategy` (даже `AsIs`) | OK | `routing script cannot be used with domainStrategy or rules` |
+| `routing.script` + `balancers` / `rules: []` | OK | OK |
+| `routing.script` / `dns.script`: файла нет | ошибка `Build()` | ошибка (`failed to prepare … script`) |
+| `routing.script`: синтаксическая ошибка Lua / расширение не `.lua` | OK | ошибка (`syntax error` / `Lua file extension must be .lua`) |
+| `routing.script: "base64:…"` (inline) | файл не найден | `common/lua: currently unavailable` |
+| `dns.script` + `disableFallback` / `disableFallbackIfMatch` / `enableParallelQuery` = `true` | OK | `DNS script cannot be used with disableFallback, …` |
+| `dns.script` + у сервера `domains` / `skipFallback` / `finalQuery` | OK | `DNS script cannot be used with domains, skipFallback or finalQuery in server N` |
+| `dns.script` + `hosts`, `expectIPs`, `id`, флаги = `false` | OK | OK |
+| `noise` `script` (файл есть) / + `reset` / + `noise: []` | OK (ключ игнорируется) | OK |
+| `noise` `script` + непустой `noise[]` | OK | `"script" and "noise" can't be used together` |
+| `noise` `script`: файла нет / синтаксическая ошибка | OK | ошибка компиляции при `Build()` |
+| `filter` (tcp и udp, inbound): CIDR, IP, `geoip:private`, `!…`, IPv6, пустые `settings`, без `settings` | `unknown config id: filter` | OK |
+| `filter`: `10.0.0.0/33` / строка вместо массива | — | `illegal ip rule` / `cannot unmarshal string` |
+| `filter` в outbound | — | OK (на клиенте слой ничего не делает) |
+| xdns `addrs: ["https://dns.google/dns-query"]`, `HTTPS://`, без пути, с портом и query, `https:///x` | `invalid protocol` | OK |
+| xdns `h3://…` | `invalid protocol` | `invalid protocol` |
+| xdns resolver `tlsConfig` / `quicConfig` (вкл. с `udp://`), `worker` (вкл. `-1`) | OK (ключи игнорируются) | OK; ошибки внутри них — ошибка `Build()` (`unknown "fingerprint"`, `unknown congestion control`) |
+| Файл конфига `.conf` / без расширения | `Failed to get format` | то же — новая проверка расширения в `run` (#7136) ничего не меняет при `-format auto` |
+
+Parity-тесты Feldjäger (`XRAY_BIN` = 26.10.21): **1450 passed / 0 failed** — существующие проверки
+FinalMask / outbound с новым ядром не разошлись.
+
+## 136.2	Требует работы
+
+| # | PR | Изменение в ядре | Что затрагивает в Feldjäger |
+|---|----|------------------|------------------------------|
+| A | #7132, #7136 (v26.10.17) | `routing.script` нельзя с `domainStrategy` и непустыми `rules`; `dns.script` нельзя с `disableFallback` / `disableFallbackIfMatch` / `enableParallelQuery` и с `domains` / `skipFallback` / `finalQuery` у серверов. Путь скрипта больше не проверяется в `Build()`: файл ищется и компилируется при создании роутера / DNS — `run -test` теперь ловит отсутствие файла, синтаксис и расширение не `.lua` (симлинки разворачиваются). Inline-скрипты (`base64:` / `gzip:`) добавлены и тут же отключены. Скрипты работают в песочнице (нет `io`, `load*`, `dofile`, `print`, `setmetatable` и т. п.) | **Ошибка:** `RoutingSettings` всегда пишет `domainStrategy` — Save страницы Routing с `script` на ядре ≥ v26.10.17 не проходит `run -test` и откатывается. Заметки `lua_script.rs` («rules не применяются», «синтаксис проходит `run -test`») устарели: нужны проверки сочетаний как в `Build()` по версии ядра, расширение `.lua`, справка про песочницу |
+| B | #7140 (v26.10.17) | xdns: резолвер `https://host[:port][/path]` (DoH, путь и query сохраняются, схема без учёта регистра), у объекта резолвера `tlsConfig` (`TLSConfig`), `quicConfig` (`QuicParamsConfig`, те же проверки, что `finalmask.quicParams`), `worker` (int32, 0 = 32) | `validate_xdns_resolver_addr` отвергает `https` — Feldjäger блокирует Save корректного конфига; `tlsConfig` / `quicConfig` / `worker` уцелеют в `XdnsResolver.extras`, но не видны в форме |
+| C | #7124 (v26.10.17) | `noise.settings.script` — путь к Lua-файлу с `HandleNoise(...)`; исключает непустой `noise[]`, `reset` действует; компилируется в `Build()` | `NoiseMaskSettings` хранит `script` в `extras` (не теряется), но форма его не показывает, а проверка «script и noise вместе» отсутствует |
+| D | #7206 (v26.10.21) | Новый слой `filter` в `finalmask.tcp[]` и `finalmask.udp[]`: `blockedSourceIPs` / `allowedSourceIPs` — правила IP как `routing` `ip` (`geodata.ParseIPRules`: IP, CIDR, `geoip:`, `ext:`, `!`); фильтрует по IP источника на inbound (TCP — в `Listen` до остальных масок), в outbound — без действия | Тип отсутствует в `TCP_FINALMASK_TYPES` / `UDP_FINALMASK_TYPES`: свободный текст работает, но без формы, проверок, справки и предупреждения «только inbound» / «нужно ядро v26.10.21» |
+| E | #7185 | Xray-core в релизах и Docker берёт geodata из `XTLS/Xray-rules-dat` (`geoip/geoip-lite.dat` → `geoip.dat`, `geosite/geosite.dat`) вместо `Loyalsoldier/v2ray-rules-dat` | `xray/geodata.rs` скачивает с Loyalsoldier и в документации называет это «тем же источником, что CI Xray-core» — уже неверно. Смена источника меняет набор кодов `geoip:` / `geosite:` у пользователей — решение пользователя |
+
+## 136.3	Не касается
+
+| PR | Причина |
+|----|---------|
+| #7121, #7156 (MASQUE) | XMUX у MASQUE и снятый запрет `mux` для MASQUE outbound — MASQUE отложен до документации (аудит v26.9.30 E), `masqueSettings` сохраняется в extras |
+| #7181, #7182, #7188, #7187 (XDRIVE) | `"google-drive"` (старое `"Google Drive"` — deprecated), обязательные VLESS `encryption` + `mux`, h3, XMUX, `hrefPath` — XDRIVE отложен так же (аудит v26.9.30 E) |
+| #7123 | TUN `autoSystemDnsToGateway` на FreeBSD — серверы Feldjäger только Linux |
+| #7130, #7179 | TUN: собственный TCP/IP-стек, Linux — runtime |
+| #7119, #7122, #7172 | Hysteria client — runtime |
+| #7143 | SS2022 — runtime (Shadowsocks retired) |
+| #7151 | WireGuard outbound — runtime (WireGuard retired) |
+| #7155 | `int` → `int32` во внутреннем коде (burst observatory, SS2022, XDRIVE) — ключи конфига не меняются |
+| #7173, #7201 | Sockopt `interface` / контроллеры dialer — runtime |
+| #7176 | XTLS Vision и Go 1.27.3 — runtime |
+| #7212 | Обновлён встроенный набор корневых CA (#7105) — runtime |
+| #7202 | Routing `process` для UDP на Linux — runtime-исправление |
+| #7203 | Socks inbound — runtime |
+| #7193 | HTTP outbound — runtime |
+| #7204 | Docker; master key log создаётся с правами 0600 — не конфиг |
+| #7133, #7147, #7197, 676a600 | Обновления зависимостей |
+| 92ccc93, 1b1647c | Коммиты релизов v26.10.17 и v26.10.21 |
+
+Итого 35 коммитов: 6 — в 136.2 (#7132 и #7136 — пункт A, по одному на B–E), 29 — в 136.3.
+
+## 136.4	Следствия
+
+Пункты A–E заведены в Roadmap §4.5 как дочерние пункты аудита; A — исправление ошибки, его первым.
+Новые `CoreFeature`: A, B, C — v26.10.17, D — v26.10.21. После A–D: `xray-bin` → 26.10.21 и
+`BASELINE_XRAY_CORE` → v26.10.21 (§135). Изменений кода в этом разделе нет.
+
+# 137	Багфикс + Lua `script` v26.10.17: несовместимые ключи (Roadmap §4.5, аудит v26.10.21 A) (0.5.69-0)
+
+## 137.1	Ядро
+
+XTLS/Xray-core#7132 и #7136 (v26.10.17), проверено `run -test` на 26.10.10 и 26.10.21 (§136.1):
+
+- `RouterConfig.Build()`: `script` вместе с `domainStrategy` (любое значение, ключ есть) или
+  непустыми `rules` — `routing script cannot be used with domainStrategy or rules`. `rules: []` и
+  `balancers` допустимы.
+- `DNSConfig.Build()`: `script` вместе с `disableFallback` / `disableFallbackIfMatch` /
+  `enableParallelQuery` = `true` или с `domains` / `skipFallback` / `finalQuery` у сервера —
+  ошибка с индексом сервера. `false`, `hosts`, `expectIPs`, `id` допустимы.
+- Путь больше не проверяется в `Build()`: `common/lua.Compile` ищет файл
+  (`platform.ResolveLuaFile`, тот же порядок каталогов), разворачивает симлинки, требует `.lua` и
+  компилирует его при создании роутера / DNS — это делает и `run -test`, поэтому отсутствие файла,
+  синтаксис и расширение теперь видны до записи. Inline-форма `base64:` / `base64+gzip:` добавлена
+  и отключена в том же релизе («currently unavailable»). Песочница: только `package`, `base`,
+  `table`, `string`, `math`, `os`, без `load*`, `dofile`, `print`, `setmetatable`, `rawget` и т. п.
+
+## 137.2	Ошибка
+
+`apply_routing_settings_to_value` всегда писал `domainStrategy` (как
+`DnsSettings::query_strategy`). На ядре ≥ v26.10.17 любой Save страницы Routing с `script` давал конфиг, который
+`run -test` отвергает, и Feldjäger откатывал запись.
+
+## 137.3	Изменения
+
+- `routing_settings.rs`: рядом со `script` значение по умолчанию `"AsIs"` не пишется (существующий
+  ключ удаляется — смысл одинаков на всех ядрах); другое значение остаётся и считается конфликтом.
+- `CoreFeature::LuaScriptExclusive` (v26.10.17, PR 7132). Модуль `core_version.rs`: релиз
+  датирует возможность, даже если его тег удалён (v26.10.10 / v26.10.17, §136.1).
+- `compatibility/lua_script.rs`:
+  - `routing_script_conflicts` / `dns_script_conflicts` — проверки `Build()` (`domainStrategy` не
+    `AsIs`, `rules (N)`; три флага DNS, `servers[i] domains / skipFallback / finalQuery`);
+  - `routing_script_save_error` / `dns_script_save_error` — `Some` только при ядре ≥ v26.10.17 или
+    неизвестном (= текущее). `start_save_routing_settings` / `start_save_dns_settings` прерывают
+    Save с этим сообщением: `run -test` всё равно бы отказал. Предпросмотр diff не блокируется;
+  - заметки по версии: на v26.10.10 конфликт — «удалите перед обновлением» (и «правила не
+    применяются»), на v26.10.17+ — текст ошибки Save; путь не на `.lua` (v26.10.17+), inline-форма
+    (v26.10.17+ — отключена, раньше — читается как имя файла), относительный путь.
+- Справка `HELP_SCRIPT` страниц Routing и DNS (EN+RU): несовместимые ключи, `.lua`, компиляция в
+  `run -test` с v26.10.17, песочница.
+
+## 137.4	Итог
+
+Тесты (+4): `lua_script` — конфликты routing / DNS по версиям ядра, заметки пути; `routing_settings`
+— `"AsIs"` рядом со скриптом. Итог: **1454 passed / 0 failed**, clippy lib 65. GUI в запущенном
+приложении не проверялся.
+
+# 138	FinalMask `xdns`: DoH-резолверы (Roadmap §4.5, аудит v26.10.21 B) (0.5.70-0)
+
+## 138.1	Ядро
+
+XTLS/Xray-core#7140 (v26.10.17), `infra/conf/transport_finalmask.go` и
+`transport/internet/finalmask/xdns/resolver_doh.go` v26.10.21:
+
+- `XDNSResolver{Addrs, Worker int32, TlsConfig *TLSConfig, QuicConfig *QuicParamsConfig}`. Адрес
+  `https://…` (схема без учёта регистра) передаётся в `ResolverProto.Addr` целиком
+  (`u.String()`: путь, порт и query сохраняются); `udp` / `tcp` — как раньше. `worker` 0 → 32.
+  `tlsConfig` / `quicConfig` строятся `TLSConfig.Build()` / новым `QuicParamsConfig.Build()` (те же
+  проверки, что `finalmask.quicParams`, вынесены из `StreamConfig.Build()`).
+- `NewDOHResolver`: `worker < 1` → «invalid worker», нет `tlsConfig` → «empty tls config»; при
+  `tlsConfig.alpn` ровно `["h3"]` — HTTP/3 с `quicConfig` (`congestion`: `""`/`reno`, `bbr`,
+  `force-brutal`, **иначе `panic`**), иначе HTTP/2 с uTLS-отпечатком (по умолчанию Chrome) и
+  пустым User-Agent; `quicConfig` тогда не читается.
+- Живая проверка на `xray.exe` 26.10.21 (клиент xdns → `dns.google`; каждый конфиг проходит
+  `run -test`):
+
+| Резолвер | Результат при первом подключении |
+|----------|----------------------------------|
+| `https://…` без `tlsConfig` | `xdns: empty tls config` |
+| `tlsConfig: {}` | `tls: at least one of ServerName, InsecureSkipVerify or InsecureServerNameToVerify must be specified` |
+| `tlsConfig.serverName` (h2) / + `alpn: ["h3"]` | запросы идут на `dns.google:443` по TCP / UDP |
+| `worker: -1` с `https` / с `udp` | `invalid worker` / не влияет |
+| `quicConfig.congestion: "brutal"` + h3 | **`panic: brutal`** — Xray завершается |
+| `quicConfig.congestion: "brutal"` + h2 | не влияет |
+
+  `InsecureSkipVerify` в `GetTLSConfig` ставят только `verifyPeerCertByName` и
+  `pinnedPeerCertSha256`, поэтому без `serverName` подходят только они.
+
+## 138.2	Изменения
+
+- `stream/finalmask_xdns.rs`:
+  - `XdnsResolver` получил `worker: Option<i64>`, `tls_config` / `quic_config: Option<Value>`
+    (объекты хранятся как JSON; не-объект — слой уходит в raw-JSON редактор);
+    `XDNS_DOH_SCHEME`, `XDNS_DEFAULT_RESOLVER_WORKER`;
+  - `validate_xdns_resolver_addr`: `https://host[:port][/path][?query]` — host, порт, IPv6 в
+    скобках проверяются как у `udp` / `tcp` (общая `validate_xdns_host_port`); `h3://` и прочие
+    схемы — «must be udp, tcp or https»;
+  - `validate_xdns_resolver`: `worker` в `int32`; `quicConfig` — `validate_quic_params`
+    (префикс `quicConfig.`); при DoH-адресе — `worker ≥ 0`, `tlsConfig` с `serverName` (или
+    `verifyPeerCertByName` / `pinnedPeerCertSha256`), `brutal` поверх h3 запрещён. Для `udp` / `tcp`
+    эти ключи не проверяются (ядро их не читает);
+  - `xdns_addr_is_doh`, `xdns_tls_config_is_h3` (`alpn` — `StringList`: массив или строка через
+    `,`), `xdns_uses_doh` (по JSON, для предупреждений).
+- `CoreFeature::XdnsDohResolver` (v26.10.17, PR 7140); `finalmask_warnings` — `RequiresNewerCore`
+  на `…settings.resolvers`, если есть DoH-адрес или ключи `worker` / `tlsConfig` / `quicConfig`.
+- GUI (`gui/pages/stream_finalmask.rs`): резолвер — группа: `addrs`, `worker`, `tlsConfig` и
+  `quicConfig` (переиспользован `optional_json_object_edit`, как у realm), подсказка
+  `xdns_resolver_note` («ключи DoH действуют только на https://», «quicConfig только при alpn h3»).
+  Справка EN+RU: `HELP_XDNS_RESOLVERS` дополнена, новые `HELP_XDNS_WORKER`, `HELP_XDNS_TLS_CONFIG`,
+  `HELP_XDNS_QUIC_CONFIG`.
+- Фикстура `invalid/xdns_resolver_scheme`: новый текст ошибки.
+
+## 138.3	Итог
+
+Тесты (+3): адреса DoH, требования первого подключения (по таблице 138.1), круговой Save; плюс
+проверка версии ядра в `xdns_schema_follows_the_core_version`. Итог: **1457 passed / 0 failed**,
+clippy lib 65. Фикстуры DoH (parity с `xray run -test` на 26.10.21, на 26.10.10 пропускаются по
+`CoreFeature`) добавлены в §140. `panic` при `brutal` поверх h3 — ошибка
+ядра (не сообщена в XTLS). GUI в запущенном приложении не проверялся.
+
+# 139	FinalMask `noise`: Lua `script` (Roadmap §4.5, аудит v26.10.21 C) (0.5.71-0)
+
+## 139.1	Ядро
+
+XTLS/Xray-core#7124 (v26.10.17), `infra/conf/transport_finalmask.go` и
+`transport/internet/finalmask/noise/{script,lua}.go` v26.10.21:
+
+- `NoiseMask.Script string`: непустой `script` вместе с непустым `noise[]` —
+  `"script" and "noise" can't be used together`; иначе `Build()` компилирует файл
+  (`common/lua.Compile`: путь как у routing / dns, `.lua`, песочница) и пишет
+  `noise.Config{ResetMin, ResetMax, Script}` — `reset` действует.
+- В работе `HandleNoise(plan, addr)` вызывается вместо списка `noise[]`: `plan:Add(packet, delayMs)`
+  и `plan:AddRandom(size, delayMs)` (ограничения на число и объём пакетов за вызов), модуль
+  `xray.finalmask.noise` — `Random` / `RandomBetween`. Отсутствие `HandleNoise` обнаруживается
+  только при работе (на 26.10.21 `run -test` такой файл принимает, §136.1 N7).
+- v26.10.10 ключ не знает и молча пропускает; при пустом `noise[]` слой тогда ничего не шлёт.
+
+## 139.2	Изменения
+
+- `NoiseMaskSettings.script: Option<String>` (`stream/finalmask_layers.rs`), ключ в
+  `KNOWN_NOISE_MASK_KEYS`; не-строка — слой остаётся в raw-JSON редакторе. Пустая строка
+  сохраняется как есть (для ядра это «скрипта нет»).
+- `validate_noise_mask_settings`: управляющие символы в пути; непустой `script` + непустой
+  `noise[]` — ошибка с текстом ядра.
+- `CoreFeature::NoiseLuaScript` (v26.10.17, PR 7124); `finalmask_warnings` — `RequiresNewerCore`
+  на `…settings.script`.
+- GUI: поле `script` над `noise[]` со справкой `HELP_NOISE_SCRIPT` (EN+RU) и подсказкой
+  `noise_script_note` (что делает скрипт, конфликт с `noise[]`, не `.lua`, относительный путь).
+
+## 139.3	Итог
+
+Тесты (+1): круговой Save, конфликт, пустой `script`, не-строка; плюс проверка версии ядра в
+`noise_exp_requires_26_9_30`. Итог: **1458 passed / 0 failed**, clippy lib 65. GUI в запущенном
+приложении не проверялся.
+
+# 140	FinalMask: слой `filter` (Roadmap §4.5, аудит v26.10.21 D) (0.5.72-0)
+
+## 140.1	Ядро
+
+XTLS/Xray-core#7206 (v26.10.21): `infra/conf/transport_finalmask.go` (`Filter`),
+`transport/internet/finalmask/filter`, `common/geodata/rule_parser.go`:
+
+- Тип `filter` зарегистрирован в обоих загрузчиках (`tcpmaskLoader`, `udpmaskLoader`).
+  `Filter{BlockedSourceIPs, AllowedSourceIPs []string}` → `geodata.ParseIPRules`: ведущие `!`
+  переключают инверсию; `geoip:КОД` = `ext:geoip.dat:КОД`; `ext:` / `ext-ip:ФАЙЛ:КОД` — непустые
+  файл и код (код может быть снова с `!`), наличие файла и кода — `checkFile` на машине ядра;
+  иначе IP (`net.ParseAddress`, домен — «unsupported address family») с необязательным
+  `/prefix` ≤ 32 / 128.
+- Обе пустые — слой ничего не делает. TCP: `Listen` оборачивает слушатель до масок соединения;
+  UDP: `WrapPacketConnServer` по порядку цепочки. Клиентские обёртки пропускают всё — в outbound
+  слой принимается и бездействует.
+- Проверено `run -test` (§136.1): CIDR, IP, `geoip:private`, `!…`, IPv6, пустые / отсутствующие
+  `settings`, в outbound — OK; `10.0.0.0/33` и строка вместо массива — ошибка `Build()`; 26.10.10 —
+  `unknown config id: filter`.
+
+## 140.2	Изменения
+
+- `stream/finalmask_filter.rs` (новый): `FilterSettings` (`blocked_source_ips`,
+  `allowed_source_ips`, `extras`), `parse_filter_settings` (нет `settings` = пустой фильтр; не
+  массив строк — raw JSON), `filter_settings_to_value`, `validate_filter_settings` /
+  `validate_filter_ip_rule` — повтор `ParseIPRules` без проверки файлов.
+- `finalmask.rs`: `filter` в `TCP_FINALMASK_TYPES` и `UDP_FINALMASK_TYPES`;
+  `validate_finalmask_layer` — `(_, "filter")`.
+- `finalmask_client.rs`: `filter` выпадает из клиентской цепочки (`fm` share-ссылки, «Copy client
+  finalmask JSON») — клиенту он не нужен.
+- `CoreFeature::FinalMaskFilter` (v26.10.21, PR 7206); `finalmask_warnings` — для обеих цепочек
+  `RequiresNewerCore` на `type`, а на новом ядре в outbound — новое
+  `CompatibilityWarningId::FinalMaskFilterServerOnly` (Caution, «в outbound не действует»).
+- GUI: форма `show_filter_settings_edit` — два списка по строке на правило
+  (`help_multiline_list_row`) и подсказка, что пропускается; справка EN+RU `HELP_TYPE_FILTER`,
+  `HELP_FILTER_BLOCKED`, `HELP_FILTER_ALLOWED`.
+- Фикстуры (`finalmask_fixtures.rs`): `valid/filter_tcp` (inbound и outbound), `valid/filter_udp`,
+  `invalid/filter_bad_cidr`, `invalid/filter_domain` (`FinalMaskFilter`); и для §138 —
+  `valid/xdns_doh_client`, `invalid/xdns_doh_no_tls`, `invalid/xdns_doh_brutal_h3` (runtime),
+  `invalid/xdns_doh_quic_congestion` (build) с `XdnsDohResolver`. Фикстуры не зависят от
+  geodata: в `xray-bin` нет `geoip.dat`.
+
+## 140.3	Итог
+
+Тесты (+3): правила IP, круговой Save, предупреждения по версии и стороне. Итог: **1461 passed /
+0 failed**, clippy lib 65. Parity (`XRAY_BIN` = 26.10.21): все фикстуры, включая новые, совпадают
+с `xray run -test`. GUI в запущенном приложении не проверялся.
+
+# 141	GeoData: источник после перехода Xray-core на `XTLS/Xray-rules-dat` (Roadmap §4.5, аудит v26.10.21 E) (0.5.72-1)
+
+## 141.1	Ядро
+
+XTLS/Xray-core#7185: `scheduled-assets-update.yml` и Docker-образы берут geodata из
+`XTLS/Xray-rules-dat` (ветка `release`: `geoip/geoip-lite.dat` → `geoip.dat`,
+`geosite/geosite.dat` → `geosite.dat`) вместо `Loyalsoldier/v2ray-rules-dat`. Код ядра не
+меняется — это файлы в архивах релизов.
+
+## 141.2	Сравнение (2026-10-21, последние релизы обоих репозиториев)
+
+Коды верхнего уровня `.dat` (поле 1 каждой записи `GeoIPList` / `GeoSiteList`), SHA-256
+`geoip-lite.dat` сверен с `.sha256sum` из ветки `release`:
+
+| Файл | Кодов | Отличия от Loyalsoldier |
+|------|-------|-------------------------|
+| Loyalsoldier `geoip.dat` | 260 | — |
+| XTLS `geoip-lite.dat` (в архивах Xray) | 18 | общих 13: `cn`, `ir`, `ru`, `private`, `google`, `cloudflare`, `cloudfront`, `facebook`, `fastly`, `netflix`, `telegram`, `tor`, `twitter`; нет 247 стран; новые `in-cn`, `in-ir`, `in-ru`, `blacklist-ir`, `blacklist-ru` |
+| XTLS `geoip-full.dat` | 266 | все 260 + `anycast`, `in-*`, `blacklist-*` |
+| Loyalsoldier `geosite.dat` | 1555 | — |
+| XTLS `geosite.dat` | 1549 | нет `apple-cn`, `china-list`, `gfw`, `google-cn`, `win-extra`, `win-spy`, `win-update`; новый `fluxer` |
+
+## 141.3	Решение
+
+Источник Feldjäger не меняется: обновление geodata с `geoip-lite` сломало бы любой конфиг с
+`geoip:` страны вне этих 13 кодов (`checkFile` при загрузке — Xray не стартует), а XTLS `geosite`
+— конфиги с `geosite:gfw` и др. Исправлена только документация `xray/geodata.rs`: прежний текст
+«тот же источник, что CI Xray-core» с v26.10.21 неверен; добавлено объяснение и ссылка сюда.
+Возможный будущий пункт — выбор источника на странице GeoData (Loyalsoldier / XTLS full) с
+проверкой используемых кодов перед заменой.
+
+## 141.4	Итог
+
+Изменение только в документации кода (версия b). Тесты: **1461 passed / 0 failed**.
+
+# 142	Переход на Xray-core v26.10.21: локальное ядро и версия в About (Roadmap §4.5, аудит v26.10.21) (0.5.72-2)
+
+- `xray-bin/xray.exe` (не в git) — 26.10.21 (`1b1647c`, go1.27.3, `Xray-windows-64.zip` из релиза
+  v26.10.21, SHA2-256 сверен с `.dgst`); прежнее ядро сохранено как `xray-bin/xray-26.10.10.exe`
+  для сравнений. Parity-тесты (`finalmask_fixtures`, outbound stream, `sendThrough`, Loopback)
+  на нём проходят без пропусков: фикстуры с `CoreFeature` до v26.10.21 включительно больше не
+  пропускаются.
+- `BASELINE_XRAY_CORE` = v26.10.21 (§135): пункты A–E аудита §136 закрыты (§137–141).
+- Тесты: **1461 + 16 passed / 0 failed**, clippy lib 65.

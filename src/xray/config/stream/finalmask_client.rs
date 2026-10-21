@@ -16,6 +16,8 @@
 //!   junk is no client setting — dropped. A dropped layer does not shift the others: on reads it
 //!   was a pass-through anyway;
 //! - `udphop` is client-only and never on an inbound (refused on save) — dropped if found;
+//! - `filter` (v26.10.21) filters the sources the server accepts; its client side passes
+//!   everything through — dropped;
 //! - `xicmp.ips` means "accepted peer IPs" on the server and "IPs to send to" on the client
 //!   (`xicmp/server.go` vs `client.go`; empty = the dialed address) — removed;
 //! - `realm.ipMode` / `realm.portMapping` describe the local network of their side (address
@@ -103,7 +105,7 @@ fn client_layer(chain: FinalMaskChain, kind: &str, settings: &Value) -> Option<(
     let mut settings = settings.as_object().cloned().unwrap_or_default();
     let lower = kind.to_ascii_lowercase();
     let note = match (chain, lower.as_str()) {
-        (_, "fragment" | "noise" | "udphop") => return None,
+        (_, "fragment" | "noise" | "udphop" | "filter") => return None,
         (FinalMaskChain::Udp, "xicmp") => {
             settings.remove("ips");
             None

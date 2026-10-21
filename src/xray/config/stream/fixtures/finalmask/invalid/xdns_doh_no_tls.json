@@ -1,0 +1,1 @@
+{"udp": [{"type": "xdns", "settings": {"domains": [{"names": ["t.example.com"]}], "resolvers": [{"addrs": ["https://dns.google/dns-query"]}]}}]}

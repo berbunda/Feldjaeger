@@ -33,7 +33,7 @@ use crate::xray::config::stream::{
     quic_transport_of,
     FinalMaskChain, NOISE_EXP_KIND, StreamDirection, finalmask_layer_type_applies,
     finalmask_tcp_layer_faces_probes,
-    xdns_has_string_schema, xdns_has_v26_9_30_objects, xdns_uses_names_addrs,
+    xdns_has_string_schema, xdns_has_v26_9_30_objects, xdns_uses_names_addrs, xdns_uses_doh,
     xmc_has_legacy_usernames,
 };
 
@@ -82,6 +82,9 @@ pub enum CompatibilityWarningId {
     /// `"udphop: client only"`, so a UDP listener with it fails when Xray starts (`xray run
     /// -test` passes — it never listens); on a TCP-only transport the layer is simply unused.
     UdpHopClientOnly,
+    /// A `filter` layer (v26.10.21) in an outbound: its client wrappers pass everything through,
+    /// so it filters nothing there.
+    FinalMaskFilterServerOnly,
     /// `kcpSettings.congestion` / `readBufferSize` / `writeBufferSize` — not fields of the core's
     /// `KCPConfig` (`infra/conf/transport_method.go`) any more (Roadmap §2.6 stage 0.6); read up to
     /// v26.9.8 ([`CoreFeature::KcpConfigSlimmed`]).
@@ -255,6 +258,11 @@ impl CompatibilityWarningId {
             Self::UdpHopSockoptIgnored => {
                 "ignored by Xray-core: `sockopt` was removed from the `udphop` mask \
                  (XTLS/Xray-core#6754)"
+            }
+            Self::FinalMaskFilterServerOnly => {
+                "no effect in an outbound: `filter` checks the source IP of what a listener \
+                 accepts — on the dialing side Xray-core passes everything through. Put it in the \
+                 inbound"
             }
             Self::UdpHopClientOnly => {
                 "`udphop` is a client-only mask: Xray-core cannot listen with it (\"udphop: client \
@@ -870,6 +878,23 @@ fn finalmask_warnings(
             .is_some_and(|value| value.trim().eq_ignore_ascii_case(kind))
     };
 
+    // `filter` (v26.10.21) in either chain: unknown to an older core ("unknown config id"),
+    // inert in an outbound.
+    for chain in ["tcp", "udp"] {
+        let layers = finalmask.get(chain).and_then(Value::as_array);
+        for (index, layer) in layers.into_iter().flatten().enumerate() {
+            if !layer_is(layer, "filter") {
+                continue;
+            }
+            let location = format!("streamSettings.finalmask.{chain}[{index}].type");
+            if !CoreFeature::FinalMaskFilter.available_in(core) {
+                push_if_core_too_old(CoreFeature::FinalMaskFilter, core, location, warnings);
+            } else if direction == StreamDirection::Outbound {
+                warnings.push(CompatibilityWarning { id: CompatibilityWarningId::FinalMaskFilterServerOnly, location });
+            }
+        }
+    }
+
     if let Some(tcp) = finalmask.get("tcp").and_then(Value::as_array) {
         for (index, layer) in tcp.iter().enumerate() {
             if !layer_is(layer, "xmc") {
@@ -940,12 +965,33 @@ fn finalmask_warnings(
                         });
                     }
                 }
+                if xdns_uses_doh(settings) {
+                    push_if_core_too_old(
+                        CoreFeature::XdnsDohResolver,
+                        core,
+                        format!("{location}.resolvers"),
+                        warnings,
+                    );
+                }
                 if xdns_uses_names_addrs(settings) {
                     push_if_core_too_old(CoreFeature::XdnsNamesAddrsSchema, core, location, warnings);
                 }
                 continue;
             }
             if layer_is(layer, "noise") {
+                let has_script = layer
+                    .get("settings")
+                    .and_then(|settings| settings.get("script"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|script| !script.is_empty());
+                if has_script {
+                    push_if_core_too_old(
+                        CoreFeature::NoiseLuaScript,
+                        core,
+                        format!("streamSettings.finalmask.udp[{index}].settings.script"),
+                        warnings,
+                    );
+                }
                 let items = layer
                     .get("settings")
                     .and_then(|settings| settings.get("noise"))
@@ -2002,7 +2048,42 @@ mod tests {
 
         assert!(ids(&names, Some(v26_10_10)).is_empty());
         assert!(ids(&names, None).is_empty());
-        assert_eq!(ids(&names, Some(v26_9_30)), vec![(too_old(CoreFeature::XdnsNamesAddrsSchema, v26_9_30), at)]);
+        assert_eq!(ids(&names, Some(v26_9_30)), vec![(too_old(CoreFeature::XdnsNamesAddrsSchema, v26_9_30), at.clone())]);
+
+        // Audit v26.10.21 B: DoH resolvers (#7140) need v26.10.17.
+        let doh = with(json!({"domains": [{"names": ["t.example.com"]}],
+                              "resolvers": [{"addrs": ["https://dns.google/dns-query"], "tlsConfig": {"serverName": "dns.google"}}]}));
+        assert_eq!(
+            ids(&doh, Some(v26_10_10)),
+            vec![(too_old(CoreFeature::XdnsDohResolver, v26_10_10), format!("{at}.resolvers"))]
+        );
+        assert!(ids(&doh, Some(XrayCoreVersion::new(26, 10, 17))).is_empty());
+        assert!(ids(&doh, None).is_empty());
+    }
+
+    /// Audit v26.10.21 D: `filter` (#7206) needs v26.10.21 on both chains and does nothing in an
+    /// outbound.
+    #[test]
+    fn filter_follows_core_and_side() {
+        let stream = json!({"streamSettings": {"finalmask": {
+            "tcp": [{"type": "filter", "settings": {"blockedSourceIPs": ["10.0.0.0/8"]}}],
+            "udp": [{"type": "Filter"}]
+        }}});
+        let ids = |found: Vec<CompatibilityWarning>| -> Vec<_> { found.into_iter().map(|w| (w.id, w.location)).collect() };
+        let old = XrayCoreVersion::new(26, 10, 17);
+        let too_old = CompatibilityWarningId::RequiresNewerCore { feature: CoreFeature::FinalMaskFilter, installed: old };
+        assert_eq!(
+            ids(inbound_warnings(&stream, Some(old))),
+            vec![
+                (too_old, "streamSettings.finalmask.tcp[0].type".to_owned()),
+                (too_old, "streamSettings.finalmask.udp[0].type".to_owned())
+            ]
+        );
+        assert!(inbound_warnings(&stream, None).is_empty());
+        let outbound = json!({"protocol": "freedom", "streamSettings": stream["streamSettings"].clone()});
+        let found = ids(outbound_warnings(&outbound, Some(XrayCoreVersion::new(26, 10, 21))));
+        assert_eq!(found.len(), 2, "{found:?}");
+        assert!(found.iter().all(|(id, _)| *id == CompatibilityWarningId::FinalMaskFilterServerOnly));
     }
 
     /// Roadmap §2.6 stage 1.4: `noise` `type: "exp"` (#6862) needs v26.9.30.
@@ -2020,6 +2101,14 @@ mod tests {
         ));
         assert!(inbound_warnings(&inbound, Some(XrayCoreVersion::new(26, 9, 30))).is_empty());
         assert!(inbound_warnings(&inbound, None).is_empty());
+
+        // Audit v26.10.21 C: `script` (#7124) needs v26.10.17; an older core ignores it.
+        let scripted = json!({"streamSettings": {"finalmask": {"udp": [{"type": "noise", "settings": {"script": "/etc/xray/noise.lua"}}]}}});
+        let found = inbound_warnings(&scripted, Some(XrayCoreVersion::new(26, 10, 10)));
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].location, "streamSettings.finalmask.udp[0].settings.script");
+        assert!(matches!(found[0].id, CompatibilityWarningId::RequiresNewerCore { feature: CoreFeature::NoiseLuaScript, .. }));
+        assert!(inbound_warnings(&scripted, Some(XrayCoreVersion::new(26, 10, 17))).is_empty());
     }
 
     #[test]

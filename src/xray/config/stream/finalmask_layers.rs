@@ -771,11 +771,14 @@ pub struct NoiseMaskSettings {
     pub reset: RangeValue,
     /// `noise[]`; empty = key absent.
     pub noise: Vec<NoiseMaskItem>,
+    /// `script` — path of a Lua file whose `HandleNoise(plan, addr)` adds the junk packets instead
+    /// of `noise[]` (Xray-core v26.10.17+, XTLS/Xray-core#7124); `None` = key absent.
+    pub script: Option<String>,
     /// Unknown keys, preserved verbatim.
     pub extras: Map<String, Value>,
 }
 
-const KNOWN_NOISE_MASK_KEYS: &[&str] = &["reset", "noise"];
+const KNOWN_NOISE_MASK_KEYS: &[&str] = &["reset", "noise", "script"];
 
 /// Parses `settings` as `noise`. `None` when `settings` isn't an object, any `noise[]` entry
 /// isn't itself an object, or a known key can't be represented losslessly — callers should then
@@ -790,9 +793,15 @@ pub fn parse_noise_mask_settings(settings: &Value) -> Option<NoiseMaskSettings> 
             .collect::<Option<Vec<_>>>()?,
         Some(_) => return None,
     };
+    let script = match object.get("script") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(script)) => Some(script.clone()),
+        Some(_) => return None,
+    };
     Some(NoiseMaskSettings {
         reset: RangeValue::parse(object.get("reset"))?,
         noise,
+        script,
         extras: extras_of(object, KNOWN_NOISE_MASK_KEYS),
     })
 }
@@ -803,12 +812,22 @@ pub(super) const PACKET_KINDS: &[&str] = &["", "array", "str", "hex", "base64"];
 /// The `noise[].type` that turns `packet` into an expression (XTLS/Xray-core#6862, v26.9.30).
 pub const NOISE_EXP_KIND: &str = "exp";
 
-/// Validates a `noise` layer like `NoiseMask.Build()`. Per item: `packet` and a positive `rand`
-/// exclude each other; `type: "exp"` needs a string expression ([`validate_noise_exp`]);
-/// otherwise `randRange` lies within 0–255 and `packet` decodes per `type` — `str`/`hex`/`base64`
-/// need a `packet` (decoding an absent value fails in the core), an unknown `type` is an error.
+/// Validates a `noise` layer like `NoiseMask.Build()`. A non-empty `script` (v26.10.17+) excludes
+/// `noise[]` — the core compiles the file in `Build()`, which only `xray run -test` on the server
+/// can check. Per item: `packet` and a positive `rand` exclude each other; `type: "exp"` needs a
+/// string expression ([`validate_noise_exp`]); otherwise `randRange` lies within 0–255 and
+/// `packet` decodes per `type` — `str`/`hex`/`base64` need a `packet` (decoding an absent value
+/// fails in the core), an unknown `type` is an error.
 pub fn validate_noise_mask_settings(draft: &NoiseMaskSettings) -> Result<(), String> {
     draft.reset.validate().map_err(|error| format!("reset: {error}"))?;
+    if let Some(script) = draft.script.as_deref() {
+        if script.chars().any(char::is_control) {
+            return Err("script must not contain control characters".to_owned());
+        }
+        if !script.is_empty() && !draft.noise.is_empty() {
+            return Err("\"script\" and \"noise\" can't be used together — the script adds the packets".to_owned());
+        }
+    }
     for (index, item) in draft.noise.iter().enumerate() {
         validate_noise_item(item).map_err(|error| format!("noise[{index}]: {error}"))?;
     }
@@ -930,6 +949,9 @@ pub fn noise_mask_settings_to_value(draft: &NoiseMaskSettings) -> Value {
             Value::Array(draft.noise.iter().map(noise_item_to_value).collect()),
         );
     }
+    if let Some(script) = &draft.script {
+        object.insert("script".to_owned(), Value::String(script.clone()));
+    }
     apply_extras(&mut object, &draft.extras);
     Value::Object(object)
 }
@@ -938,11 +960,11 @@ pub fn noise_mask_settings_to_value(draft: &NoiseMaskSettings) -> Value {
 // Lives in `super::finalmask_xdns` (Roadmap §2.6 stages 1.3 / 1.6: v26.10.10 schema + migration).
 
 pub use super::finalmask_xdns::{
-    XDNS_DEFAULT_LABEL_LIMIT, XDNS_DEFAULT_LEN_LIMIT, XDNS_DEFAULT_RESOLVER_PORT, XDNS_RECORD_TYPES,
+    XDNS_DEFAULT_LABEL_LIMIT, XDNS_DEFAULT_LEN_LIMIT, XDNS_DEFAULT_RESOLVER_PORT, XDNS_DEFAULT_RESOLVER_WORKER, XDNS_DOH_SCHEME, XDNS_RECORD_TYPES,
     XDNS_RESOLVER_KINDS, XdnsDomain, XdnsResolver, XdnsSettings, migrate_legacy_xdns_settings,
     parse_xdns_settings, validate_xdns_resolver_addr, validate_xdns_settings, xdns_default_types,
     xdns_has_legacy_fields, xdns_has_string_schema, xdns_has_v26_9_30_objects,
-    xdns_record_type_name, xdns_settings_to_value, xdns_uses_names_addrs,
+    xdns_record_type_name, xdns_settings_to_value, xdns_uses_names_addrs, xdns_uses_doh, xdns_tls_config_is_h3, xdns_addr_is_doh,
 };
 
 // ─── xicmp (UDP) ────────────────────────────────────────────────────────────
@@ -1370,6 +1392,25 @@ mod tests {
         assert_eq!(padding(json!({})), (0, 0));
         assert_eq!(padding(json!({"paddingMin": 20, "paddingMax": 5})), (20, 20));
         assert_eq!(padding(json!({"padding_min": 150, "paddingMax": 300})), (100, 100));
+    }
+
+    /// Audit v26.10.21 C: `script` (#7124) round-trips, excludes non-empty `noise[]` like
+    /// `NoiseMask.Build()`, keeps `reset`; a non-string value stays on the raw-JSON path.
+    #[test]
+    fn noise_script_round_trips_and_excludes_items() {
+        let settings = json!({"reset": "5-10", "script": "/etc/xray/noise.lua", "noise": []});
+        let draft = parse_noise_mask_settings(&settings).expect("typed");
+        assert_eq!(draft.script.as_deref(), Some("/etc/xray/noise.lua"));
+        assert_eq!(validate_noise_mask_settings(&draft), Ok(()));
+        assert_eq!(noise_mask_settings_to_value(&draft), json!({"reset": "5-10", "script": "/etc/xray/noise.lua"}));
+
+        let mixed = parse_noise_mask_settings(&json!({"script": "/etc/xray/noise.lua", "noise": [{"rand": 8}]})).expect("typed");
+        let error = validate_noise_mask_settings(&mixed).unwrap_err();
+        assert!(error.contains("can't be used together"), "{error}");
+        // An empty script is no script for the core.
+        let empty = parse_noise_mask_settings(&json!({"script": "", "noise": [{"rand": 8}]})).expect("typed");
+        assert_eq!(validate_noise_mask_settings(&empty), Ok(()));
+        assert!(parse_noise_mask_settings(&json!({"script": 1})).is_none());
     }
 
     /// Roadmap §2.6 stage 1.4: `NoiseMask.Build()`, including `type: "exp"` (#6862).

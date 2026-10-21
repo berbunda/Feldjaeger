@@ -1186,6 +1186,10 @@ impl ApplicationService {
             self.dns_settings_error = Some(error.message());
             return Err(error.message());
         }
+        if let Some(message) = crate::xray::dns_script_save_error(&draft, self.xray_core_version()) {
+            self.dns_settings_error = Some(message.clone());
+            return Err(message);
+        }
 
         let editable = match self.loaded_config.editable() {
             Some(editable) => editable.clone(),
@@ -2896,6 +2900,10 @@ impl ApplicationService {
         if let Err(error) = validate_routing_settings(&draft) {
             self.routing_settings_error = Some(error.message());
             return Err(error.message());
+        }
+        if let Some(message) = crate::xray::routing_script_save_error(&draft, self.xray_core_version()) {
+            self.routing_settings_error = Some(message.clone());
+            return Err(message);
         }
 
         let editable = match self.loaded_config.editable() {

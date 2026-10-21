@@ -28,18 +28,22 @@ use crate::xray::{
 
 const HELP_SCRIPT: HelpText = HelpText::new(
     "Path of a Lua script on the server that picks the outbound for every connection (Xray-core \
-     v26.10.10+). It must define HandleRoute(...) returning (outboundTag, ruleTag, err). With a \
-     script the rules below are not applied; balancers stay reachable through the xray.router \
-     module (PickOutbound). Feldjäger cannot see the tags the script returns. Use an absolute \
-     path: the file must exist when the config loads, and Lua errors show only when Xray starts \
-     (xray run -test does not compile the script). Empty = no script.",
+     v26.10.10+). It must define HandleRoute(...) returning (outboundTag, ruleTag, err); \
+     balancers stay reachable through the xray.router module (PickOutbound). Feldjäger cannot \
+     see the tags the script returns. The script replaces the rules: v26.10.10 ignores them, \
+     v26.10.17+ refuses rules and domainStrategy next to a script (Feldjäger then leaves out \
+     domainStrategy \"AsIs\"). Use an absolute path to a .lua file (v26.10.17+ refuses other \
+     extensions and compiles the script already in xray run -test; v26.10.10 only checks that \
+     the file exists). The script runs sandboxed: no io, load, dofile, print. Empty = no script.",
     "Путь к Lua-скрипту на сервере, который выбирает outbound для каждого соединения (Xray-core \
      v26.10.10+). Скрипт должен определить HandleRoute(...), возвращающую (outboundTag, \
-     ruleTag, err). Со скриптом правила ниже не применяются; балансировщики доступны через \
-     модуль xray.router (PickOutbound). Теги, которые возвращает скрипт, Feldjäger не видит. \
-     Указывайте абсолютный путь: файл должен существовать при загрузке конфигурации, а ошибки \
-     Lua видны только при запуске Xray (xray run -test скрипт не компилирует). Пусто — без \
-     скрипта.",
+     ruleTag, err); балансировщики доступны через модуль xray.router (PickOutbound). Теги, \
+     которые возвращает скрипт, Feldjäger не видит. Скрипт заменяет правила: v26.10.10 их \
+     игнорирует, v26.10.17+ не принимает rules и domainStrategy рядом со скриптом (Feldjäger \
+     тогда не пишет domainStrategy \"AsIs\"). Указывайте абсолютный путь к файлу .lua \
+     (v26.10.17+ не принимает другие расширения и компилирует скрипт уже в xray run -test; \
+     v26.10.10 проверяет только, что файл существует). Скрипт работает в песочнице: без io, \
+     load, dofile, print. Пусто — без скрипта.",
 );
 const HELP_DOMAIN_STRATEGY: HelpText = HelpText::new(
     "How a domain target meets ip rules. AsIs (default) — never resolved; IPIfNonMatch — if no \

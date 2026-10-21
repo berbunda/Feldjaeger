@@ -140,7 +140,7 @@ const CASES: &[Case] = &[
     case!("invalid/xdns_extra_poll", Inbound, build("extraPoll must lie within 0–3"), XdnsNamesAddrsSchema),
     // The server fixture on the client side: resolvers are checked by `NewClient`, not `Build()`.
     case!("valid/xdns_server", Outbound, runtime("resolvers: the client side needs at least one resolver"), XdnsNamesAddrsSchema),
-    case!("invalid/xdns_resolver_scheme", Outbound, build("scheme \"doh\" must be udp or tcp"), XdnsNamesAddrsSchema),
+    case!("invalid/xdns_resolver_scheme", Outbound, build("scheme \"doh\" must be udp, tcp or https"), XdnsNamesAddrsSchema),
     // `url.Parse` splits a bare IPv6 address at its last colon; the dial goes nowhere.
     case!("invalid/xdns_resolver_bare_ipv6", Outbound, runtime("an IPv6 address needs brackets"), XdnsNamesAddrsSchema),
     // No names → no domains: `NewServer` fails with "empty domains" when Xray starts.
@@ -152,6 +152,19 @@ const CASES: &[Case] = &[
     case!("invalid/realm_stun_port_name", Outbound, runtime("port must be a number 1–65535")),
     case!("invalid/udphop_short_interval", Outbound, build("interval must be at least 5"), UdpHopUdpMask),
     case!("invalid/udphop_on_inbound", Inbound, runtime("client only"), UdpHopUdpMask),
+    // DoH resolvers (#7140, v26.10.17): each runtime case passes `xray run -test` and fails on the
+    // first dial — checked live on 26.10.21 (Architecture §138.1).
+    case!("valid/xdns_doh_client", Outbound, Valid, XdnsDohResolver),
+    case!("invalid/xdns_doh_no_tls", Outbound, runtime("empty tls config"), XdnsDohResolver),
+    case!("invalid/xdns_doh_brutal_h3", Outbound, runtime("makes Xray panic"), XdnsDohResolver),
+    case!("invalid/xdns_doh_quic_congestion", Outbound, build("quicConfig.congestion: unknown value \"cubic\""), XdnsDohResolver),
+    // ── both chains: `filter` (#7206, v26.10.21) ──
+    case!("valid/filter_tcp", Inbound, Valid, FinalMaskFilter),
+    // In an outbound the layer is accepted and does nothing (a warning, not an error).
+    case!("valid/filter_tcp", Outbound, Valid, FinalMaskFilter),
+    case!("valid/filter_udp", Inbound, Valid, FinalMaskFilter),
+    case!("invalid/filter_bad_cidr", Inbound, build("CIDR prefix length 33 exceeds max 32"), FinalMaskFilter),
+    case!("invalid/filter_domain", Inbound, build("a domain name is not accepted"), FinalMaskFilter),
 ];
 
 fn fixture_dir() -> PathBuf {

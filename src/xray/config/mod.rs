@@ -56,7 +56,7 @@ pub use burst_observatory_settings::{
 pub use compatibility::{
     CompatibilityWarning, CompatibilityWarningId, WarningSeverity, inbound_warnings, is_netip_addr,
     outbound_warnings,
-    with_warning_suffix, BASELINE_XRAY_CORE, CORE_FEATURES, CoreFeature, XrayCoreVersion, dns_script_notes,
+    with_warning_suffix, BASELINE_XRAY_CORE, CORE_FEATURES, CoreFeature, XrayCoreVersion, dns_script_notes, dns_script_save_error, routing_script_save_error,
     routing_script_notes, CompatibilityGateId, allowed_security_modes, allowed_stream_methods, check_inbound_compatibility,
     check_outbound_compatibility, coerce_display_stream_method, coerce_security_mode_for_transport,
     effective_security, first_failing_gate, first_failing_outbound_gate, g10_hysteria_requires_tls, g11_shadowsocks_tcp_only,
@@ -152,7 +152,8 @@ pub use stream::{
     QUIC_CONGESTION_MODES, QUIC_KEEP_ALIVE_PERIOD_RANGE, QUIC_MAX_IDLE_TIMEOUT_RANGE,
     QUIC_MIN_BRUTAL_BYTES_PER_SEC, QUIC_MIN_INCOMING_STREAMS, QUIC_MIN_RECEIVE_WINDOW,
     parse_quic_params, quic_bandwidth_bytes_per_sec, quic_params_field_applies, validate_quic_params,
-    CLIENT_ONLY_UDP_FINALMASK_TYPES, FinalMaskChain, INBOUND_ONLY_SOCKOPT_FIELDS,
+    CLIENT_ONLY_UDP_FINALMASK_TYPES, FilterSettings, filter_settings_to_value, parse_filter_settings,
+    validate_filter_ip_rule, validate_filter_settings, FinalMaskChain, INBOUND_ONLY_SOCKOPT_FIELDS,
     OUTBOUND_ONLY_SOCKOPT_FIELDS, StreamDirection, UDPHOP_DEFAULT_INTERVAL_SECS,
     UDPHOP_LEGACY_SOCKOPT_KEY, UDPHOP_MIN_INTERVAL_SECS, UdpHopModes,
     finalmask_layer_type_applies, finalmask_tcp_layer_faces_probes, parse_realm_url, parse_udphop_mode, sockopt_field_applies,
@@ -173,10 +174,10 @@ pub use stream::{
     FRAGMENT_PACKETS_TLSHELLO, FragmentPackets, fragment_packets_mode, NoiseItemPayload, SALAMANDER_MIN_PASSWORD_BYTES,
     SUDOKU_ASCII_MODES, SUDOKU_MAX_PADDING, validate_sudoku_custom_table, validate_sudoku_settings,
     NOISE_EXP_KIND,
-    XDNS_DEFAULT_LABEL_LIMIT, XDNS_DEFAULT_LEN_LIMIT, XDNS_DEFAULT_RESOLVER_PORT, XDNS_RECORD_TYPES,
+    XDNS_DEFAULT_LABEL_LIMIT, XDNS_DEFAULT_LEN_LIMIT, XDNS_DEFAULT_RESOLVER_PORT, XDNS_DEFAULT_RESOLVER_WORKER, XDNS_DOH_SCHEME, XDNS_RECORD_TYPES,
     XDNS_RESOLVER_KINDS, XdnsDomain, XdnsResolver, migrate_legacy_xdns_settings,
     validate_xdns_resolver_addr, xdns_default_types, xdns_has_legacy_fields, xdns_has_string_schema,
-    xdns_has_v26_9_30_objects, xdns_record_type_name, xdns_uses_names_addrs,
+    xdns_has_v26_9_30_objects, xdns_record_type_name, xdns_uses_names_addrs, xdns_uses_doh, xdns_tls_config_is_h3, xdns_addr_is_doh,
 };
 pub use json_diff::{
     JsonDiffEntry, JsonDiffKind, redacted_json_diff, redacted_json_diff_bytes,

@@ -25,7 +25,9 @@ use crate::xray::{
     salamander_settings_to_value, sudoku_settings_to_value, udphop_settings_to_value,
     validate_finalmask_layer, xdns_settings_to_value, xicmp_settings_to_value,
     XDNS_RECORD_TYPES, XdnsDomain, XdnsResolver, migrate_legacy_xdns_settings,
-    xdns_has_legacy_fields, xdns_has_string_schema, xdns_record_type_name,
+    filter_settings_to_value, parse_filter_settings,
+    xdns_has_legacy_fields, xdns_has_string_schema, xdns_record_type_name, xdns_addr_is_doh,
+    xdns_tls_config_is_h3,
     HeaderCustomItem, HeaderCustomItemKind, HeaderCustomSequences, HeaderCustomTcpGroup,
     PacketValue, escape_packet_text, header_custom_tcp_settings_to_value,
     parse_header_custom_tcp_settings, unescape_packet_text,
@@ -260,6 +262,31 @@ const HELP_TYPE_REALM: HelpText = HelpText::new(
     "Пробивание NAT: оба участника регистрируются на realm-сервере, узнают свои публичные \
      адреса через STUN и затем соединяются напрямую — сервер за NAT без открытого порта.",
 );
+const HELP_TYPE_FILTER: HelpText = HelpText::new(
+    "Xray-core v26.10.21+, tcp and udp: the listener drops connections / datagrams by source IP \
+     before any other mask. Only the inbound (server) side filters — in an outbound the layer \
+     does nothing, and a client never needs it.",
+    "Xray-core v26.10.21+, tcp и udp: слушатель отбрасывает соединения / датаграммы по IP \
+     источника раньше любых других масок. Фильтрует только сторона inbound (сервер) — в outbound \
+     слой ничего не делает, и клиенту он никогда не нужен.",
+);
+const HELP_FILTER_BLOCKED: HelpText = HelpText::new(
+    "Sources to drop, one rule per line, as in a routing rule's ip: an IP or CIDR \
+     (10.0.0.0/8, 2001:db8::/32), geoip:CODE (geoip:cn), ext:FILE:CODE; a leading ! negates the \
+     rule (!geoip:ru = everything outside RU). geoip / ext need the .dat file on the server — \
+     xray run -test there checks it. Empty = block nothing.",
+    "Источники, которые отбрасываются, по одному правилу в строке, как в ip правила \
+     маршрутизации: IP или CIDR (10.0.0.0/8, 2001:db8::/32), geoip:КОД (geoip:cn), \
+     ext:ФАЙЛ:КОД; ! в начале инвертирует правило (!geoip:ru — всё, кроме RU). Для geoip / ext \
+     нужен .dat-файл на сервере — его проверяет xray run -test там. Пусто — ничего не блокировать.",
+);
+const HELP_FILTER_ALLOWED: HelpText = HelpText::new(
+    "When set, only sources matching one of these rules get through (same rule syntax as \
+     blockedSourceIPs); a source on both lists is dropped. Empty = every source not blocked.",
+    "Если задано, проходят только источники, подходящие под одно из правил (синтаксис тот же, \
+     что у blockedSourceIPs); источник из обоих списков отбрасывается. Пусто — все \
+     незаблокированные источники.",
+);
 const HELP_TYPE_UDPHOP: HelpText = HelpText::new(
     "Client-only UDP port hopping: the client switches its local socket or the server port / \
      address on a timer or per connection, so a single blocked port does not stop the traffic.",
@@ -360,6 +387,21 @@ const HELP_SUDOKU_PADDING: HelpText = HelpText::new(
 );
 
 // FinalMask `noise` layer (`noise/conn.go`).
+const HELP_NOISE_SCRIPT: HelpText = HelpText::new(
+    "Xray-core v26.10.17+: path of a Lua file on the server that decides the junk instead of \
+     noise[] (the two exclude each other). It must define HandleNoise(plan, addr): plan:Add(packet, \
+     delayMs) and plan:AddRandom(size, delayMs) queue packets; the xray.finalmask.noise module has \
+     Random / RandomBetween. reset still applies. The file must end in .lua and is compiled when \
+     the config loads (xray run -test included); it runs sandboxed. Use an absolute path. An older \
+     core ignores the key. Empty = no script.",
+    "Xray-core v26.10.17+: путь к Lua-файлу на сервере, который определяет мусор вместо noise[] \
+     (одно исключает другое). Файл должен определить HandleNoise(plan, addr): plan:Add(packet, \
+     delayMs) и plan:AddRandom(size, delayMs) ставят пакеты в очередь; модуль \
+     xray.finalmask.noise даёт Random / RandomBetween. reset по-прежнему действует. Файл должен \
+     оканчиваться на .lua и компилируется при загрузке конфигурации (в том числе в xray run \
+     -test); работает в песочнице. Указывайте абсолютный путь. Старое ядро ключ игнорирует. \
+     Пусто — без скрипта.",
+);
 const HELP_NOISE_RESET: HelpText = HelpText::new(
     "Seconds after which the junk is sent again to the same address, before its next packet: N \
      or MIN-MAX (random). Empty or 0 = only once per address.",
@@ -498,10 +540,44 @@ const HELP_XDNS_DOMAINS: HelpText = HelpText::new(
 const HELP_XDNS_RESOLVERS: HelpText = HelpText::new(
     "DNS resolvers the client sends its queries through, one address per line: \
      [udp|tcp://]host[:port] — no scheme means udp, no port means 53, IPv6 in brackets \
-     (udp://[2606:4700::1111]:53). Required on the client (outbound) side, ignored by the server.",
+     (udp://[2606:4700::1111]:53) — or, from Xray-core v26.10.17, a DoH URL \
+     https://host[:port]/path (https://dns.google/dns-query), which needs tlsConfig. worker, \
+     tlsConfig and quicConfig apply to every address of the group. Required on the client \
+     (outbound) side, ignored by the server.",
     "DNS-резолверы, через которые клиент отправляет запросы, по одному адресу в строке: \
      [udp|tcp://]host[:port] — без схемы это udp, без порта — 53, IPv6 в квадратных скобках \
-     (udp://[2606:4700::1111]:53). Обязательно на стороне клиента (outbound), сервер игнорирует.",
+     (udp://[2606:4700::1111]:53), — или, начиная с Xray-core v26.10.17, URL DoH \
+     https://host[:port]/path (https://dns.google/dns-query), которому нужен tlsConfig. worker, \
+     tlsConfig и quicConfig действуют на все адреса группы. Обязательно на стороне клиента \
+     (outbound), сервер игнорирует.",
+);
+const HELP_XDNS_WORKER: HelpText = HelpText::new(
+    "DoH only (v26.10.17+): how many DoH requests of this resolver run in parallel. Empty or 0 = \
+     32; a negative value makes every DoH dial fail (\"invalid worker\").",
+    "Только DoH (v26.10.17+): сколько DoH-запросов этого резолвера выполняются параллельно. Пусто \
+     или 0 — 32; отрицательное значение ломает каждое подключение DoH (\"invalid worker\").",
+);
+const HELP_XDNS_TLS_CONFIG: HelpText = HelpText::new(
+    "DoH only (v26.10.17+): TLS of the https:// addresses, the same object as tlsSettings \
+     (serverName, fingerprint — Chrome by default, alpn, echConfigList, verifyPeerCertByName, …). \
+     Required for DoH, with serverName (or verifyPeerCertByName / pinnedPeerCertSha256): without \
+     it Xray passes run -test but every DoH request fails. alpn [\"h3\"] switches to DoH over \
+     QUIC (quicConfig).",
+    "Только DoH (v26.10.17+): TLS для адресов https://, тот же объект, что tlsSettings \
+     (serverName, fingerprint — по умолчанию Chrome, alpn, echConfigList, verifyPeerCertByName, …). \
+     Для DoH обязателен, с serverName (или verifyPeerCertByName / pinnedPeerCertSha256): без него \
+     Xray проходит run -test, но каждый DoH-запрос завершается ошибкой. alpn [\"h3\"] \
+     переключает на DoH поверх QUIC (quicConfig).",
+);
+const HELP_XDNS_QUIC_CONFIG: HelpText = HelpText::new(
+    "DoH over h3 only (tlsConfig.alpn exactly [\"h3\"], v26.10.17+): QUIC parameters, the same \
+     object as finalmask quicParams (congestion, windows, maxIdleTimeout, keepAlivePeriod, …). \
+     congestion \"brutal\" is refused — it makes Xray panic on the first DoH dial; use bbr, reno \
+     or force-brutal.",
+    "Только DoH поверх h3 (tlsConfig.alpn ровно [\"h3\"], v26.10.17+): параметры QUIC, тот же \
+     объект, что finalmask quicParams (congestion, окна, maxIdleTimeout, keepAlivePeriod, …). \
+     congestion \"brutal\" не принимается — с ним Xray падает при первом подключении DoH; \
+     используйте bbr, reno или force-brutal.",
 );
 const HELP_XDNS_EXTRA_POLL: HelpText = HelpText::new(
     "Additional polling queries the client keeps in flight, 0–3 (empty = 0).",
@@ -1195,6 +1271,7 @@ fn finalmask_type_help(chain: FinalMaskChain, layer_type: &str) -> Option<(&'sta
         (FinalMaskChain::Udp, "xicmp") => ("xicmp", HELP_TYPE_XICMP),
         (FinalMaskChain::Udp, "realm") => ("realm", HELP_TYPE_REALM),
         (FinalMaskChain::Udp, "udphop") => ("udphop", HELP_TYPE_UDPHOP),
+        (_, "filter") => ("filter", HELP_TYPE_FILTER),
         _ => return None,
     };
     Some(help)
@@ -1226,6 +1303,7 @@ fn show_finalmask_settings_edit(
         "xdns" => show_xdns_settings_edit(ui, direction, settings, id_suffix, idx),
         "xicmp" => show_xicmp_settings_edit(ui, direction, settings, id_suffix, idx),
         "mkcp-legacy" => show_mkcp_legacy_settings_edit(ui, settings, id_suffix, idx),
+        "filter" => show_filter_settings_edit(ui, direction, settings, id_suffix, idx),
         // `xmc` is a `tcp[]` mask; in `udp[]` the layer is an error, shown as it is.
         "xmc" if chain == FinalMaskChain::Tcp => show_xmc_settings_edit(ui, direction, settings, id_suffix, idx),
         _ => show_finalmask_raw_json_edit(ui, settings, id_suffix, idx),
@@ -1834,6 +1912,10 @@ fn show_noise_mask_settings_edit(ui: &mut Ui, settings: &mut serde_json::Value, 
             super::field_label(ui, "reset", HELP_NOISE_RESET);
             ui.add(egui::TextEdit::singleline(&mut draft.reset.text).hint_text("s: empty = once per address"));
         });
+        super::optional_text_row(ui, "script", HELP_NOISE_SCRIPT, &mut draft.script, "/usr/local/etc/xray/noise.lua", 320.0, "noise_script");
+        if let Some(note) = noise_script_note(draft.script.as_deref(), draft.noise.is_empty()) {
+            ui.label(RichText::new(note).size(11.0).color(HINT_COLOR));
+        }
         ui.add_space(4.0);
         ui.label(RichText::new("noise[]").strong());
         let len = draft.noise.len();
@@ -1858,6 +1940,24 @@ fn show_noise_mask_settings_edit(ui: &mut Ui, settings: &mut serde_json::Value, 
         }
     });
     form.finish(ui, settings, noise_mask_settings_to_value)
+}
+
+/// What a `noise` `script` means next to `noise[]` and its path; the conflict itself is a
+/// validation error.
+fn noise_script_note(script: Option<&str>, noise_empty: bool) -> Option<String> {
+    let script = script.filter(|script| !script.is_empty())?;
+    let mut note = if noise_empty {
+        "HandleNoise in the script adds the junk packets (Xray-core v26.10.17+).".to_owned()
+    } else {
+        "Remove the noise[] items or the script — Xray refuses both together.".to_owned()
+    };
+    if !script.ends_with(".lua") {
+        note.push_str(" · the file must end in .lua");
+    }
+    if !script.starts_with('/') {
+        note.push_str(" · a relative path is resolved against XRAY_LOCATION_CONFDIR / the working directory");
+    }
+    Some(note)
 }
 
 fn noise_item_edit(ui: &mut Ui, item: &mut NoiseMaskItem) {
@@ -1975,10 +2075,33 @@ fn show_xdns_settings_edit(
         let mut remove_resolver = None;
         for (resolver_idx, resolver) in draft.resolvers.iter_mut().enumerate() {
             ui.push_id(("resolver", resolver_idx), |ui| {
-                ui.horizontal(|ui| {
-                    persistent_multiline_list_row(ui, "addrs (one per line, e.g. udp://1.1.1.1:53)", &mut resolver.addrs, "addrs");
-                    if ui.button("Remove").clicked() {
-                        remove_resolver = Some(resolver_idx);
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        persistent_multiline_list_row(
+                            ui,
+                            "addrs (one per line, e.g. udp://1.1.1.1:53 or https://dns.google/dns-query)",
+                            &mut resolver.addrs,
+                            "addrs",
+                        );
+                        if ui.button("Remove").clicked() {
+                            remove_resolver = Some(resolver_idx);
+                        }
+                    });
+                    egui::Grid::new("doh").num_columns(2).spacing([12.0, 4.0]).show(ui, |ui| {
+                        super::field_label(ui, "worker", HELP_XDNS_WORKER);
+                        optional_i64_field(ui, &mut resolver.worker, "32 · DoH only");
+                        ui.end_row();
+                    });
+                    ui.horizontal(|ui| {
+                        super::help_button(ui, "xdns tlsConfig", HELP_XDNS_TLS_CONFIG);
+                        optional_json_object_edit(ui, "tlsConfig (DoH)", &mut resolver.tls_config, "tls_config");
+                    });
+                    ui.horizontal(|ui| {
+                        super::help_button(ui, "xdns quicConfig", HELP_XDNS_QUIC_CONFIG);
+                        optional_json_object_edit(ui, "quicConfig (DoH over h3)", &mut resolver.quic_config, "quic_config");
+                    });
+                    if let Some(note) = xdns_resolver_note(resolver) {
+                        ui.label(RichText::new(note).size(11.0).color(HINT_COLOR));
                     }
                 });
             });
@@ -1998,6 +2121,22 @@ fn show_xdns_settings_edit(
         });
     });
     form.finish(ui, settings, xdns_settings_to_value)
+}
+
+/// What a resolver's DoH keys do with its addresses: unused without an https:// address, and
+/// `quicConfig` unused unless `tlsConfig.alpn` is exactly h3. Errors come from validation.
+fn xdns_resolver_note(resolver: &XdnsResolver) -> Option<&'static str> {
+    let doh = resolver.addrs.iter().any(|addr| xdns_addr_is_doh(addr));
+    let has_doh_keys = resolver.worker.is_some() || resolver.tls_config.is_some() || resolver.quic_config.is_some();
+    if !doh {
+        return has_doh_keys.then_some("worker / tlsConfig / quicConfig apply only to https:// (DoH) addresses.");
+    }
+    let h3 = resolver.tls_config.as_ref().is_some_and(xdns_tls_config_is_h3);
+    match (resolver.quic_config.is_some(), h3) {
+        (true, false) => Some("quicConfig is used only when tlsConfig.alpn is exactly [\"h3\"] (DoH over QUIC)."),
+        (_, true) => Some("DoH over h3 (QUIC); without alpn [\"h3\"] DoH goes over h2 / HTTP/1.1."),
+        (false, false) => None,
+    }
 }
 
 /// Record-type checkboxes (A, CNAME, TXT, AAAA). A box is ticked when any entry casts to its
@@ -2112,6 +2251,34 @@ fn show_xicmp_settings_edit(
         ui.label(RichText::new(note).size(11.0).color(HINT_COLOR));
     });
     form.finish(ui, settings, xicmp_settings_to_value)
+}
+
+/// `filter` form (audit v26.10.21 D): the two rule lists and what they let through.
+fn show_filter_settings_edit(
+    ui: &mut Ui,
+    direction: StreamDirection,
+    settings: &mut serde_json::Value,
+    id_suffix: &str,
+    idx: usize,
+) -> bool {
+    let Some(mut form) = FinalMaskForm::begin(ui, settings, id_suffix, idx, parse_filter_settings) else {
+        return show_finalmask_raw_json_edit(ui, settings, id_suffix, idx);
+    };
+    let draft = &mut form.draft;
+    ui.push_id(("finalmask_filter", id_suffix, idx), |ui| {
+        super::help_multiline_list_row(ui, "blockedSourceIPs (one per line)", HELP_FILTER_BLOCKED, &mut draft.blocked_source_ips, "blocked");
+        super::help_multiline_list_row(ui, "allowedSourceIPs (one per line)", HELP_FILTER_ALLOWED, &mut draft.allowed_source_ips, "allowed");
+        let filled = |rules: &[String]| rules.iter().any(|rule| !rule.trim().is_empty());
+        let note = match (direction, filled(&draft.blocked_source_ips), filled(&draft.allowed_source_ips)) {
+            (StreamDirection::Outbound, ..) => "No effect in an outbound: only a listener filters by source IP.",
+            (_, false, false) => "Both lists empty: every source gets through.",
+            (_, true, false) => "Drops the blocked sources, accepts the rest.",
+            (_, false, true) => "Accepts only the allowed sources.",
+            (_, true, true) => "Accepts the allowed sources that are not blocked.",
+        };
+        ui.label(RichText::new(note).size(11.0).color(HINT_COLOR));
+    });
+    form.finish(ui, settings, filter_settings_to_value)
 }
 
 /// `mkcp-legacy` form (Roadmap §2.6 stage 2.1): `header` ComboBox + `value` whose hint follows

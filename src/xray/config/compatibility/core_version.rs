@@ -4,8 +4,10 @@
 //! checked against the version Discovery read from `xray version`. A config that uses a feature
 //! the installed core predates gets a warning, never a block: the user may be about to upgrade.
 //!
-//! Release numbers are the first `XTLS/Xray-core` tag containing the PR's merge commit (verified
-//! 2026-10-01 with `compare/<tag>...<commit>`), not the PR's merge date.
+//! Release numbers are the first `XTLS/Xray-core` release containing the PR's merge commit (verified
+//! 2026-10-01 with `compare/<tag>...<commit>`), not the PR's merge date. XTLS deletes some tags and
+//! releases (v26.10.10 and v26.10.17 were gone on 2026-10-21); their release commits stay in
+//! `main` and their builds still report that version, so such a release still dates a feature.
 //!
 //! Unknown installed version (Discovery could not run `xray version`, or no session) means
 //! "assume the current core": no "requires newer core" warnings, and the "ignored by Xray-core"
@@ -46,7 +48,7 @@ impl fmt::Display for XrayCoreVersion {
 }
 
 /// The Xray-core release Feldjäger is developed and verified against (shown in the About dialog).
-pub const BASELINE_XRAY_CORE: XrayCoreVersion = XrayCoreVersion::new(26, 10, 10);
+pub const BASELINE_XRAY_CORE: XrayCoreVersion = XrayCoreVersion::new(26, 10, 21);
 
 /// A config feature (or a schema change) that appeared in a specific Xray-core release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -103,6 +105,20 @@ pub enum CoreFeature {
     /// TLS client `tlsSettings.useSystemCA`: from this release the client trusts Xray-core's
     /// built-in root CAs by default instead of the OS store — XTLS/Xray-core#7105.
     TlsUseSystemCa,
+    /// `routing.script` refuses `domainStrategy` and non-empty `rules`, `dns.script` refuses
+    /// `disableFallback` / `disableFallbackIfMatch` / `enableParallelQuery` and server `domains` /
+    /// `skipFallback` / `finalQuery` (XTLS/Xray-core#7132); the script is found and compiled when
+    /// the router / DNS starts — `xray run -test` included — must end in `.lua` and runs sandboxed
+    /// (#7136).
+    LuaScriptExclusive,
+    /// `xdns` DoH resolvers: `https://` in `resolvers[].addrs`, and `tlsConfig` / `quicConfig` /
+    /// `worker` per resolver — XTLS/Xray-core#7140.
+    XdnsDohResolver,
+    /// `noise` layer `script` — a Lua `HandleNoise` instead of `noise[]` — XTLS/Xray-core#7124.
+    NoiseLuaScript,
+    /// `filter` layer in `finalmask.tcp[]` / `finalmask.udp[]` (source-IP filtering on the
+    /// listening side) — XTLS/Xray-core#7206.
+    FinalMaskFilter,
 }
 
 /// The table of Roadmap §2.6 stage 0.7, oldest first.
@@ -124,6 +140,10 @@ pub const CORE_FEATURES: &[CoreFeature] = &[
     CoreFeature::XdnsNamesAddrsSchema,
     CoreFeature::LuaScript,
     CoreFeature::TlsUseSystemCa,
+    CoreFeature::LuaScriptExclusive,
+    CoreFeature::XdnsDohResolver,
+    CoreFeature::NoiseLuaScript,
+    CoreFeature::FinalMaskFilter,
 ];
 
 impl CoreFeature {
@@ -147,6 +167,10 @@ impl CoreFeature {
             Self::XdnsNamesAddrsSchema => XrayCoreVersion::new(26, 10, 10),
             Self::LuaScript => XrayCoreVersion::new(26, 10, 10),
             Self::TlsUseSystemCa => XrayCoreVersion::new(26, 10, 10),
+            Self::LuaScriptExclusive => XrayCoreVersion::new(26, 10, 17),
+            Self::XdnsDohResolver => XrayCoreVersion::new(26, 10, 17),
+            Self::NoiseLuaScript => XrayCoreVersion::new(26, 10, 17),
+            Self::FinalMaskFilter => XrayCoreVersion::new(26, 10, 21),
         }
     }
 
@@ -170,6 +194,10 @@ impl CoreFeature {
             Self::XdnsNamesAddrsSchema => 7090,
             Self::LuaScript => 6823,
             Self::TlsUseSystemCa => 7105,
+            Self::LuaScriptExclusive => 7132,
+            Self::XdnsDohResolver => 7140,
+            Self::NoiseLuaScript => 7124,
+            Self::FinalMaskFilter => 7206,
         }
     }
 
@@ -193,6 +221,10 @@ impl CoreFeature {
             Self::XdnsNamesAddrsSchema => "`xdns` names[] / addrs[] schema",
             Self::LuaScript => "Lua `script` in `routing` / `dns`, `dns.servers[].id`",
             Self::TlsUseSystemCa => "TLS `useSystemCA` (OS root CAs instead of the built-in set)",
+            Self::LuaScriptExclusive => "Lua `script` instead of `routing` rules / `dns` fallback options, `.lua` only",
+            Self::XdnsDohResolver => "`xdns` DoH resolvers (https://, tlsConfig / quicConfig / worker)",
+            Self::NoiseLuaScript => "`noise` Lua `script` (HandleNoise)",
+            Self::FinalMaskFilter => "`filter` mask (source-IP filtering)",
         }
     }
 

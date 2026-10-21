@@ -19,13 +19,14 @@ use super::finalmask_layers::{
 };
 use super::finalmask_mkcp::validate_mkcp_legacy;
 use super::finalmask_xmc::validate_xmc;
+use super::finalmask_filter::{parse_filter_settings, validate_filter_settings};
 use super::finalmask_raw::{
     validate_header_custom_tcp, validate_header_custom_udp, validate_header_custom_udp_sizes,
 };
 use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 
 /// Documented `finalmask.tcp[].type` values.
-pub const TCP_FINALMASK_TYPES: &[&str] = &["header-custom", "fragment", "sudoku", "xmc"];
+pub const TCP_FINALMASK_TYPES: &[&str] = &["header-custom", "fragment", "sudoku", "xmc", "filter"];
 
 /// Documented `finalmask.udp[].type` values.
 pub const UDP_FINALMASK_TYPES: &[&str] = &[
@@ -38,6 +39,7 @@ pub const UDP_FINALMASK_TYPES: &[&str] = &[
     "xicmp",
     "realm",
     "udphop",
+    "filter",
 ];
 
 /// `finalmask.udp[].type` values that only work on the dialing side: their server wrapper fails
@@ -260,6 +262,7 @@ pub fn validate_finalmask_layer(
         (FinalMaskChain::Udp, "xicmp") => typed(settings, parse_xicmp_settings, validate_xicmp_settings),
         (FinalMaskChain::Udp, "udphop") => typed(settings, parse_udphop_settings, validate_udphop_settings),
         (FinalMaskChain::Udp, "realm") => typed(settings, parse_realm_settings, validate_realm_settings),
+        (_, "filter") => typed(settings, parse_filter_settings, validate_filter_settings),
         (FinalMaskChain::Udp, "xdns") if !xdns_has_legacy_fields(settings) => match parse_xdns_settings(settings) {
             Some(draft) => validate_xdns_settings(&draft, direction),
             None => Ok(()),

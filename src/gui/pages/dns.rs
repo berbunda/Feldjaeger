@@ -141,15 +141,21 @@ const HELP_SCRIPT: HelpText = HelpText::new(
     "Path of a Lua script on the server that answers DNS lookups (Xray-core v26.10.10+). It must \
      define HandleDNSQuery(domain, ipv4, ipv6, fake) returning (ips, ttl, err); it reaches the \
      servers below through the xray.dns module (server.ID = their id). With a script the servers \
-     are not queried on their own; hosts and the cache still answer first. Use an absolute path: \
-     the file must exist when the config loads, and Lua errors show only when Xray starts \
-     (xray run -test does not compile the script). Empty = no script.",
+     are not queried on their own; hosts and the cache still answer first. v26.10.17+ refuses \
+     the script together with disableFallback, disableFallbackIfMatch, enableParallelQuery and \
+     server domains / skipFallback / finalQuery. Use an absolute path to a .lua file (v26.10.17+ \
+     refuses other extensions and compiles the script already in xray run -test; v26.10.10 only \
+     checks that the file exists). The script runs sandboxed: no io, load, dofile, print. \
+     Empty = no script.",
     "Путь к Lua-скрипту на сервере, который отвечает на DNS-запросы (Xray-core v26.10.10+). \
      Скрипт должен определить HandleDNSQuery(domain, ipv4, ipv6, fake), возвращающую (ips, ttl, \
      err); к серверам ниже он обращается через модуль xray.dns (server.ID — их id). Со скриптом \
-     серверы сами не опрашиваются; hosts и кэш по-прежнему отвечают первыми. Указывайте \
-     абсолютный путь: файл должен существовать при загрузке конфигурации, а ошибки Lua видны \
-     только при запуске Xray (xray run -test скрипт не компилирует). Пусто — без скрипта.",
+     серверы сами не опрашиваются; hosts и кэш по-прежнему отвечают первыми. v26.10.17+ не \
+     принимает скрипт вместе с disableFallback, disableFallbackIfMatch, enableParallelQuery и \
+     серверными domains / skipFallback / finalQuery. Указывайте абсолютный путь к файлу .lua \
+     (v26.10.17+ не принимает другие расширения и компилирует скрипт уже в xray run -test; \
+     v26.10.10 проверяет только, что файл существует). Скрипт работает в песочнице: без io, \
+     load, dofile, print. Пусто — без скрипта.",
 );
 const HELP_SERVER_ID: HelpText = HelpText::new(
     "Name of this server for a Lua DNS script (dns.script), which sees it as server.ID; \

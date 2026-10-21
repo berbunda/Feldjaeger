@@ -22,6 +22,7 @@
 
 pub mod finalmask;
 pub mod finalmask_client;
+pub mod finalmask_filter;
 #[cfg(test)]
 mod finalmask_fixtures;
 #[cfg(test)]
@@ -62,10 +63,10 @@ pub use finalmask_layers::{
     realm_ip_mode_is_known, realm_settings_to_value, salamander_settings_to_value,
     sudoku_settings_to_value, udphop_settings_to_value, validate_realm_settings,
     validate_udphop_settings, xdns_settings_to_value, xicmp_settings_to_value,
-    NOISE_EXP_KIND, XDNS_DEFAULT_LABEL_LIMIT, XDNS_DEFAULT_LEN_LIMIT, XDNS_DEFAULT_RESOLVER_PORT,
+    NOISE_EXP_KIND, XDNS_DEFAULT_LABEL_LIMIT, XDNS_DEFAULT_LEN_LIMIT, XDNS_DEFAULT_RESOLVER_PORT, XDNS_DEFAULT_RESOLVER_WORKER, XDNS_DOH_SCHEME,
     XDNS_RECORD_TYPES, XDNS_RESOLVER_KINDS, XdnsDomain, XdnsResolver, migrate_legacy_xdns_settings,
     validate_xdns_resolver_addr, xdns_default_types, xdns_has_legacy_fields, xdns_has_string_schema,
-    xdns_has_v26_9_30_objects, xdns_record_type_name, xdns_uses_names_addrs,
+    xdns_has_v26_9_30_objects, xdns_record_type_name, xdns_uses_names_addrs, xdns_uses_doh, xdns_tls_config_is_h3, xdns_addr_is_doh,
 };
 pub use finalmask_header_custom::{
     HEADER_CUSTOM_UDP_DEFAULT_MODE, HeaderCustomItem, HeaderCustomItemKind, HeaderCustomItems,
@@ -80,6 +81,10 @@ pub use finalmask_mkcp::{
     validate_mkcp_legacy_settings,
 };
 pub use finalmask_raw::HEADER_CUSTOM_UDP_MODES;
+pub use finalmask_filter::{
+    FilterSettings, filter_settings_to_value, parse_filter_settings, validate_filter_ip_rule,
+    validate_filter_settings,
+};
 pub use finalmask_xmc::{
     XMC_LEGACY_DEFAULT_USERNAME, XMC_MAX_PASSWORD_BYTES, XmcProfile, XmcSettings,
     migrate_legacy_xmc_usernames, parse_xmc_settings, xmc_has_legacy_usernames, xmc_settings_to_value,

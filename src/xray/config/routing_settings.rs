@@ -530,15 +530,16 @@ impl RoutingRuleEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoutingSettings {
     /// `domainStrategy`. Always written (even when it equals the documented default), mirroring
-    /// `DnsSettings::query_strategy`.
+    /// `DnsSettings::query_strategy` — except `"AsIs"` next to a `script` (audit v26.10.21 A).
     pub domain_strategy: DomainStrategy,
     /// Configured rules, in source/edit order — order is significant (first match wins).
     pub rules: Vec<RoutingRuleEntry>,
     /// Configured balancers, in source/edit order.
     pub balancers: Vec<BalancerEntry>,
     /// `script` — path of a Lua routing script on the server (Xray-core v26.10.10+,
-    /// XTLS/Xray-core#6823); with it `rules` are not applied, see [`super::compatibility`]'s
-    /// `routing_script_notes`. `None` omits the key.
+    /// XTLS/Xray-core#6823); with it `rules` are not applied, and v26.10.17+ refuses `rules` and
+    /// `domainStrategy` next to it, see [`super::compatibility`]'s `routing_script_notes`. `None`
+    /// omits the key.
     pub script: Option<String>,
     /// `true` when a top-level `routing` object existed in the loaded config.
     pub section_present: bool,
@@ -880,10 +881,17 @@ pub fn apply_routing_settings_to_value(
         }
     };
 
-    object.insert(
-        "domainStrategy".to_owned(),
-        Value::String(settings.domain_strategy.as_str().to_owned()),
-    );
+    // Next to a `script`, Xray-core v26.10.17+ refuses any `domainStrategy` (XTLS/Xray-core#7132),
+    // so the default `"AsIs"` is left out there — same meaning on every core. Another value stays
+    // and is reported by `routing_script_save_error`.
+    if settings.script.is_some() && settings.domain_strategy == DomainStrategy::AsIs {
+        object.remove("domainStrategy");
+    } else {
+        object.insert(
+            "domainStrategy".to_owned(),
+            Value::String(settings.domain_strategy.as_str().to_owned()),
+        );
+    }
 
     if settings.rules.is_empty() {
         object.remove("rules");
@@ -1194,6 +1202,28 @@ mod tests {
         let mut bad = settings;
         bad.script = Some("a\nb".to_owned());
         assert!(validate_routing_settings(&bad).is_err());
+    }
+
+    /// Audit v26.10.21 A: next to a script the default `"AsIs"` is not written (an existing key is
+    /// dropped), another strategy is kept for `routing_script_save_error`; without a script the
+    /// key is always written.
+    #[test]
+    fn as_is_domain_strategy_is_not_written_next_to_script() {
+        let source = json!({"script": "/etc/xray/route.lua", "domainStrategy": "AsIs"});
+        let settings = routing_settings_from_section(Some(&section(source.clone())));
+        let mut value = source;
+        apply_routing_settings_to_value(&mut value, &settings).unwrap();
+        assert!(value.get("domainStrategy").is_none(), "{value}");
+
+        let mut other = settings.clone();
+        other.domain_strategy = DomainStrategy::IpOnDemand;
+        apply_routing_settings_to_value(&mut value, &other).unwrap();
+        assert_eq!(value["domainStrategy"], "IPOnDemand");
+
+        let mut no_script = settings;
+        no_script.script = None;
+        apply_routing_settings_to_value(&mut value, &no_script).unwrap();
+        assert_eq!(value["domainStrategy"], "AsIs");
     }
 
     fn section(value: Value) -> SourcedSection<Value> {

@@ -1,10 +1,18 @@
 //! Remote Xray GeoIP / GeoSite database management over SSH.
 //!
 //! Manages exactly two official Xray-core GeoData databases (`geoip.dat`,
-//! `geosite.dat`) on a Linux + systemd host. Downloads always come from the
-//! same hardcoded source Xray-core CI uses (Loyalsoldier's `v2ray-rules-dat`
-//! release assets) — there is no support for user-supplied URLs, custom
-//! repositories, manual file edits, or scheduled updates.
+//! `geosite.dat`) on a Linux + systemd host. Downloads always come from one
+//! hardcoded source, Loyalsoldier's `v2ray-rules-dat` release assets — there is
+//! no support for user-supplied URLs, custom repositories, manual file edits, or
+//! scheduled updates.
+//!
+//! Xray-core's own release archives took these files from Loyalsoldier too until
+//! XTLS/Xray-core#7185 (v26.10.21) switched them to `XTLS/Xray-rules-dat`
+//! (`geoip/geoip-lite.dat` as `geoip.dat`). Feldjäger keeps Loyalsoldier: compared
+//! on 2026-10-21, `geoip-lite` has 18 codes (`cn`, `ir`, `ru`, `private`, a few
+//! services) instead of 260 countries, and XTLS `geosite` lacks `gfw`,
+//! `china-list`, `apple-cn`, `google-cn` and `win-*` — a config using them would
+//! stop loading after an update (Architecture §141).
 //!
 //! Never restarts Xray and never touches `config.json`; callers decide
 //! whether/when to restart using [`GeoDataSummary::restart_recommended`].
@@ -16,11 +24,11 @@ use uuid::Uuid;
 use crate::init::ServiceName;
 use crate::logging::redact::sanitize_detail;
 
-/// Official download URL for `geoip.dat` (same source Xray-core CI uses).
+/// Download URL for `geoip.dat` (Loyalsoldier, see the module docs).
 const GEOIP_URL: &str =
     "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geoip.dat";
 
-/// Official download URL for `geosite.dat` (same source Xray-core CI uses).
+/// Download URL for `geosite.dat` (Loyalsoldier, see the module docs).
 const GEOSITE_URL: &str =
     "https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat";
 

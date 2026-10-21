@@ -1,11 +1,14 @@
 //! `finalmask.udp[].settings` for `type = "xdns"` (Roadmap §2.6 stages 1.3 and 1.6) — DNS
-//! tunnelling of UDP payloads, schema of XTLS/Xray-core#7090 (v26.10.10):
+//! tunnelling of UDP payloads, schema of XTLS/Xray-core#7090 (v26.10.10) with the DoH resolvers of
+//! #7140 (v26.10.17):
 //! `infra/conf/transport_finalmask.go` (`XDNS`, `XDNSDomain`, `XDNSResolver`) and
 //! `transport/internet/finalmask/xdns`.
 //!
 //! ```jsonc
 //! { "domains":   [{ "names": ["t.example.com"], "lenLimit": 255, "labelLimit": 63, "types": [16], "edns0": 1232 }],
-//!   "resolvers": [{ "addrs": ["udp://1.1.1.1:53", "tcp://8.8.8.8"] }],   // client only
+//!   "resolvers": [{ "addrs": ["udp://1.1.1.1:53", "tcp://8.8.8.8"] },   // client only
+//!                 { "addrs": ["https://dns.google/dns-query"], "tlsConfig": { "serverName": "dns.google" },
+//!                   "quicConfig": {}, "worker": 32 }],
 //!   "extraPoll": 0 }
 //! ```
 //!
@@ -20,6 +23,16 @@
 //! `Build()` runs it through `url.Parse`, so a bare IPv6 address is split at its last colon
 //! (`2606:4700::1111` → host `2606:4700:`, port `1111`) and still "builds" — Feldjäger requires
 //! brackets.
+//!
+//! From v26.10.17 an address may also be a DoH URL, `https://host[:port][/path][?query]`, kept
+//! whole. The resolver object then carries the `tlsConfig` (`TLSConfig`, uTLS Chrome hello by
+//! default), the `quicConfig` (`QuicParamsConfig`, used only when `tlsConfig.alpn` is exactly
+//! `["h3"]`) and `worker` (parallel requests, 0 = 32) of all its addresses. `Build()` checks the
+//! two objects but not what `NewDOHResolver` needs on the first dial; checked with `xray.exe`
+//! 26.10.21, each of these passes `xray run -test` and fails at run time: no `tlsConfig` ("empty
+//! tls config"), a `tlsConfig` without `serverName` (Go refuses the handshake), `worker` < 0
+//! ("invalid worker"), and `quicConfig.congestion: "brutal"` over h3 — a panic that stops Xray.
+//! Feldjäger refuses all four.
 //!
 //! Two older schemas exist and are not representable by [`XdnsSettings`] (the GUI keeps them on
 //! the raw-JSON editor, [`migrate_legacy_xdns_settings`] converts them on request):
@@ -42,8 +55,13 @@ pub const XDNS_RECORD_TYPES: &[(i64, &str)] = &[(1, "A"), (5, "CNAME"), (16, "TX
 pub const XDNS_DEFAULT_LEN_LIMIT: i64 = 255;
 /// Core default of `domains[].labelLimit` (`0` / absent).
 pub const XDNS_DEFAULT_LABEL_LIMIT: i64 = 63;
-/// Schemes of a `resolvers[].addrs[]` entry (`url.Parse` lowercases them); none = `udp`.
+/// Plain-DNS schemes of a `resolvers[].addrs[]` entry (`url.Parse` lowercases them); none = `udp`.
+/// The v26.9.30 `resolvers[].type` took the same two.
 pub const XDNS_RESOLVER_KINDS: &[&str] = &["udp", "tcp"];
+/// DoH scheme of a `resolvers[].addrs[]` entry (Xray-core v26.10.17+, XTLS/Xray-core#7140).
+pub const XDNS_DOH_SCHEME: &str = "https";
+/// `resolvers[].worker` when absent or 0: parallel DoH requests per resolver.
+pub const XDNS_DEFAULT_RESOLVER_WORKER: i64 = 32;
 /// Port of a `resolvers[].addrs[]` entry without one.
 pub const XDNS_DEFAULT_RESOLVER_PORT: u16 = 53;
 
@@ -78,8 +96,15 @@ pub struct XdnsDomain {
 /// One `resolvers[]` entry — the core's `XDNSResolver`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct XdnsResolver {
-    /// `addrs` — `[udp|tcp://]host[:port]` resolver addresses.
+    /// `addrs` — `[udp|tcp://]host[:port]` resolver addresses, or `https://…` DoH URLs (v26.10.17+).
     pub addrs: Vec<String>,
+    /// `worker` — parallel DoH requests (0 = [`XDNS_DEFAULT_RESOLVER_WORKER`]); `None` = key absent.
+    pub worker: Option<i64>,
+    /// `tlsConfig` — TLS of the DoH addresses (a `tlsSettings` object), kept as JSON; `None` = key
+    /// absent.
+    pub tls_config: Option<Value>,
+    /// `quicConfig` — QUIC of DoH over h3 (a `quicParams` object), kept as JSON; `None` = key absent.
+    pub quic_config: Option<Value>,
     /// Unknown keys of the entry, preserved verbatim.
     pub extras: Map<String, Value>,
 }
@@ -99,7 +124,7 @@ pub struct XdnsSettings {
 
 const KNOWN_XDNS_KEYS: &[&str] = &["domains", "resolvers", "extraPoll"];
 const KNOWN_DOMAIN_KEYS: &[&str] = &["names", "lenLimit", "labelLimit", "types", "edns0"];
-const KNOWN_RESOLVER_KEYS: &[&str] = &["addrs"];
+const KNOWN_RESOLVER_KEYS: &[&str] = &["addrs", "worker", "tlsConfig", "quicConfig"];
 /// Keys of the v26.9.30 schema that v26.10.10 no longer reads.
 const V26_9_30_DOMAIN_KEYS: &[&str] = &["name"];
 const V26_9_30_RESOLVER_KEYS: &[&str] = &["type", "settings"];
@@ -116,6 +141,15 @@ fn objects(value: Option<&Value>) -> Option<Vec<&Map<String, Value>>> {
     match value {
         None | Some(Value::Null) => Some(Vec::new()),
         Some(Value::Array(items)) => items.iter().map(Value::as_object).collect(),
+        Some(_) => None,
+    }
+}
+
+/// Absent/`null` → `Some(None)`; `None` when present but not an object.
+fn object_field(value: Option<&Value>) -> Option<Option<Value>> {
+    match value {
+        None | Some(Value::Null) => Some(None),
+        Some(value @ Value::Object(_)) => Some(Some(value.clone())),
         Some(_) => None,
     }
 }
@@ -149,6 +183,9 @@ fn parse_resolver(object: &Map<String, Value>) -> Option<XdnsResolver> {
     }
     Some(XdnsResolver {
         addrs: string_array_field(object.get("addrs"))?,
+        worker: integer_field(object.get("worker"))?,
+        tls_config: object_field(object.get("tlsConfig"))?,
+        quic_config: object_field(object.get("quicConfig"))?,
         extras: extras_of(object, KNOWN_RESOLVER_KEYS),
     })
 }
@@ -201,6 +238,14 @@ fn domain_to_value(domain: &XdnsDomain) -> Value {
 fn resolver_to_value(resolver: &XdnsResolver) -> Value {
     let mut object = Map::new();
     object.insert("addrs".to_owned(), strings_to_value(&resolver.addrs));
+    if let Some(worker) = resolver.worker {
+        object.insert("worker".to_owned(), Value::from(worker));
+    }
+    for (key, value) in [("tlsConfig", &resolver.tls_config), ("quicConfig", &resolver.quic_config)] {
+        if let Some(value) = value {
+            object.insert(key.to_owned(), value.clone());
+        }
+    }
     apply_extras(&mut object, &resolver.extras);
     Value::Object(object)
 }
@@ -310,10 +355,9 @@ pub fn xdns_record_type_name(kind: i64) -> Option<&'static str> {
     XDNS_RECORD_TYPES.iter().find(|(code, _)| *code == cast).map(|(_, name)| *name)
 }
 
-/// Validates an `xdns` layer: every domain ([`validate_xdns_domain`]), every resolver address
-/// ([`validate_xdns_resolver_addr`]), `extraPoll` 0–3 (`Build()`), and what the constructors
-/// require — at least one domain name on both sides, at least one resolver address on the client
-/// side.
+/// Validates an `xdns` layer: every domain ([`validate_xdns_domain`]), every resolver
+/// ([`validate_xdns_resolver`]), `extraPoll` 0–3 (`Build()`), and what the constructors require — at
+/// least one domain name on both sides, at least one resolver address on the client side.
 pub fn validate_xdns_settings(draft: &XdnsSettings, direction: StreamDirection) -> Result<(), String> {
     if draft.domains.is_empty() {
         return Err("domains: at least one tunnel domain is required".to_owned());
@@ -323,10 +367,8 @@ pub fn validate_xdns_settings(draft: &XdnsSettings, direction: StreamDirection) 
     }
     let mut addr_count = 0;
     for (index, resolver) in draft.resolvers.iter().enumerate() {
-        for (addr_index, addr) in resolver.addrs.iter().map(|addr| addr.trim()).filter(|addr| !addr.is_empty()).enumerate() {
-            validate_xdns_resolver_addr(addr).map_err(|error| format!("resolvers[{index}].addrs[{addr_index}]: {error}"))?;
-            addr_count += 1;
-        }
+        validate_xdns_resolver(resolver).map_err(|error| format!("resolvers[{index}].{error}"))?;
+        addr_count += xdns_resolver_addrs(resolver).count();
     }
     if direction == StreamDirection::Outbound && addr_count == 0 {
         return Err("resolvers: the client side needs at least one resolver address".to_owned());
@@ -339,15 +381,126 @@ pub fn validate_xdns_settings(draft: &XdnsSettings, direction: StreamDirection) 
     Ok(())
 }
 
-/// One `addrs[]` entry, `[udp|tcp://]host[:port]`, as `XDNS.Build()` reads it (`url.Parse`,
-/// default scheme `udp`, default port 53) plus what makes the dial work: a host, a port 1–65535,
-/// IPv6 in brackets. A path, query or user part — which the core would silently drop — is refused.
+/// The non-empty, trimmed `addrs` of a resolver.
+fn xdns_resolver_addrs(resolver: &XdnsResolver) -> impl Iterator<Item = &str> {
+    resolver.addrs.iter().map(|addr| addr.trim()).filter(|addr| !addr.is_empty())
+}
+
+/// `true` when `addr` is a DoH URL (`https://…`, any case).
+pub fn xdns_addr_is_doh(addr: &str) -> bool {
+    addr.trim()
+        .split_once("://")
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case(XDNS_DOH_SCHEME))
+}
+
+/// `true` when a `resolvers[]` object of `settings` has a DoH address or one of the v26.10.17 keys
+/// (`worker`, `tlsConfig`, `quicConfig`) — what an older core ignores or refuses ("invalid
+/// protocol").
+pub fn xdns_uses_doh(settings: &Value) -> bool {
+    array_items(settings, "resolvers").filter_map(Value::as_object).any(|resolver| {
+        has_any_key(resolver, &["worker", "tlsConfig", "quicConfig"])
+            || resolver
+                .get("addrs")
+                .and_then(Value::as_array)
+                .is_some_and(|addrs| addrs.iter().filter_map(Value::as_str).any(xdns_addr_is_doh))
+    })
+}
+
+/// `true` when `tlsConfig.alpn` is exactly `h3` (a `StringList`: array, or a string split at `,`)
+/// — the only case where `NewDOHResolver` dials QUIC and reads `quicConfig`.
+pub fn xdns_tls_config_is_h3(tls_config: &Value) -> bool {
+    let alpn: Vec<String> = match tls_config.get("alpn") {
+        Some(Value::String(text)) => text.split(',').map(|item| item.trim().to_owned()).collect(),
+        Some(Value::Array(items)) => items.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
+        _ => Vec::new(),
+    };
+    alpn == ["h3"]
+}
+
+fn non_empty_key(object: &Value, key: &str) -> bool {
+    match object.get(key) {
+        None | Some(Value::Null) => false,
+        Some(Value::String(text)) => !text.trim().is_empty(),
+        Some(Value::Array(items)) => !items.is_empty(),
+        Some(_) => true,
+    }
+}
+
+/// One resolver: every address ([`validate_xdns_resolver_addr`]); `worker` an `int32`; a
+/// `quicConfig` that `QuicParamsConfig.Build()` accepts. With a DoH address, what the first dial
+/// needs (module docs): `worker` ≥ 0, a `tlsConfig` naming the server (`serverName`, or certificate
+/// checks that skip the name: `verifyPeerCertByName` / `pinnedPeerCertSha256`), and over h3 a
+/// `quicConfig.congestion` other than `brutal`. Errors start with the key (`addrs[i]: …`).
+pub fn validate_xdns_resolver(resolver: &XdnsResolver) -> Result<(), String> {
+    let mut doh = false;
+    for (index, addr) in xdns_resolver_addrs(resolver).enumerate() {
+        validate_xdns_resolver_addr(addr).map_err(|error| format!("addrs[{index}]: {error}"))?;
+        doh |= xdns_addr_is_doh(addr);
+    }
+    if let Some(worker) = resolver.worker {
+        check_i32("worker", worker)?;
+        if doh && worker < 0 {
+            return Err(format!(
+                "worker {worker}: must be 0 (= {XDNS_DEFAULT_RESOLVER_WORKER}) or more — Xray fails every DoH \
+                 dial with \"invalid worker\""
+            ));
+        }
+    }
+    if let Some(quic_config) = &resolver.quic_config {
+        let object = quic_config.as_object().ok_or("quicConfig must be a JSON object")?;
+        let draft = super::quic_params::parse_quic_params(object);
+        super::quic_params::validate_quic_params(&draft).map_err(|error| error.replace("quicParams.", "quicConfig."))?;
+    }
+    if !doh {
+        return Ok(());
+    }
+    let Some(tls_config) = &resolver.tls_config else {
+        return Err("tlsConfig: a DoH (https://) resolver needs a tlsConfig with at least serverName — \
+                    without it Xray fails every dial with \"empty tls config\""
+            .to_owned());
+    };
+    let names_server = ["serverName", "verifyPeerCertByName", "pinnedPeerCertSha256"]
+        .iter()
+        .any(|key| non_empty_key(tls_config, key));
+    if !names_server {
+        return Err("tlsConfig.serverName: required for DoH (or verifyPeerCertByName / pinnedPeerCertSha256) — \
+                    Go refuses the TLS handshake without a server name"
+            .to_owned());
+    }
+    let brutal = resolver
+        .quic_config
+        .as_ref()
+        .and_then(|quic| quic.get("congestion"))
+        .and_then(Value::as_str)
+        .is_some_and(|congestion| congestion.trim().eq_ignore_ascii_case("brutal"));
+    if brutal && xdns_tls_config_is_h3(tls_config) {
+        return Err("quicConfig.congestion \"brutal\" over h3 makes Xray panic on the first DoH dial — use \
+                    bbr, reno or force-brutal"
+            .to_owned());
+    }
+    Ok(())
+}
+
+/// One `addrs[]` entry as `XDNS.Build()` reads it (`url.Parse`). `[udp|tcp://]host[:port]`: default
+/// scheme `udp`, default port 53, plus what makes the dial work — a host, a port 1–65535, IPv6 in
+/// brackets; a path, query or user part, which the core would silently drop, is refused.
+/// `https://host[:port][/path][?query]` (v26.10.17+): the URL is used whole for the DoH request;
+/// its host and port are checked the same way.
 pub fn validate_xdns_resolver_addr(addr: &str) -> Result<(), String> {
-    let format = "expected [udp|tcp://]host[:port], IPv6 in brackets";
+    if xdns_addr_is_doh(addr) {
+        let (_, rest) = addr.split_once("://").unwrap_or_default();
+        if rest.chars().any(char::is_whitespace) {
+            return Err(format!("\"{addr}\": expected https://host[:port]/path"));
+        }
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        let authority = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+        return validate_xdns_host_port(addr, authority, 443, "expected https://host[:port]/path, IPv6 in brackets");
+    }
+    let format = "expected [udp|tcp|https://]host[:port], IPv6 in brackets";
     let rest = match addr.split_once("://") {
         Some((scheme, rest)) => {
             if !XDNS_RESOLVER_KINDS.iter().any(|known| scheme.eq_ignore_ascii_case(known)) {
-                return Err(format!("\"{addr}\": scheme \"{scheme}\" must be udp or tcp"));
+                return Err(format!("\"{addr}\": scheme \"{scheme}\" must be udp, tcp or https"));
             }
             rest
         }
@@ -356,6 +509,11 @@ pub fn validate_xdns_resolver_addr(addr: &str) -> Result<(), String> {
     if rest.contains(['/', '?', '#', '@']) || rest.chars().any(char::is_whitespace) {
         return Err(format!("\"{addr}\": {format}"));
     }
+    validate_xdns_host_port(addr, rest, XDNS_DEFAULT_RESOLVER_PORT, format)
+}
+
+/// `host[:port]` of a resolver address: a host, IPv6 in brackets, a port 1–65535 or none.
+fn validate_xdns_host_port(addr: &str, rest: &str, default_port: u16, format: &str) -> Result<(), String> {
     let (host, port) = if let Some(bracketed) = rest.strip_prefix('[') {
         let (host, after) = bracketed.split_once(']').ok_or_else(|| format!("\"{addr}\": unclosed '['"))?;
         if host.parse::<std::net::Ipv6Addr>().is_err() {
@@ -384,7 +542,7 @@ pub fn validate_xdns_resolver_addr(addr: &str) -> Result<(), String> {
         None => Ok(()),
         Some(port) => match port.parse::<u16>() {
             Ok(port) if port != 0 => Ok(()),
-            _ => Err(format!("\"{addr}\": port \"{port}\" must be 1–65535 (empty = {XDNS_DEFAULT_RESOLVER_PORT})")),
+            _ => Err(format!("\"{addr}\": port \"{port}\" must be 1–65535 (empty = {default_port})")),
         },
     }
 }
@@ -686,7 +844,11 @@ mod tests {
             assert_eq!(validate_xdns_resolver_addr(good), Ok(()), "{good}");
         }
         for (bad, needle) in [
-            ("doh://1.1.1.1", "must be udp or tcp"),
+            ("doh://1.1.1.1", "must be udp, tcp or https"),
+            ("h3://dns.google/dns-query", "must be udp, tcp or https"),
+            ("https:///dns-query", "host is empty"),
+            ("https://dns.google:0/dns-query", "port \"0\""),
+            ("https://2606:4700::1111/dns-query", "needs brackets"),
             ("2606:4700::1111", "needs brackets"),
             ("udp://::1:53", "needs brackets"),
             ("[1.1.1.1]:53", "not an IPv6 address"),
@@ -701,6 +863,81 @@ mod tests {
             let error = validate_xdns_resolver_addr(bad).expect_err(bad);
             assert!(error.contains(needle), "{bad}: {error}");
         }
+    }
+
+    /// Audit v26.10.21 B: DoH URLs (#7140) keep their path and query; the host and port are
+    /// checked like the plain addresses.
+    #[test]
+    fn doh_addresses_are_urls() {
+        for good in [
+            "https://dns.google/dns-query",
+            "HTTPS://dns.google",
+            "https://1.1.1.1:8443/dns-query?x=1",
+            "https://[2606:4700::1111]/dns-query",
+        ] {
+            assert_eq!(validate_xdns_resolver_addr(good), Ok(()), "{good}");
+            assert!(xdns_addr_is_doh(good), "{good}");
+        }
+        assert!(!xdns_addr_is_doh("udp://1.1.1.1") && !xdns_addr_is_doh("1.1.1.1"));
+    }
+
+    /// Audit v26.10.21 B: what `NewDOHResolver` needs on the first dial, checked live on 26.10.21
+    /// (each case passes `xray run -test`).
+    #[test]
+    fn doh_resolver_needs_what_the_dial_needs() {
+        let doh = |tls: Option<Value>, quic: Option<Value>, worker: Option<i64>| XdnsResolver {
+            addrs: vec!["https://dns.google/dns-query".to_owned()],
+            worker,
+            tls_config: tls,
+            quic_config: quic,
+            ..XdnsResolver::default()
+        };
+        let named = Some(json!({"serverName": "dns.google"}));
+        assert_eq!(validate_xdns_resolver(&doh(named.clone(), None, None)), Ok(()));
+        assert_eq!(validate_xdns_resolver(&doh(Some(json!({"verifyPeerCertByName": "dns.google"})), None, Some(0))), Ok(()));
+        let error = validate_xdns_resolver(&doh(None, None, None)).unwrap_err();
+        assert!(error.starts_with("tlsConfig:") && error.contains("empty tls config"), "{error}");
+        let error = validate_xdns_resolver(&doh(Some(json!({"fingerprint": "chrome"})), None, None)).unwrap_err();
+        assert!(error.starts_with("tlsConfig.serverName"), "{error}");
+        let error = validate_xdns_resolver(&doh(named.clone(), None, Some(-1))).unwrap_err();
+        assert!(error.contains("invalid worker"), "{error}");
+        let error = validate_xdns_resolver(&doh(named.clone(), None, Some(1 << 40))).unwrap_err();
+        assert!(error.contains("32-bit"), "{error}");
+
+        // `brutal` panics only over h3; over h2 `quicConfig` is not read.
+        let brutal = Some(json!({"congestion": "Brutal"}));
+        assert_eq!(validate_xdns_resolver(&doh(named, brutal.clone(), None)), Ok(()));
+        let h3 = Some(json!({"serverName": "dns.google", "alpn": "h3"}));
+        let error = validate_xdns_resolver(&doh(h3.clone(), brutal, None)).unwrap_err();
+        assert!(error.contains("panic"), "{error}");
+        assert_eq!(validate_xdns_resolver(&doh(h3.clone(), Some(json!({"congestion": "bbr"})), None)), Ok(()));
+        let error = validate_xdns_resolver(&doh(h3, Some(json!({"congestion": "cubic"})), None)).unwrap_err();
+        assert!(error.starts_with("quicConfig.congestion"), "{error}");
+
+        // Plain resolvers ignore the DoH keys.
+        let plain = XdnsResolver { worker: Some(-1), tls_config: Some(json!({})), ..resolver("udp://1.1.1.1") };
+        assert_eq!(validate_xdns_resolver(&plain), Ok(()));
+        let settings = XdnsSettings { domains: vec![domain("t.example.com")], resolvers: vec![doh(None, None, None)], ..XdnsSettings::default() };
+        let error = validate_xdns_settings(&settings, StreamDirection::Outbound).unwrap_err();
+        assert!(error.starts_with("resolvers[0].tlsConfig:"), "{error}");
+    }
+
+    #[test]
+    fn doh_resolver_round_trips() {
+        let settings = json!({"domains": [{"names": ["t.example.com"]}], "resolvers": [{
+            "addrs": ["https://dns.google/dns-query"], "worker": 8,
+            "tlsConfig": {"serverName": "dns.google", "alpn": ["h3"]}, "quicConfig": {"congestion": "bbr"}, "future": 1
+        }]});
+        let draft = parse_xdns_settings(&settings).expect("typed");
+        assert_eq!(draft.resolvers[0].worker, Some(8));
+        assert!(xdns_tls_config_is_h3(draft.resolvers[0].tls_config.as_ref().unwrap()));
+        assert_eq!(xdns_settings_to_value(&draft), settings);
+        assert!(xdns_uses_doh(&settings));
+        assert!(!xdns_uses_doh(&json!({"resolvers": [{"addrs": ["udp://1.1.1.1"]}]})));
+        assert!(xdns_uses_doh(&json!({"resolvers": [{"addrs": ["udp://1.1.1.1"], "worker": 2}]})));
+        // A non-object tlsConfig stays on the raw-JSON editor.
+        assert!(parse_xdns_settings(&json!({"resolvers": [{"addrs": [], "tlsConfig": "x"}]})).is_none());
+        assert!(!xdns_tls_config_is_h3(&json!({"alpn": "h3,h2"})));
     }
 
     #[test]
