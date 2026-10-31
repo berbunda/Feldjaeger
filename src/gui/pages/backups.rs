@@ -207,7 +207,7 @@ struct PendingBackupRestore {
 }
 
 fn pending_restore_id() -> egui::Id {
-    egui::Id::new("backups_pending_restore")
+    egui::Id::unique("backups_pending_restore")
 }
 
 fn pending_restore(ui: &Ui) -> Option<PendingBackupRestore> {

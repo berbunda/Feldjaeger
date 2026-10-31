@@ -9,7 +9,9 @@
 
 use crate::app::inbounds::LoadedConfigSnapshot;
 use crate::app::status::SshStatus;
-use crate::xray::{DiscoveryState, GeodataSettings, geodata_settings_change_summary};
+use crate::xray::{
+    DiscoveryState, GeodataSettings, geodata_core_problems, geodata_cron_fix, geodata_settings_change_summary,
+};
 
 /// High-level state shown by the GeoData Settings page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +81,11 @@ pub struct GeodataSettingsPageModel {
     pub error_message: Option<String>,
     /// Non-fatal configuration warnings from discovery.
     pub config_warnings: Vec<String>,
+    /// What the current Xray-core refuses in the displayed settings (loaded or draft) — Save is
+    /// blocked while this is non-empty.
+    pub core_problems: Vec<String>,
+    /// Whether "Fix config" can repair the displayed `cron` (an `@every` under one minute).
+    pub cron_fix_available: bool,
 }
 
 /// Builds the GeoData Settings page model.
@@ -99,6 +106,8 @@ pub fn build_geodata_settings_page_model(
             change_summary: Vec::new(),
             error_message: None,
             config_warnings: Vec::new(),
+            core_problems: Vec::new(),
+            cron_fix_available: false,
         };
     }
 
@@ -114,6 +123,8 @@ pub fn build_geodata_settings_page_model(
                 change_summary: Vec::new(),
                 error_message: None,
                 config_warnings: Vec::new(),
+                core_problems: Vec::new(),
+                cron_fix_available: false,
             };
         }
         DiscoveryState::Succeeded(_) => {}
@@ -127,6 +138,8 @@ pub fn build_geodata_settings_page_model(
             change_summary: Vec::new(),
             error_message: None,
             config_warnings: config.warnings().to_vec(),
+            core_problems: Vec::new(),
+            cron_fix_available: false,
         };
     };
 
@@ -160,6 +173,8 @@ pub fn build_geodata_settings_page_model(
         GeodataSettingsPageState::ViewMode
     };
 
+    let core_problems = geodata_core_problems(&settings);
+    let cron_fix_available = geodata_cron_fix(&settings).is_some();
     GeodataSettingsPageModel {
         state,
         settings,
@@ -167,6 +182,8 @@ pub fn build_geodata_settings_page_model(
         change_summary,
         error_message,
         config_warnings: config.warnings().to_vec(),
+        core_problems,
+        cron_fix_available,
     }
 }
 

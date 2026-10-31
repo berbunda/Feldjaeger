@@ -5,7 +5,7 @@ use egui::{RichText, Ui};
 use crate::xray::BASELINE_XRAY_CORE;
 
 fn about_open_id() -> egui::Id {
-    egui::Id::new("about_dialog_open")
+    egui::Id::unique("about_dialog_open")
 }
 
 /// Status-bar entry that opens the About dialog.

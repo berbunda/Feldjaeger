@@ -37,7 +37,7 @@ use crate::xray::{
     XHTTP_PATH_DEFAULT, XHTTP_PLACEMENTS, XHTTP_SESSION_ID_TABLES, XHTTP_UPLINK_METHODS,
     XhttpCoreSettings, XhttpDownloadDraft, XhttpRange, XhttpStreamSettings,
     QuicTransport, WarningSeverity, alpn_selects_http3, fallbacks_transport_compatible, finalmask_tcp_layer_faces_probes,
-    parse_inbound_protocol,
+    is_valid_tun_wfp_block_leak, parse_inbound_protocol,
     validate_port_map_target,
 };
 
@@ -223,14 +223,21 @@ const HELP_TUN_DNS_TO_GATEWAY: HelpText = HelpText::new(
      старые ядра поле игнорируют.",
 );
 const HELP_TUN_WFP_BLOCK_LEAK: HelpText = HelpText::new(
-    "Windows only: Windows Filtering Platform rules that block traffic leaking past the TUN — \
-     \"dns\" (DNS outside the TUN; needs `dns`) and \"misconfigtun\" (traffic of a misconfigured \
-     TUN); both need autoSystemRoutingTable. Does nothing on a Linux server, but Xray-core still \
-     refuses any other value at load. Requires Xray-core v26.9.30+.",
-    "Только Windows: правила Windows Filtering Platform, блокирующие утечки трафика мимо TUN, — \
-     \"dns\" (DNS вне TUN; нужен `dns`) и \"misconfigtun\" (трафик неправильно настроенного \
-     TUN); оба требуют autoSystemRoutingTable. На Linux-сервере ничего не делает, но любое другое \
-     значение Xray-core всё равно отвергает при загрузке. Требует Xray-core v26.9.30+.",
+    "Windows only: Windows Filtering Platform rules that keep traffic of every program but Xray \
+     inside the TUN; all need autoSystemRoutingTable. \"tcp/PORT\" / \"udp/PORT\" — connections \
+     to that port (e.g. tcp/853); \"windnsclient\" — Windows' DNS Client service (DNS over \
+     HTTPS / TLS on Windows 11 and Server 2022+); \"dns\" — udp/53, tcp/53, windnsclient, \
+     tcp/853 and udp/853 together; \"misconfigtun\" — traffic of a misconfigured TUN. Port 53 and \
+     windnsclient need `dns`. Does nothing on a Linux server, but Xray-core still refuses any \
+     other value at load. Ports and windnsclient need Xray-core v26.10.31.",
+    "Только Windows: правила Windows Filtering Platform, которые держат трафик всех программ, \
+     кроме Xray, внутри TUN; все требуют autoSystemRoutingTable. \"tcp/ПОРТ\" / \"udp/ПОРТ\" — \
+     подключения к этому порту (например, tcp/853); \"windnsclient\" — служба DNS-клиента Windows \
+     (DNS через HTTPS / TLS в Windows 11 и Server 2022+); \"dns\" — сразу udp/53, tcp/53, \
+     windnsclient, tcp/853 и udp/853; \"misconfigtun\" — трафик неправильно настроенного TUN. \
+     Порт 53 и windnsclient требуют `dns`. На Linux-сервере ничего не делает, но любое другое \
+     значение Xray-core всё равно отвергает при загрузке. Порты и windnsclient требуют Xray-core \
+     v26.10.31.",
 );
 
 // Stream tab — method selector + TCP.
@@ -715,7 +722,7 @@ enum InboundDetailTab {
 const XHTTP_MODE_AUTO: &str = XHTTP_MODE_DEFAULT;
 
 fn protocol_picker_id() -> egui::Id {
-    egui::Id::new("inbounds_add_protocol_picker")
+    egui::Id::unique("inbounds_add_protocol_picker")
 }
 
 fn protocol_picker(ui: &Ui) -> InboundClientProtocol {
@@ -2327,7 +2334,7 @@ fn show_tunnel_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
             dirty = true;
         }
 
-        let new_id = egui::Id::new("tunnel_portmap_new");
+        let new_id = egui::Id::unique("tunnel_portmap_new");
         let (mut new_local, mut new_target) = ui.ctx().data(|d| {
             d.get_temp::<(String, String)>(new_id)
                 .unwrap_or_default()
@@ -2479,12 +2486,29 @@ fn show_tun_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
             ui.end_row();
         });
 
-    // Values the core refuses at load (Build() accepts only dns / misconfigtun, any OS).
+    // `tcp/<port>` / `udp/<port>` entries (v26.10.31): every value that is not a keyword, edited as
+    // one list; the keywords keep their checkboxes and their place in front.
+    let is_keyword = |value: &String| {
+        TUN_WFP_BLOCK_LEAK_VALUES.iter().any(|known| value.trim().eq_ignore_ascii_case(known))
+    };
+    let mut port_rules: Vec<String> = auto_system_wfp_block_leak.iter().filter(|v| !is_keyword(v)).cloned().collect();
+    if persistent_multiline_list_row(
+        ui,
+        "autoSystemWfpBlockLeak ports (tcp/PORT or udp/PORT, one per line)",
+        &mut port_rules,
+        "tun_wfp_ports",
+    ) {
+        auto_system_wfp_block_leak.retain(is_keyword);
+        auto_system_wfp_block_leak.extend(port_rules);
+        dirty = true;
+    }
+
+    // Values the core refuses at load (`tun.ExpandWfpBlockLeak`, any OS).
     let unknown_leaks: Vec<String> = auto_system_wfp_block_leak
         .iter()
         .filter(|value| {
-            let value = value.trim().to_ascii_lowercase();
-            !value.is_empty() && !TUN_WFP_BLOCK_LEAK_VALUES.contains(&value.as_str())
+            let value = value.trim();
+            !value.is_empty() && !is_valid_tun_wfp_block_leak(value)
         })
         .cloned()
         .collect();
@@ -4452,7 +4476,7 @@ struct RawJsonEditState {
 }
 
 fn raw_json_edit_id() -> egui::Id {
-    egui::Id::new("inbound_raw_json_edit")
+    egui::Id::unique("inbound_raw_json_edit")
 }
 
 fn raw_json_edit_state(ui: &Ui) -> Option<RawJsonEditState> {
@@ -4727,11 +4751,11 @@ fn format_dest_override(settings: &SniffingSettings) -> String {
 }
 
 fn detail_tab_id() -> egui::Id {
-    egui::Id::new("inbounds_detail_tab")
+    egui::Id::unique("inbounds_detail_tab")
 }
 
 fn focus_general_id() -> egui::Id {
-    egui::Id::new("inbounds_focus_general")
+    egui::Id::unique("inbounds_focus_general")
 }
 
 fn detail_tab(ui: &Ui) -> InboundDetailTab {
@@ -4899,7 +4923,7 @@ struct PendingInboundDuplicate {
 }
 
 fn pending_inbound_duplicate_id() -> egui::Id {
-    egui::Id::new("inbounds_pending_duplicate")
+    egui::Id::unique("inbounds_pending_duplicate")
 }
 
 fn pending_inbound_duplicate(ui: &Ui) -> Option<PendingInboundDuplicate> {
@@ -4997,7 +5021,7 @@ struct PendingInboundImport {
 }
 
 fn pending_inbound_import_id() -> egui::Id {
-    egui::Id::new("inbounds_pending_import")
+    egui::Id::unique("inbounds_pending_import")
 }
 
 fn pending_inbound_import(ui: &Ui) -> Option<PendingInboundImport> {
@@ -5338,7 +5362,7 @@ struct PendingInboundDelete {
 }
 
 fn pending_inbound_delete_id() -> egui::Id {
-    egui::Id::new("inbounds_pending_delete")
+    egui::Id::unique("inbounds_pending_delete")
 }
 
 fn pending_inbound_delete(ui: &Ui) -> Option<PendingInboundDelete> {

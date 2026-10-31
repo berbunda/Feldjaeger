@@ -43,8 +43,11 @@ pub const XHTTP_PLACEMENTS: &[&str] = &[
 ];
 /// Padding methods when `xPaddingObfsMode` is on.
 pub const XHTTP_PADDING_METHODS: &[&str] = &["repeat-x", "tokenish"];
-/// Common uplink HTTP methods.
-pub const XHTTP_UPLINK_METHODS: &[&str] = &["POST", "GET", "PUT"];
+/// Common uplink HTTP methods (`GET` only in `packet-up` mode). `OPTIONS` works since Xray-core
+/// v26.10.31, whose server treats only an OPTIONS request with `Access-Control-Request-Method`
+/// as a CORS preflight (XTLS/Xray-core#7290); an older server answers every OPTIONS uplink
+/// request with an empty 200.
+pub const XHTTP_UPLINK_METHODS: &[&str] = &["POST", "GET", "PUT", "OPTIONS"];
 /// Predefined `sessionIDTable` names from Xray.
 pub const XHTTP_SESSION_ID_TABLES: &[&str] = &[
     "ALPHABET",

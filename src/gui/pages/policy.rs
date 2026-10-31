@@ -517,7 +517,7 @@ fn display_optional_u64(value: Option<u64>) -> String {
 }
 
 fn selected_level_id() -> egui::Id {
-    egui::Id::new("policy_page_selected_level")
+    egui::Id::unique("policy_page_selected_level")
 }
 
 fn selected_level(ui: &Ui) -> Option<String> {

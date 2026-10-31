@@ -48,7 +48,7 @@ impl fmt::Display for XrayCoreVersion {
 }
 
 /// The Xray-core release Feldjäger is developed and verified against (shown in the About dialog).
-pub const BASELINE_XRAY_CORE: XrayCoreVersion = XrayCoreVersion::new(26, 10, 21);
+pub const BASELINE_XRAY_CORE: XrayCoreVersion = XrayCoreVersion::new(26, 10, 31);
 
 /// A config feature (or a schema change) that appeared in a specific Xray-core release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -68,7 +68,9 @@ pub enum CoreFeature {
     /// `xmc` (Minecraft) layer in `finalmask.tcp[]` — XTLS/Xray-core#6210.
     XmcTcpMask,
     /// VLESS / Trojan outbounds without TLS / REALITY (VLESS: or `encryption`) are refused at load
-    /// unless the server address is private — XTLS/Xray-core#6303 (Roadmap §4.2).
+    /// unless the server address is private — XTLS/Xray-core#6303 (Roadmap §4.2). Which IPs count as
+    /// private follows the current core (#7249, v26.10.29) whatever the installed version:
+    /// Feldjäger targets the newest Xray-core.
     PlaintextOutboundForbidden,
     /// `xmc` `profiles[]` (signed Minecraft profiles) replacing `usernames` — XTLS/Xray-core#6487.
     XmcProfilesSchema,
@@ -119,6 +121,9 @@ pub enum CoreFeature {
     /// `filter` layer in `finalmask.tcp[]` / `finalmask.udp[]` (source-IP filtering on the
     /// listening side) — XTLS/Xray-core#7206.
     FinalMaskFilter,
+    /// TUN `autoSystemWfpBlockLeak` values `windnsclient`, `tcp/<port>`, `udp/<port>` (and `dns`
+    /// standing for udp/53, tcp/53, windnsclient, tcp/853, udp/853) — XTLS/Xray-core#7288.
+    TunWfpBlockLeakPorts,
 }
 
 /// The table of Roadmap §2.6 stage 0.7, oldest first.
@@ -144,6 +149,7 @@ pub const CORE_FEATURES: &[CoreFeature] = &[
     CoreFeature::XdnsDohResolver,
     CoreFeature::NoiseLuaScript,
     CoreFeature::FinalMaskFilter,
+    CoreFeature::TunWfpBlockLeakPorts,
 ];
 
 impl CoreFeature {
@@ -171,6 +177,7 @@ impl CoreFeature {
             Self::XdnsDohResolver => XrayCoreVersion::new(26, 10, 17),
             Self::NoiseLuaScript => XrayCoreVersion::new(26, 10, 17),
             Self::FinalMaskFilter => XrayCoreVersion::new(26, 10, 21),
+            Self::TunWfpBlockLeakPorts => XrayCoreVersion::new(26, 10, 31),
         }
     }
 
@@ -198,6 +205,7 @@ impl CoreFeature {
             Self::XdnsDohResolver => 7140,
             Self::NoiseLuaScript => 7124,
             Self::FinalMaskFilter => 7206,
+            Self::TunWfpBlockLeakPorts => 7288,
         }
     }
 
@@ -225,6 +233,7 @@ impl CoreFeature {
             Self::XdnsDohResolver => "`xdns` DoH resolvers (https://, tlsConfig / quicConfig / worker)",
             Self::NoiseLuaScript => "`noise` Lua `script` (HandleNoise)",
             Self::FinalMaskFilter => "`filter` mask (source-IP filtering)",
+            Self::TunWfpBlockLeakPorts => "TUN `autoSystemWfpBlockLeak` `windnsclient` / `tcp/PORT` / `udp/PORT`",
         }
     }
 

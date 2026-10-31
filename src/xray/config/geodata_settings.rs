@@ -20,13 +20,15 @@
 //!   the scheduled reload only re-reads already-present files without downloading anything.
 //!
 //! `AssetObject.url`/`AssetObject.file` are both documented as required strings (`url` "должен
-//! быть HTTPS URL"). Per `rules.md` ("prefer compatibility over convenience", the same stance
-//! already taken for `metrics.listen`/`api.listen`/`version.min`/`.max`), this module does not
-//! hard-enforce the HTTPS scheme — only blank values and control characters are rejected, plus a
-//! duplicate-`file` check (two assets targeting the same on-disk filename is a real conflict, the
-//! same class of check as `env`'s duplicate-name rejection). Unknown per-asset JSON keys are
-//! preserved verbatim in [`GeodataAssetEntry::extra`], the same "never invent semantics for
-//! what's already there" guarantee as `FakeDnsPoolEntry::extra`.
+//! быть HTTPS URL"). Blank values, control characters and a duplicate `file` (two assets targeting
+//! the same on-disk filename is a real conflict, the same class of check as `env`'s duplicate-name
+//! rejection) are rejected, plus everything the current Xray-core refuses
+//! ([`geodata_core_problems`]): a non-`https` URL (`GeodataAssetConfig.Build()`), and — only with
+//! a `cron` — more than 100 assets, a `file` not ending in `.dat` and an `@every` interval under a
+//! minute (XTLS/Xray-core#7267, v26.10.29). Feldjäger targets the current core, so these are Save
+//! errors on every installed version; [`geodata_cron_fix`] backs the "Fix config" button. Unknown
+//! per-asset JSON keys are preserved verbatim in [`GeodataAssetEntry::extra`], the same "never
+//! invent semantics for what's already there" guarantee as `FakeDnsPoolEntry::extra`.
 
 use serde_json::{Map, Value};
 
@@ -307,7 +309,161 @@ pub fn validate_geodata_settings(settings: &GeodataSettings) -> ConfigModifyResu
         }
     }
 
+    if let Some(problem) = geodata_core_problems(settings).into_iter().next() {
+        return Err(ConfigModifyError::new(ConfigModifyErrorKind::ValidationFailed, problem));
+    }
+
     Ok(())
+}
+
+/// Most `assets` `geodata.New()` accepts with a `cron` (XTLS/Xray-core#7267, v26.10.29).
+pub const GEODATA_MAX_ASSETS: usize = 100;
+
+/// Shortest `@every` interval `geodata.New()` accepts, in seconds (XTLS/Xray-core#7267).
+const GEODATA_MIN_EVERY_SECS: i128 = 60;
+
+/// What the current Xray-core refuses in this `geodata` object, as user-facing messages (empty =
+/// nothing). Mirrors `GeodataAssetConfig.Build()` (`validateHTTPS`, every asset) and
+/// `geodata.New()` (`app/geodata/geodata.go`, v26.10.29+), whose checks run only with a `cron`:
+/// at most [`GEODATA_MAX_ASSETS`] assets, every `file` ending in `.dat` (any case), and an
+/// `@every` interval of at least one minute. `xray run -test` 26.10.21 accepts all of these;
+/// 26.10.29 / 26.10.31 refuse them (checked 2026-10-31). Feldjäger follows the current core.
+pub fn geodata_core_problems(settings: &GeodataSettings) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (index, asset) in settings.assets.iter().enumerate() {
+        if !asset.url.trim().is_empty() && !is_https_request_uri(&asset.url) {
+            problems.push(format!(
+                "assets[{index}].url must be an https:// URL with a host — Xray-core refuses \"{}\"",
+                asset.url
+            ));
+        }
+    }
+    let Some(cron) = settings.cron.as_deref() else {
+        return problems;
+    };
+    if settings.assets.len() > GEODATA_MAX_ASSETS {
+        problems.push(format!(
+            "geodata has {} assets — Xray-core v26.10.29+ accepts at most {GEODATA_MAX_ASSETS} with a cron",
+            settings.assets.len()
+        ));
+    }
+    for (index, asset) in settings.assets.iter().enumerate() {
+        let file = asset.file.trim();
+        let is_dat = std::path::Path::new(file)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("dat"));
+        if !file.is_empty() && !is_dat {
+            problems.push(format!(
+                "assets[{index}].file \"{file}\" must end in .dat — Xray-core v26.10.29+ refuses other files"
+            ));
+        }
+    }
+    if let Some(seconds) = cron_every_seconds(cron).filter(|seconds| *seconds < GEODATA_MIN_EVERY_SECS) {
+        problems.push(format!(
+            "cron \"{cron}\" runs every {seconds} s — Xray-core v26.10.29+ needs at least 1 minute; \
+             use \"Fix config\" for @every 1m"
+        ));
+    }
+    problems
+}
+
+/// The `cron` that "Fix config" writes: `@every 1m` (keeping a `TZ=` / `CRON_TZ=` prefix) when
+/// the current one is an `@every` interval under one minute, else `None`.
+pub fn geodata_cron_fix(settings: &GeodataSettings) -> Option<String> {
+    let cron = settings.cron.as_deref()?;
+    cron_every_seconds(cron).filter(|seconds| *seconds < GEODATA_MIN_EVERY_SECS)?;
+    let (zone, _) = split_cron_zone(cron);
+    Some(match zone {
+        Some(zone) => format!("{zone} @every 1m"),
+        None => "@every 1m".to_owned(),
+    })
+}
+
+/// Go's `url.ParseRequestURI` + `validateHTTPS` (`infra/conf/geodata.go`): scheme `https` (any
+/// case, Go lower-cases it), a non-empty host, no spaces or control characters.
+fn is_https_request_uri(url: &str) -> bool {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("https") || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return false;
+    }
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority.rsplit_once('@').map_or(authority, |(_, host)| host);
+    !host.is_empty() && !host.starts_with(':')
+}
+
+/// `TZ=…` / `CRON_TZ=…` prefix of a robfig/cron spec and the rest (`cron.ParseStandard`).
+fn split_cron_zone(cron: &str) -> (Option<&str>, &str) {
+    let cron = cron.trim();
+    if (cron.starts_with("TZ=") || cron.starts_with("CRON_TZ="))
+        && let Some((zone, rest)) = cron.split_once(' ')
+    {
+        return (Some(zone), rest.trim());
+    }
+    (None, cron)
+}
+
+/// The interval of an `@every <duration>` spec as robfig/cron schedules it — `Every()` rounds the
+/// duration down to whole seconds with a floor of 1 s — or `None` for any other spec (or a
+/// duration Go would not parse; the core reports that itself).
+fn cron_every_seconds(cron: &str) -> Option<i128> {
+    let (_, spec) = split_cron_zone(cron);
+    let duration = spec.strip_prefix("@every ")?;
+    let nanos = parse_go_duration(duration)?;
+    Some((nanos / 1_000_000_000).max(1))
+}
+
+/// Go's `time.ParseDuration` in nanoseconds: `[-+]?([0-9]*(\.[0-9]*)?[a-z]+)+` with units
+/// `ns`, `us` / `µs` / `μs`, `ms`, `s`, `m`, `h`, or a bare `0`.
+fn parse_go_duration(text: &str) -> Option<i128> {
+    let (negative, mut rest) = match text.as_bytes().first() {
+        Some(b'-') => (true, &text[1..]),
+        Some(b'+') => (false, &text[1..]),
+        _ => (false, text),
+    };
+    if rest == "0" {
+        return Some(0);
+    }
+    if rest.is_empty() {
+        return None;
+    }
+    let mut total: i128 = 0;
+    while !rest.is_empty() {
+        let int_len = rest.bytes().take_while(u8::is_ascii_digit).count();
+        let (int_part, after) = rest.split_at(int_len);
+        let (frac_part, after) = match after.strip_prefix('.') {
+            Some(after) => {
+                let frac_len = after.bytes().take_while(u8::is_ascii_digit).count();
+                after.split_at(frac_len)
+            }
+            None => ("", after),
+        };
+        if int_part.is_empty() && frac_part.is_empty() {
+            return None;
+        }
+        let unit_len = after.find(|c: char| c == '.' || c.is_ascii_digit()).unwrap_or(after.len());
+        let (unit, after) = after.split_at(unit_len);
+        let scale: i128 = match unit {
+            "ns" => 1,
+            "us" | "µs" | "μs" => 1_000,
+            "ms" => 1_000_000,
+            "s" => 1_000_000_000,
+            "m" => 60_000_000_000,
+            "h" => 3_600_000_000_000,
+            _ => return None,
+        };
+        let whole: i128 = if int_part.is_empty() { 0 } else { int_part.parse().ok()? };
+        let digits = &frac_part[..frac_part.len().min(18)];
+        let fraction: i128 = if digits.is_empty() { 0 } else { digits.parse().ok()? };
+        let fraction = fraction * scale / 10_i128.pow(digits.len() as u32);
+        total = total.checked_add(whole.checked_mul(scale)?.checked_add(fraction)?)?;
+        if total > i128::from(i64::MAX) {
+            return None;
+        }
+        rest = after;
+    }
+    Some(if negative { -total } else { total })
 }
 
 fn validate_optional_field(value: &Option<String>, field: &str) -> ConfigModifyResult<()> {
@@ -525,5 +681,71 @@ mod tests {
         let mut settings = GeodataSettings::defaults();
         settings.cron = Some("0 4 * * *\n".to_owned());
         assert!(validate_geodata_settings(&settings).is_err());
+    }
+
+    fn asset(url: &str, file: &str) -> GeodataAssetEntry {
+        GeodataAssetEntry { url: url.to_owned(), file: file.to_owned(), extra: Map::new() }
+    }
+
+    fn with_cron(cron: Option<&str>, assets: Vec<GeodataAssetEntry>) -> GeodataSettings {
+        GeodataSettings { cron: cron.map(str::to_owned), assets, ..GeodataSettings::defaults() }
+    }
+
+    #[test]
+    fn go_durations_parse_like_time_parse_duration() {
+        for (text, nanos) in [
+            ("0", 0), ("1m", 60_000_000_000), ("1m30s", 90_000_000_000), ("59.9s", 59_900_000_000),
+            (".5s", 500_000_000), ("5.s", 5_000_000_000), ("1h", 3_600_000_000_000), ("-1m", -60_000_000_000),
+            ("1µs", 1_000), ("1μs", 1_000), ("300ms", 300_000_000), ("1m0.5s", 60_500_000_000),
+        ] {
+            assert_eq!(parse_go_duration(text), Some(nanos), "{text}");
+        }
+        for invalid in ["", "1", "s", ".s", "1x", "1 m", "--1m", "1m 2s"] {
+            assert_eq!(parse_go_duration(invalid), None, "{invalid}");
+        }
+    }
+
+    #[test]
+    fn core_v26_10_29_limits_apply_only_with_a_cron() {
+        // As `xray run -test` 26.10.29 / 26.10.31: refused with a cron …
+        let dat = || asset("https://example.com/geoip.dat", "geoip.dat");
+        for (cron, assets) in [
+            ("@every 30s", vec![dat()]),
+            ("@every 59.9s", vec![dat()]),
+            ("TZ=Europe/Berlin @every 10s", vec![dat()]),
+            ("0 4 * * *", vec![asset("https://example.com/geoip.txt", "geoip.txt")]),
+            ("0 4 * * *", vec![asset("https://example.com/x", "geoip")]),
+            ("0 4 * * *", vec![dat(); 101]),
+        ] {
+            assert!(!geodata_core_problems(&with_cron(Some(cron), assets)).is_empty(), "{cron}");
+        }
+        // … accepted otherwise (case-insensitive .dat, 100 assets, 1 minute, a 5-field spec).
+        for (cron, assets) in [
+            ("@every 1m", vec![dat()]),
+            ("@every 1m30s", vec![dat()]),
+            ("*/1 * * * *", vec![dat()]),
+            ("0 4 * * *", vec![asset("https://example.com/g.dat", "GEOIP.DAT")]),
+            ("0 4 * * *", vec![dat(); 100]),
+        ] {
+            assert!(geodata_core_problems(&with_cron(Some(cron), assets)).is_empty(), "{cron}");
+        }
+        // Without a cron `geodata.New()` returns before its checks.
+        assert!(geodata_core_problems(&with_cron(None, vec![asset("https://example.com/a", "geoip.txt"); 101])).is_empty());
+        // The https check of `Build()` holds with or without a cron.
+        for url in ["http://example.com/geoip.dat", "https:///geoip.dat", "ftp://example.com/x.dat", " https://example.com/x.dat"] {
+            assert!(!geodata_core_problems(&with_cron(None, vec![asset(url, "geoip.dat")])).is_empty(), "{url}");
+        }
+        assert!(geodata_core_problems(&with_cron(None, vec![asset("HTTPS://example.com:8443/geoip.dat?x=1", "geoip.dat")])).is_empty());
+        assert!(validate_geodata_settings(&with_cron(Some("@every 30s"), vec![dat()])).is_err());
+    }
+
+    #[test]
+    fn fix_config_raises_a_short_every_interval_to_one_minute() {
+        let fix = |cron: &str| geodata_cron_fix(&with_cron(Some(cron), Vec::new()));
+        assert_eq!(fix("@every 30s").as_deref(), Some("@every 1m"));
+        assert_eq!(fix("CRON_TZ=UTC @every 1s").as_deref(), Some("CRON_TZ=UTC @every 1m"));
+        assert_eq!(fix("@every 1m"), None);
+        assert_eq!(fix("0 4 * * *"), None);
+        assert_eq!(geodata_cron_fix(&with_cron(None, Vec::new())), None);
     }
 }

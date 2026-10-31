@@ -67,6 +67,7 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
                         .color(Color32::from_rgb(200, 60, 60)),
                 );
             }
+            show_core_problems(ui, service, &model.core_problems, model.cron_fix_available);
             ui.add_space(8.0);
         }
     }
@@ -93,6 +94,26 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
         show_edit_form(ui, service);
     } else {
         show_view(ui, &model.settings);
+    }
+}
+
+/// What the current Xray-core refuses (Save is blocked), with "Fix config" for a too short
+/// `@every` interval.
+fn show_core_problems(ui: &mut Ui, service: &mut ApplicationService, problems: &[String], cron_fix: bool) {
+    for problem in problems {
+        ui.label(
+            RichText::new(problem.clone())
+                .size(14.0)
+                .color(Color32::from_rgb(210, 170, 40)),
+        );
+    }
+    if cron_fix
+        && ui
+            .add_enabled(!service.is_geodata_settings_mutation_busy(), egui::Button::new("Fix config"))
+            .on_hover_text("Set cron to @every 1m — review, then Save")
+            .clicked()
+    {
+        let _ = service.fix_geodata_settings_cron();
     }
 }
 
@@ -246,7 +267,9 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
     });
     ui.label(
         RichText::new(
-            "Standard 5-field cron expression (local timezone). Empty = no scheduled reload.",
+            "Standard 5-field cron expression (local timezone) or @every <duration> (at least 1m). \
+             Empty = no scheduled reload. With a cron Xray-core accepts at most 100 assets, each \
+             file ending in .dat.",
         )
         .size(12.0)
         .color(Color32::from_rgb(140, 140, 140)),
@@ -315,6 +338,10 @@ fn show_asset_edit_form(
             TextEdit::singleline(&mut asset.url)
                 .desired_width(320.0)
                 .hint_text("https://example.com/geoip.dat"),
+        )
+        .on_hover_text(
+            "https:// only. Xray-core v26.10.31+ unpacks a gzip-compressed download by itself \
+             (up to 256 MiB).",
         );
     });
     ui.horizontal(|ui| {

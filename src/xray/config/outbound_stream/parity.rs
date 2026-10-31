@@ -49,6 +49,13 @@ fn plaintext_cases() -> Vec<(&'static str, Value, bool)> {
         ("public domain", vless_to("example.com", raw()), true),
         ("public IP, security none", vless_to("1.1.1.1", json!({"network": "raw", "security": "none"})), true),
         ("private IP", vless_to("192.168.1.10", raw()), false),
+        ("link-local IP", vless_to("169.254.1.1", raw()), false),
+        // Public since v26.10.29 (XTLS/Xray-core#7249): reserved, but not IsPrivate / IsLoopback /
+        // IsLinkLocalUnicast.
+        ("CGNAT IP", vless_to("100.64.0.1", raw()), true),
+        ("benchmarking IP", vless_to("198.18.0.1", raw()), true),
+        ("trojan CGNAT", json!({"tag": "out", "protocol": "trojan",
+            "settings": {"servers": [{"address": "100.64.0.1", "port": 443, "password": "p"}]}}), true),
         ("*.lan", vless_to("router.lan", raw()), false),
         ("dotless name", vless_to("backend", raw()), false),
         ("under example", vless_to("srv.example", raw()), false),

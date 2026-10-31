@@ -70,14 +70,35 @@ pub enum InboundProtocolDraft {
         /// `settings.autoSystemDnsToGateway` (Linux, v26.9.30+) — point the system DNS at
         /// `gateway`; `false` = key absent (an explicit `false` on disk is kept).
         auto_system_dns_to_gateway: bool,
-        /// `settings.autoSystemWfpBlockLeak[]` (Windows, v26.9.30+) — `dns` / `misconfigtun`;
+        /// `settings.autoSystemWfpBlockLeak[]` (Windows, v26.9.30+) — `dns` / `windnsclient` /
+        /// `misconfigtun` / `tcp/<port>` / `udp/<port>` ([`is_valid_tun_wfp_block_leak`]);
         /// empty = key absent.
         auto_system_wfp_block_leak: Vec<String>,
     },
 }
 
-/// Values `TunConfig.Build()` accepts in `autoSystemWfpBlockLeak` (compared lower-cased).
-pub const TUN_WFP_BLOCK_LEAK_VALUES: &[&str] = &["dns", "misconfigtun"];
+/// Keyword values of `autoSystemWfpBlockLeak` (compared lower-cased) — besides them the core
+/// takes `tcp/<port>` / `udp/<port>` ([`is_valid_tun_wfp_block_leak`]).
+pub const TUN_WFP_BLOCK_LEAK_VALUES: &[&str] = &["dns", "windnsclient", "misconfigtun"];
+
+/// Whether `tun.ExpandWfpBlockLeak` (`proxy/tun/wfp_leak.go`, XTLS/Xray-core#7288, v26.10.31)
+/// accepts the value: a keyword of [`TUN_WFP_BLOCK_LEAK_VALUES`] or `tcp/<port>` / `udp/<port>`
+/// with a port of 1–65535 in decimal digits only (`strconv.ParseUint(port, 10, 16)`, so leading
+/// zeros pass and `+53` / ` 53` do not), all case-insensitive. Checked with `xray run -test`
+/// 26.10.31.
+pub fn is_valid_tun_wfp_block_leak(value: &str) -> bool {
+    let value = value.to_ascii_lowercase();
+    if TUN_WFP_BLOCK_LEAK_VALUES.contains(&value.as_str()) {
+        return true;
+    }
+    let Some((protocol, port)) = value.split_once('/') else {
+        return false;
+    };
+    matches!(protocol, "tcp" | "udp")
+        && !port.is_empty()
+        && port.bytes().all(|b| b.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|port| port != 0)
+}
 
 impl InboundProtocolDraft {
     /// Default for Add VLESS.
@@ -398,7 +419,7 @@ struct TunSettings<'a> {
     auto_system_wfp_block_leak: &'a [String],
 }
 
-/// The checks of `TunConfig.Build()` (`infra/conf/tun.go`, v26.9.30) that fail the load on a
+/// The checks of `TunConfig.Build()` (`infra/conf/tun.go`, v26.10.31) that fail the load on a
 /// Linux server: an unknown `autoSystemWfpBlockLeak` value (any OS), and `autoSystemDnsToGateway`
 /// without a gateway (Linux). The Windows-only conditions of the same function never apply here.
 pub fn validate_tun_settings(
@@ -408,10 +429,13 @@ pub fn validate_tun_settings(
 ) -> ConfigModifyResult<()> {
     for value in auto_system_wfp_block_leak {
         let value = value.trim();
-        if !value.is_empty() && !TUN_WFP_BLOCK_LEAK_VALUES.contains(&value.to_ascii_lowercase().as_str()) {
+        if !value.is_empty() && !is_valid_tun_wfp_block_leak(value) {
             return Err(ConfigModifyError::new(
                 ConfigModifyErrorKind::ValidationFailed,
-                format!("TUN autoSystemWfpBlockLeak: unknown value \"{value}\" (allowed: dns, misconfigtun)"),
+                format!(
+                    "TUN autoSystemWfpBlockLeak: unknown value \"{value}\" (allowed: dns, windnsclient, \
+                     misconfigtun, tcp/<port>, udp/<port>)"
+                ),
             ));
         }
     }
@@ -793,6 +817,14 @@ mod tests {
         assert!(err.to_string().contains("routes"), "{err}");
         // Case does not matter, blanks are skipped.
         assert!(validate_tun_settings(&[], false, &["DNS".into(), "MisconfigTun".into(), " ".into()]).is_ok());
+        // v26.10.31 (#7288): `windnsclient` and `tcp/<port>` / `udp/<port>` — as `xray run -test`.
+        for valid in ["windnsclient", "tcp/853", "UDP/443", "tcp/053", "udp/65535", "tcp/1"] {
+            assert!(is_valid_tun_wfp_block_leak(valid), "{valid}");
+        }
+        for invalid in ["tcp/0", "tcp/65536", "tcp/x", "sctp/1", "tcp/ 53", "tcp/+53", "tcp/", "tcp", "routes"] {
+            assert!(!is_valid_tun_wfp_block_leak(invalid), "{invalid}");
+        }
+        assert!(validate_tun_settings(&[], false, &["windnsclient".into(), "tcp/853".into()]).is_ok());
         // Linux: autoSystemDnsToGateway needs a gateway.
         let err = validate_tun_settings(&[" ".to_owned()], true, &[]).unwrap_err();
         assert!(err.to_string().contains("gateway"), "{err}");

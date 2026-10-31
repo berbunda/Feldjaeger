@@ -19,9 +19,12 @@
 //! A relative path is resolved by `platform.ResolveLuaFile`: `XRAY_LOCATION_CONFDIR`,
 //! `XRAY_LOCATION_CONFIG`, the working directory, the xray binary's directory. v26.10.10 checks only
 //! that the file exists, in `Build()`; v26.10.17 finds and compiles it when the router / DNS is
-//! created — `xray run -test` included — and refuses a file that does not end in `.lua` after
-//! symlinks are resolved. Inline scripts (`base64:` / `base64+gzip:`) were added and disabled in
-//! the same release ("currently unavailable"). Checked with `xray.exe` 26.10.10 and 26.10.21.
+//! created — `xray run -test` included — and refuses a file that does not end in `.lua`. Since
+//! v26.10.29 (XTLS/Xray-core#7255, `filesystem.ResolveLuaFile`) that is the name as written, in
+//! any case (`route.LUA` passes) and without following symlinks (`x.txt` → `y.lua` is refused);
+//! v26.10.17 / v26.10.21 compared the resolved target case-sensitively. Feldjäger follows the
+//! current core. Inline scripts (`base64:` / `base64+gzip:`) were added and disabled in v26.10.17
+//! ("currently unavailable"). Checked with `xray.exe` 26.10.10, 26.10.21 and 26.10.31.
 
 use super::core_version::{CoreFeature, XrayCoreVersion};
 use crate::xray::config::dns_settings::DnsSettings;
@@ -49,10 +52,11 @@ fn path_notes(key: &str, path: &str, core: Option<XrayCoreVersion>) -> Vec<Strin
         }];
     }
     let mut notes = Vec::new();
-    if strict && !path.ends_with(".lua") {
+    // v26.10.29 (#7255): the name itself must end in .lua, in any case — a symlink is not followed.
+    if strict && !path.to_ascii_lowercase().ends_with(".lua") {
         notes.push(format!(
-            "{key} \"{path}\" does not end in .lua: Xray-core {} and newer refuse it (unless it is a \
-             symlink to a .lua file).",
+            "{key} \"{path}\" does not end in .lua: Xray-core {} and newer refuse it (the name \
+             itself counts, also for a symlink).",
             CoreFeature::LuaScriptExclusive.min_version()
         ));
     }
@@ -275,6 +279,9 @@ mod tests {
     fn path_notes_cover_extension_and_inline_form() {
         let notes = routing_script_notes(&routing(Some("/etc/xray/route.txt")), NEW);
         assert!(notes.iter().any(|n| n.contains("does not end in .lua")), "{notes:?}");
+        assert!(!notes.iter().any(|n| n.contains("unless")), "{notes:?}");
+        // v26.10.29+: the extension is matched in any case (`xray run -test` 26.10.31).
+        assert!(routing_script_notes(&routing(Some("/etc/xray/route.LUA")), NEW).len() == 1);
         assert!(!routing_script_notes(&routing(Some("/etc/xray/route.txt")), MID).iter().any(|n| n.contains(".lua")));
         let notes = routing_script_notes(&routing(Some("base64:ZW5k")), NEW);
         assert_eq!(notes.len(), 2, "{notes:?}");

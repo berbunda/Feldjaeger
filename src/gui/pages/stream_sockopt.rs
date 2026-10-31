@@ -119,8 +119,12 @@ const HELP_SOCKOPT_TCP_CONGESTION: HelpText = HelpText::new(
     "Алгоритм управления перегрузкой TCP (Linux), например bbr; он должен быть доступен в ядре.",
 );
 const HELP_SOCKOPT_TCP_MPTCP: HelpText = HelpText::new(
-    "Multipath TCP (Linux 5.6+); the server has to support it too.",
-    "Multipath TCP (Linux 5.6+); сервер тоже должен его поддерживать.",
+    "Multipath TCP (Linux 5.6+). On an outbound the server has to support it too; on an inbound \
+     it lets clients connect with MPTCP — since Xray-core v26.10.31 a listener has MPTCP off \
+     unless this is set.",
+    "Multipath TCP (Linux 5.6+). У outbound сервер тоже должен его поддерживать; у inbound \
+     разрешает клиентам подключаться по MPTCP — начиная с Xray-core v26.10.31 слушающий сокет \
+     без этого параметра MPTCP не принимает.",
 );
 const HELP_SOCKOPT_ADDRESS_PORT_STRATEGY: HelpText = HelpText::new(
     "Look up the real address and/or port of the target in DNS SRV or TXT records before \
@@ -347,6 +351,10 @@ pub(crate) fn show_sockopt_edit(
             }
             ui.end_row();
 
+            super::field_label(ui, "tcpMptcp", HELP_SOCKOPT_TCP_MPTCP);
+            dirty |= ui.checkbox(&mut sockopt.tcp_mptcp, "").changed();
+            ui.end_row();
+
             super::field_label(ui, "tcpWindowClamp", HELP_SOCKOPT_TCP_WINDOW_CLAMP);
             if ui
                 .add(
@@ -445,10 +453,6 @@ fn show_outbound_only_rows(ui: &mut Ui, sockopt: &mut SockoptDraft, dialer_proxy
     ui.horizontal(|ui| {
         dirty |= optional_string_combo(ui, "sockopt_tcp_congestion", &mut sockopt.tcp_congestion, TCP_CONGESTION_PRESETS);
     });
-    ui.end_row();
-
-    super::field_label(ui, "tcpMptcp", HELP_SOCKOPT_TCP_MPTCP);
-    dirty |= ui.checkbox(&mut sockopt.tcp_mptcp, "").changed();
     ui.end_row();
 
     super::field_label(ui, "addressPortStrategy", HELP_SOCKOPT_ADDRESS_PORT_STRATEGY);
@@ -666,6 +670,12 @@ pub(crate) fn show_sockopt_readonly(ui: &mut Ui, direction: StreamDirection, soc
             if let Some(clamp) = sockopt.tcp_window_clamp {
                 ui.label("tcpWindowClamp");
                 ui.label(clamp.to_string());
+                ui.end_row();
+                any = true;
+            }
+            if sockopt.tcp_mptcp {
+                ui.label("tcpMptcp");
+                ui.label("true");
                 ui.end_row();
                 any = true;
             }

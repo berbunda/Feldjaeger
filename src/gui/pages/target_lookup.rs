@@ -18,7 +18,7 @@ const MAX_SCAN_THREADS: u32 = 32;
 const MAX_SCAN_PAUSE_SECS: u32 = 300;
 
 fn input_id() -> egui::Id {
-    egui::Id::new("target_lookup_input")
+    egui::Id::unique("target_lookup_input")
 }
 
 fn draft_input(ui: &Ui) -> String {
@@ -32,7 +32,7 @@ fn set_draft_input(ui: &Ui, value: String) {
 }
 
 fn scan_cidr_id() -> egui::Id {
-    egui::Id::new("target_scan_cidr_input")
+    egui::Id::unique("target_scan_cidr_input")
 }
 
 fn draft_scan_cidr(ui: &Ui) -> String {
@@ -46,7 +46,7 @@ fn set_draft_scan_cidr(ui: &Ui, value: String) {
 }
 
 fn scan_threads_id() -> egui::Id {
-    egui::Id::new("target_scan_threads_input")
+    egui::Id::unique("target_scan_threads_input")
 }
 
 fn draft_scan_threads(ui: &Ui) -> u32 {
@@ -60,7 +60,7 @@ fn set_draft_scan_threads(ui: &Ui, value: u32) {
 }
 
 fn scan_pause_id() -> egui::Id {
-    egui::Id::new("target_scan_pause_input")
+    egui::Id::unique("target_scan_pause_input")
 }
 
 fn draft_scan_pause_secs(ui: &Ui) -> u32 {
@@ -74,7 +74,7 @@ fn set_draft_scan_pause_secs(ui: &Ui, value: u32) {
 }
 
 fn scan_limit_enabled_id() -> egui::Id {
-    egui::Id::new("target_scan_limit_enabled")
+    egui::Id::unique("target_scan_limit_enabled")
 }
 
 fn draft_scan_limit_enabled(ui: &Ui) -> bool {
@@ -88,7 +88,7 @@ fn set_draft_scan_limit_enabled(ui: &Ui, value: bool) {
 }
 
 fn scan_limit_value_id() -> egui::Id {
-    egui::Id::new("target_scan_limit_value")
+    egui::Id::unique("target_scan_limit_value")
 }
 
 fn draft_scan_limit_value(ui: &Ui) -> u32 {
@@ -102,7 +102,7 @@ fn set_draft_scan_limit_value(ui: &Ui, value: u32) {
 }
 
 fn scan_start_error_id() -> egui::Id {
-    egui::Id::new("target_scan_start_error")
+    egui::Id::unique("target_scan_start_error")
 }
 
 fn draft_scan_start_error(ui: &Ui) -> Option<String> {

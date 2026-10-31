@@ -115,6 +115,13 @@ pub enum CompatibilityWarningId {
     /// still validates it, but the Freedom handler resolves only with
     /// `streamSettings.sockopt.domainStrategy` (XTLS/Xray-core#6058); the key is not documented.
     FreedomSettingsDomainStrategyIgnored,
+    /// Freedom `settings.fragment` — deprecated since Xray-core v26.10.29 (XTLS/Xray-core#7242),
+    /// replaced by a `fragment` layer in `streamSettings.finalmask.tcp`; the editor's "Fix config"
+    /// moves it. Not version-gated: Feldjäger targets the current core.
+    FreedomFragmentDeprecated,
+    /// Freedom `settings.noises` — deprecated since Xray-core v26.10.29 (XTLS/Xray-core#7242),
+    /// replaced by a `noise` layer in `streamSettings.finalmask.udp`; "Fix config" moves it.
+    FreedomNoisesDeprecated,
     /// `tlsSettings.allowInsecure: true` — a removed feature since Xray-core v26.1.31 (2c92339):
     /// `TLSConfig.Build()` fails, so the config does not load. `pinnedPeerCertSha256` /
     /// `verifyPeerCertByName` replace it (Roadmap §4.2).
@@ -128,7 +135,8 @@ pub enum CompatibilityWarningId {
     OutboundFinalMaskChainUnused,
     /// A VLESS / Trojan outbound without TLS / REALITY (VLESS: and without `encryption`) to a
     /// public server address — refused at load since Xray-core v26.7.11
-    /// ([`CoreFeature::PlaintextOutboundForbidden`], `validateOutboundTransportSecurity`).
+    /// ([`CoreFeature::PlaintextOutboundForbidden`], `validateOutboundTransportSecurity`); "public"
+    /// as in v26.10.29 (#7249, [`super::plaintext_outbound`]).
     PlaintextOutboundForbidden,
     /// Outbound `proxySettings` (any non-`null` value, any protocol) — refused at load since
     /// Xray-core v26.9.8 ([`CoreFeature::OutboundProxySettingsRemoved`]); the editor migrates it
@@ -304,6 +312,16 @@ impl CompatibilityWarningId {
                  `streamSettings.sockopt.domainStrategy` (XTLS/Xray-core#6058); use \
                  \"Migrate to sockopt\" in the editor"
             }
+            Self::FreedomFragmentDeprecated => {
+                "deprecated by Xray-core v26.10.29: Freedom `fragment` will be removed — it moves to \
+                 a `fragment` layer in `streamSettings.finalmask.tcp` (XTLS/Xray-core#7242); use \
+                 \"Fix config\" in the editor"
+            }
+            Self::FreedomNoisesDeprecated => {
+                "deprecated by Xray-core v26.10.29: Freedom `noises` will be removed — they move to \
+                 a `noise` layer in `streamSettings.finalmask.udp` (XTLS/Xray-core#7242); use \
+                 \"Fix config\" in the editor"
+            }
             Self::TlsAllowInsecureRemoved => {
                 "rejected by Xray-core v26.1.31+: `allowInsecure` is a removed feature and the \
                  config does not load; pin the server certificate with `pinnedPeerCertSha256` or \
@@ -311,10 +329,11 @@ impl CompatibilityWarningId {
                  the editor"
             }
             Self::PlaintextOutboundForbidden => {
-                "rejected by Xray-core v26.7.11+: a VLESS / Trojan outbound to a public address \
-                 needs security tls or reality (VLESS: or encryption); only private IPs and \
-                 local names (localhost, *.lan, *.local, dotless names, …) may go unencrypted \
-                 (XTLS/Xray-core#6303)"
+                "rejected by Xray-core: a VLESS / Trojan outbound to a public address needs \
+                 security tls or reality (VLESS: or encryption); only RFC 1918 / fc00::/7, \
+                 loopback and link-local IPs and local names (localhost, *.lan, *.local, dotless \
+                 names, …) may go unencrypted — CGNAT 100.64.0.0/10, 198.18.0.0/15 and the other \
+                 reserved ranges count as public since v26.10.29 (XTLS/Xray-core#6303, #7249)"
             }
             Self::OutboundProxySettingsRemoved => {
                 "rejected by Xray-core v26.9.8+: outbound `proxySettings` is a removed feature for \
@@ -351,7 +370,8 @@ impl CompatibilityWarningId {
             Self::TunWfpBlockLeakWindowsOnly => {
                 "no effect on a Linux server: Windows Filtering Platform leak blocking applies \
                  only when Xray runs on Windows (XTLS/Xray-core#6853); the values are still \
-                 checked at load — only \"dns\" and \"misconfigtun\" are accepted"
+                 checked at load — only \"dns\", \"windnsclient\", \"misconfigtun\" and \
+                 \"tcp/PORT\" / \"udp/PORT\" are accepted"
             }
             Self::WireGuardDomainStrategyIgnored => {
                 "ignored by Xray-core v26.9.30+: WireGuard outbound no longer reads \
@@ -608,13 +628,17 @@ pub fn outbound_warnings(outbound: &Value, core: Option<XrayCoreVersion>) -> Vec
         .and_then(Value::as_str)
         .is_some_and(|protocol| protocol.trim().eq_ignore_ascii_case("freedom"));
     if let (true, Some(settings)) = (is_freedom, outbound.get("settings").and_then(Value::as_object)) {
-        for key in settings.keys() {
-            if FREEDOM_LEGACY_STRATEGY_KEYS.contains(&key.as_str()) {
-                warnings.push(CompatibilityWarning {
-                    id: CompatibilityWarningId::FreedomSettingsDomainStrategyIgnored,
-                    location: format!("settings.{key}"),
-                });
-            }
+        for (key, value) in settings {
+            let id = match key.as_str() {
+                key if FREEDOM_LEGACY_STRATEGY_KEYS.contains(&key) => {
+                    CompatibilityWarningId::FreedomSettingsDomainStrategyIgnored
+                }
+                // Deprecated since v26.10.29 (#7242); `null` is what the core reads as absent.
+                "fragment" if !value.is_null() => CompatibilityWarningId::FreedomFragmentDeprecated,
+                "noises" if !value.is_null() => CompatibilityWarningId::FreedomNoisesDeprecated,
+                _ => continue,
+            };
+            warnings.push(CompatibilityWarning { id, location: format!("settings.{key}") });
         }
     }
     // Same predicate and version boundary as gate G14, which blocks writing it.
@@ -1088,6 +1112,20 @@ fn tun_warnings(inbound: &Value, core: Option<XrayCoreVersion>, warnings: &mut V
     if blocks_leaks {
         let location = "settings.autoSystemWfpBlockLeak".to_owned();
         push_if_core_too_old(CoreFeature::TunAutoSystemDnsAndLeakBlock, core, location.clone(), warnings);
+        // `windnsclient` / `tcp/<port>` / `udp/<port>` (v26.10.31): an older core refuses them.
+        let uses_v26_10_31_values = settings
+            .get("autoSystemWfpBlockLeak")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .any(|value| {
+                let value = value.trim().to_ascii_lowercase();
+                value == "windnsclient" || value.starts_with("tcp/") || value.starts_with("udp/")
+            });
+        if uses_v26_10_31_values && CoreFeature::TunAutoSystemDnsAndLeakBlock.available_in(core) {
+            push_if_core_too_old(CoreFeature::TunWfpBlockLeakPorts, core, location.clone(), warnings);
+        }
         warnings.push(CompatibilityWarning {
             id: CompatibilityWarningId::TunWfpBlockLeakWindowsOnly,
             location,
@@ -1250,6 +1288,52 @@ mod tests {
         assert!(inbound_warnings(&defaults, Some(installed)).is_empty());
         let not_tun = json!({"protocol": "tunnel", "settings": {"autoSystemWfpBlockLeak": ["dns"]}});
         assert!(inbound_warnings(&not_tun, None).is_empty());
+    }
+
+    #[test]
+    fn freedom_fragment_and_noises_are_deprecated_on_every_core() {
+        let freedom = json!({"protocol": "freedom", "settings": {
+            "fragment": {"packets": "tlshello", "length": "100-200", "interval": "10"},
+            "noises": [{"type": "rand", "packet": "10-20"}]
+        }});
+        for core in [None, Some(XrayCoreVersion::new(26, 10, 21))] {
+            let found: Vec<_> = outbound_warnings(&freedom, core).into_iter().map(|w| (w.id, w.location)).collect();
+            assert_eq!(
+                found,
+                vec![
+                    (CompatibilityWarningId::FreedomFragmentDeprecated, "settings.fragment".to_owned()),
+                    (CompatibilityWarningId::FreedomNoisesDeprecated, "settings.noises".to_owned()),
+                ]
+            );
+        }
+        let nulls = json!({"protocol": "freedom", "settings": {"fragment": null, "noises": null}});
+        assert!(outbound_warnings(&nulls, None).is_empty());
+        let other = json!({"protocol": "vless", "settings": {"fragment": {}}});
+        assert!(!outbound_warnings(&other, None).iter().any(|w| w.id == CompatibilityWarningId::FreedomFragmentDeprecated));
+    }
+
+    #[test]
+    fn tun_wfp_port_values_need_v26_10_31() {
+        let tun = json!({"protocol": "tun", "settings": {"autoSystemWfpBlockLeak": ["dns", "TCP/853"]}});
+        let ids = |core| inbound_warnings(&tun, core).into_iter().map(|w| w.id).collect::<Vec<_>>();
+        assert_eq!(ids(None), vec![CompatibilityWarningId::TunWfpBlockLeakWindowsOnly]);
+        let installed = XrayCoreVersion::new(26, 10, 29);
+        assert_eq!(
+            ids(Some(installed)),
+            vec![
+                CompatibilityWarningId::RequiresNewerCore { feature: CoreFeature::TunWfpBlockLeakPorts, installed },
+                CompatibilityWarningId::TunWfpBlockLeakWindowsOnly,
+            ]
+        );
+        // A core without the key at all gets only the older feature's note.
+        let ancient = XrayCoreVersion::new(26, 9, 9);
+        let too_old = CompatibilityWarningId::RequiresNewerCore {
+            feature: CoreFeature::TunAutoSystemDnsAndLeakBlock,
+            installed: ancient,
+        };
+        assert_eq!(ids(Some(ancient)), vec![too_old, CompatibilityWarningId::TunWfpBlockLeakWindowsOnly]);
+        let keywords = json!({"protocol": "tun", "settings": {"autoSystemWfpBlockLeak": ["dns", "misconfigtun"]}});
+        assert_eq!(inbound_warnings(&keywords, Some(installed)).len(), 1);
     }
 
     #[test]

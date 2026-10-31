@@ -18,6 +18,8 @@ use serde_json::{Map, Value};
 use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 
 mod freedom;
+#[cfg(test)]
+mod freedom_live;
 mod hysteria;
 mod loopback;
 mod socks;
@@ -26,16 +28,13 @@ mod vless;
 pub use freedom::{
     FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS, FREEDOM_FINAL_RULE_NETWORKS,
     FREEDOM_LEGACY_STRATEGY_KEYS, FREEDOM_PROXY_PROTOCOL_VERSIONS, FreedomFinalRuleDraft,
-    FreedomSettingsDraft, LegacyDomainStrategyMigration,
+    FreedomSettingsDraft, LegacyDomainStrategyMigration, LegacyObfuscationMigration,
 };
 pub use loopback::{LoopbackRouting, LoopbackSettingsDraft, loopback_routing};
 pub use hysteria::{HYSTERIA_OUTBOUND_VERSION, HysteriaOutboundSettings};
 pub use socks::SocksOutboundSettings;
 pub use trojan::TrojanOutboundSettings;
 pub use vless::VlessOutboundSettings;
-
-/// Documented `settings.noises[].type` values (free text also accepted).
-pub const FREEDOM_NOISE_TYPES: &[&str] = &["rand", "str", "hex", "base64"];
 
 /// Documented `settings.response.type` values for Blackhole (free text also accepted).
 pub const BLACKHOLE_RESPONSE_TYPES: &[&str] = &["none", "http", "custom"];
@@ -62,32 +61,6 @@ pub fn is_shell_editable_protocol(protocol: &str) -> bool {
         protocol.trim().to_ascii_lowercase().as_str(),
         "freedom" | "blackhole" | "dns" | "vless" | "loopback" | "trojan" | "hysteria" | "socks"
     )
-}
-
-/// Freedom `settings.fragment` (packet fragmentation for DPI evasion).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct FragmentDraft {
-    /// `packets` (e.g. `"1-3"` or `"tlshello"`); empty = key absent.
-    pub packets: String,
-    /// `length` `Int32Range` (e.g. `"100-200"`); empty = key absent.
-    pub length: String,
-    /// `interval` `Int32Range` in ms (e.g. `"10-20"`); empty = key absent.
-    pub interval: String,
-    /// Unknown `fragment` keys, preserved verbatim.
-    pub extras: Map<String, Value>,
-}
-
-/// One `settings.noises[]` entry (traffic padding noise).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct NoiseDraft {
-    /// `type` (`rand` | `str` | `hex` | `base64`; free text accepted).
-    pub kind: String,
-    /// `packet` payload spec (shape depends on `kind`).
-    pub packet: String,
-    /// `delay` `Int32Range` in ms (e.g. `"10-16"`); empty = key absent.
-    pub delay: String,
-    /// Unknown `noises[]` entry keys, preserved verbatim.
-    pub extras: Map<String, Value>,
 }
 
 /// One `settings.rules[]` entry for the DNS outbound (query filtering / rewriting).
@@ -280,8 +253,6 @@ fn parse_dns_settings(outbound: &Value) -> OutboundSettingsDraft {
     }
 }
 
-const KNOWN_FRAGMENT_KEYS: &[&str] = &["packets", "length", "interval"];
-const KNOWN_NOISE_KEYS: &[&str] = &["type", "packet", "delay"];
 const KNOWN_DNS_RULE_KEYS: &[&str] = &["action", "qType", "rCode", "domain"];
 
 fn parse_dns_rule(object: &Map<String, Value>) -> DnsRuleDraft {
@@ -301,36 +272,6 @@ fn parse_dns_rule(object: &Map<String, Value>) -> DnsRuleDraft {
         q_type: numeric_or_string_field(object.get("qType")),
         r_code: object.get("rCode").and_then(Value::as_u64).unwrap_or(0) as u32,
         domain,
-        extras,
-    }
-}
-
-fn parse_fragment(object: &Map<String, Value>) -> FragmentDraft {
-    let mut extras = Map::new();
-    for (key, value) in object {
-        if !KNOWN_FRAGMENT_KEYS.contains(&key.as_str()) {
-            extras.insert(key.clone(), value.clone());
-        }
-    }
-    FragmentDraft {
-        packets: string_field(object.get("packets")),
-        length: string_field(object.get("length")),
-        interval: string_field(object.get("interval")),
-        extras,
-    }
-}
-
-fn parse_noise(object: &Map<String, Value>) -> NoiseDraft {
-    let mut extras = Map::new();
-    for (key, value) in object {
-        if !KNOWN_NOISE_KEYS.contains(&key.as_str()) {
-            extras.insert(key.clone(), value.clone());
-        }
-    }
-    NoiseDraft {
-        kind: string_field(object.get("type")),
-        packet: string_field(object.get("packet")),
-        delay: string_field(object.get("delay")),
         extras,
     }
 }
@@ -550,32 +491,6 @@ fn apply_optional_string(settings: &mut Map<String, Value>, key: &str, value: &s
     }
 }
 
-fn fragment_to_value(draft: &FragmentDraft) -> Value {
-    let mut object = Map::new();
-    apply_optional_string(&mut object, "packets", &draft.packets);
-    apply_optional_string(&mut object, "length", &draft.length);
-    apply_optional_string(&mut object, "interval", &draft.interval);
-    for (key, value) in &draft.extras {
-        if !object.contains_key(key) {
-            object.insert(key.clone(), value.clone());
-        }
-    }
-    Value::Object(object)
-}
-
-fn noise_to_value(draft: &NoiseDraft) -> Value {
-    let mut object = Map::new();
-    apply_optional_string(&mut object, "type", &draft.kind);
-    apply_optional_string(&mut object, "packet", &draft.packet);
-    apply_optional_string(&mut object, "delay", &draft.delay);
-    for (key, value) in &draft.extras {
-        if !object.contains_key(key) {
-            object.insert(key.clone(), value.clone());
-        }
-    }
-    Value::Object(object)
-}
-
 fn ensure_settings_object(outbound: &mut Value) -> ConfigModifyResult<&mut Map<String, Value>> {
     let root = outbound.as_object_mut().ok_or_else(|| {
         ConfigModifyError::new(
@@ -643,20 +558,19 @@ mod tests {
     }
 
     #[test]
-    fn apply_rejects_noise_with_empty_type() {
-        let mut outbound = json!({"protocol": "freedom", "settings": {}});
-        let draft = OutboundSettingsDraft::Freedom(FreedomSettingsDraft {
-            noises: vec![NoiseDraft {
-                kind: String::new(),
-                packet: "10-20".to_owned(),
-                delay: String::new(),
-                extras: Map::new(),
-            }],
-            ..FreedomSettingsDraft::default()
-        });
-        let err = apply_outbound_settings(&mut outbound, &draft).unwrap_err();
-        assert_eq!(err.kind(), ConfigModifyErrorKind::ValidationFailed);
-        assert!(err.to_string().contains("type"));
+    fn apply_keeps_deprecated_fragment_and_noises_until_fix_config() {
+        // Not edited any more (deprecated in Xray-core v26.10.29), so Save leaves them as they are,
+        // even in a shape the old form could not show.
+        let mut outbound = json!({"protocol": "freedom", "settings": {
+            "fragment": {"packets": "tlshello", "length": 100, "interval": "10-20", "maxSplit": "2-4"},
+            "noises": [{"type": "hex", "packet": "0a0b", "applyTo": "ipv6"}]
+        }});
+        let before = outbound["settings"].clone();
+        let draft = parse_outbound_settings(&outbound).expect("parse");
+        let OutboundSettingsDraft::Freedom(freedom) = &draft else { panic!("freedom") };
+        assert!(freedom.has_legacy_obfuscation());
+        apply_outbound_settings(&mut outbound, &draft).expect("apply");
+        assert_eq!(outbound["settings"], before);
     }
 
     #[test]

@@ -1,41 +1,26 @@
 //! Unencrypted VLESS / Trojan outbounds to public addresses (XTLS/Xray-core#6303, v26.7.11).
 //!
-//! Mirrors `validateOutboundTransportSecurity` in `infra/conf/xray.go` (`XTLS/Xray-core@main`):
-//! an outbound with no transport security (`streamSettings.security` absent, `""` or `none`) is
-//! refused at load when its server address is public — for VLESS unless `encryption` is set and
-//! not `none`. "Private" is the core's fixed list (`common/geodata/consts.go`): the reserved IP
-//! ranges below, and the domains `lan`, `localdomain`, `example`, `invalid`, `localhost`, `test`,
-//! `local`, `home.arpa`, `internal` (with their subdomains) or any dotless name.
+//! Mirrors `validateOutboundTransportSecurity` / `requiresTransportSecurity` in
+//! `infra/conf/xray.go` (Xray-core v26.10.29): an outbound with no transport security
+//! (`streamSettings.security` absent, `""` or `none`) is refused at load when its server address is
+//! public — for VLESS unless `encryption` is set and not `none`.
+//!
+//! "Private" for an IP is Go's `IsPrivate() || IsLoopback() || IsLinkLocalUnicast()` since
+//! XTLS/Xray-core#7249 (v26.10.29): `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `fc00::/7`,
+//! `127.0.0.0/8`, `::1`, `169.254.0.0/16`, `fe80::/10`. Every other range — CGNAT `100.64.0.0/10`,
+//! `198.18.0.0/15`, `0.0.0.0/8`, the documentation and multicast ranges — counts as public (the
+//! core before v26.10.29 used its wider reserved-range list; Feldjäger follows the current core
+//! only). Domains use the core's fixed list (`common/geodata/consts.go`): `lan`, `localdomain`,
+//! `example`, `invalid`, `localhost`, `test`, `local`, `home.arpa`, `internal` (with their
+//! subdomains) or any dotless name.
 //!
 //! The address and `encryption` are read the way `VLessOutboundConfig.Build()` /
 //! `TrojanClientConfig.Build()` normalize them: the flat `settings.address` form first, else the
 //! single `vnext[0]` / `servers[0]` entry.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 
 use serde_json::Value;
-
-/// `GetPrivateIPMatcher()` ranges as (address, prefix length).
-const PRIVATE_IP_RANGES: &[(&str, u8)] = &[
-    ("0.0.0.0", 8),
-    ("10.0.0.0", 8),
-    ("100.64.0.0", 10),
-    ("127.0.0.0", 8),
-    ("169.254.0.0", 16),
-    ("172.16.0.0", 12),
-    ("192.0.0.0", 24),
-    ("192.0.2.0", 24),
-    ("192.88.99.0", 24),
-    ("192.168.0.0", 16),
-    ("198.18.0.0", 15),
-    ("198.51.100.0", 24),
-    ("203.0.113.0", 24),
-    ("224.0.0.0", 3),
-    ("::", 127),
-    ("fc00::", 7),
-    ("fe80::", 10),
-    ("ff00::", 8),
-];
 
 /// `GetPrivateDomainMatcher()` domain rules (each matches the name and its subdomains).
 const PRIVATE_DOMAINS: &[&str] = &[
@@ -54,25 +39,26 @@ pub(super) fn requires_transport_security(address: &str) -> bool {
     !is_private_domain(domain)
 }
 
+/// Go's `ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast()`.
 pub(super) fn is_private_ip(ip: IpAddr) -> bool {
-    // An IPv4-mapped IPv6 address is matched as IPv4, as Go's `net.IP` does.
+    // An IPv4-mapped IPv6 address is matched as IPv4, as Go's `net.IP.To4()` does.
     let ip = match ip {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(IpAddr::V6(v6), IpAddr::V4),
         v4 => v4,
     };
-    PRIVATE_IP_RANGES.iter().any(|(network, prefix)| {
-        match (ip, network.parse::<IpAddr>()) {
-            (IpAddr::V4(ip), Ok(IpAddr::V4(net))) => {
-                let mask = u32::MAX.checked_shl(32 - u32::from(*prefix)).unwrap_or(0);
-                u32::from(ip) & mask == u32::from(net) & mask
-            }
-            (IpAddr::V6(ip), Ok(IpAddr::V6(net))) => {
-                let mask = u128::MAX.checked_shl(128 - u32::from(*prefix)).unwrap_or(0);
-                u128::from(ip) & mask == u128::from(net) & mask
-            }
-            _ => false,
+    match ip {
+        IpAddr::V4(v4) => v4.is_private() || v4.is_loopback() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            let in_prefix = |network: Ipv6Addr, prefix: u32| {
+                let mask = u128::MAX << (128 - prefix);
+                u128::from(v6) & mask == u128::from(network) & mask
+            };
+            // fc00::/7 (unique local), ::1, fe80::/10 (link-local unicast).
+            in_prefix(Ipv6Addr::new(0xfc00, 0, 0, 0, 0, 0, 0, 0), 7)
+                || v6.is_loopback()
+                || in_prefix(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 0), 10)
         }
-    })
+    }
 }
 
 fn is_private_domain(domain: &str) -> bool {
@@ -140,14 +126,22 @@ mod tests {
     #[test]
     fn private_addresses_match_the_core_lists() {
         for private in [
-            "10.1.2.3", "127.0.0.1", "100.64.0.1", "192.168.1.1", "172.31.255.255", "198.19.0.1",
-            "::1", "[fd00::1]", "fe80::1", "::ffff:10.0.0.1", "localhost", "router.lan", "x.home.arpa",
+            "10.1.2.3", "127.0.0.1", "169.254.1.1", "192.168.1.1", "172.31.255.255", "::1", "[fd00::1]",
+            "fe80::1", "::ffff:10.0.0.1", "::ffff:127.0.0.1", "localhost", "router.lan", "x.home.arpa",
             "nas.local", "a.example", "server", "Server.", "my-host",
         ] {
             assert!(!requires_transport_security(private), "{private} is private");
         }
+        // v26.10.29 (#7249): reserved ranges outside IsPrivate / IsLoopback / IsLinkLocalUnicast are
+        // public — checked with `xray run -test` 26.10.21 (accepted) and 26.10.29 (refused).
+        for public in [
+            "100.64.0.1", "198.19.0.1", "0.0.0.1", "192.0.2.1", "224.0.0.1", "::ffff:100.64.0.1",
+            "64:ff9b::1", "fec0::1", "1.1.1.1", "172.32.0.1", "2001:db8::1",
+        ] {
+            assert!(requires_transport_security(public), "{public} is public");
+        }
         // `example.com` is not under `example`; `-x` / `x-` fail the dotless-name pattern.
-        for public in ["1.1.1.1", "172.32.0.1", "2001:db8::1", "example.com", "mylan.com", "a.b", "-x", "x-"] {
+        for public in ["example.com", "mylan.com", "a.b", "-x", "x-"] {
             assert!(requires_transport_security(public), "{public} is public");
         }
     }

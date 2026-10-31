@@ -30,7 +30,6 @@ pub const OUTBOUND_ONLY_SOCKOPT_FIELDS: &[&str] = &[
     "dialerProxy",
     TCP_CONGESTION_KEY,
     "interface",
-    "tcpMptcp",
     "addressPortStrategy",
     "happyEyeballs",
 ];
@@ -151,7 +150,9 @@ pub struct SockoptDraft {
     pub v6_only: bool,
     /// `tcpWindowClamp`.
     pub tcp_window_clamp: Option<u64>,
-    /// `tcpMptcp` (outbound-only, Linux 5.6+).
+    /// `tcpMptcp` (Linux 5.6+) — dialing and listening sockets: `DefaultListener.Listen` passes it
+    /// to `SetMultipathTCP`, and since Xray-core v26.10.31 (XTLS/Xray-core#7291) a listener has
+    /// MPTCP off unless it is `true`.
     pub tcp_mptcp: bool,
     /// `addressPortStrategy` (outbound-only); empty = key absent.
     pub address_port_strategy: String,
@@ -708,6 +709,8 @@ mod tests {
         assert!(!sockopt_field_applies("acceptProxyProtocol", Outbound));
         assert!(sockopt_field_applies("dialerProxy", Outbound));
         assert!(!sockopt_field_applies("dialerProxy", Inbound));
+        // The listener reads it too (MPTCP is off on listeners without it since v26.10.31, #7291).
+        assert!(sockopt_field_applies("tcpMptcp", Inbound) && sockopt_field_applies("tcpMptcp", Outbound));
         // Shared and unknown/future keys apply to both sides.
         for field in ["tcpFastOpen", "tproxy", "customSockopt", "someFutureKey"] {
             assert!(sockopt_field_applies(field, Inbound), "{field}");

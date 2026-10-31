@@ -1,8 +1,21 @@
 //! Freedom outbound Protocol tab (Roadmap §2.4:96, §2.4:105–107).
 //!
-//! The editor offers exactly the fields of the official documentation
-//! (<https://xtls.github.io/en/config/outbounds/freedom.html>): `redirect`, `userLevel`,
-//! `fragment`, `noises[]`, `proxyProtocol`, `finalRules[]`. The documented way to choose the
+//! The editor offers the fields of the official documentation
+//! (<https://xtls.github.io/en/config/outbounds/freedom.html>) that the current Xray-core still
+//! supports: `redirect`, `userLevel`, `proxyProtocol`, `finalRules[]`.
+//!
+//! `fragment` and `noises[]` are deprecated since Xray-core v26.10.29 (XTLS/Xray-core#7242:
+//! `FreedomConfig.Build()` logs a deprecation warning and names `fragment` in
+//! `streamSettings.finalmask.tcp` / `noise` in `streamSettings.finalmask.udp` as the replacement),
+//! so the form no longer offers them. On disk they are kept untouched (read-only
+//! [`FreedomSettingsDraft::legacy_fragment`] / [`FreedomSettingsDraft::legacy_noises`]), flagged by
+//! [`crate::xray::config::compatibility::outbound_warnings`] and moved into FinalMask only by the
+//! explicit "Fix config" migration ([`FreedomSettingsDraft::migrate_legacy_obfuscation`]). A live
+//! check with Xray 26.10.31 (Freedom behind a `tunnel` inbound, 2026-10-31) showed the migrated
+//! layers behave the same: the same TCP segmentation and the same noise datagrams before the
+//! payload.
+//!
+//! The documented way to choose the
 //! resolve strategy, `streamSettings.sockopt.domainStrategy`, is edited by the shared socket
 //! options editor of the Outbound Shell (Roadmap §4.2, [`crate::xray::config::outbound_stream`]),
 //! which replaced the narrow field of this tab.
@@ -19,9 +32,10 @@
 use serde_json::{Map, Value};
 
 use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
-use crate::xray::config::stream::{PortListValue, RangeValue, SockoptDraft};
+use crate::xray::config::outbound_stream::OutboundStreamDraft;
+use crate::xray::config::stream::{FinalMaskChain, FinalMaskLayerDraft, PortListValue, RangeValue, SockoptDraft};
 
-use super::{FragmentDraft, NoiseDraft, apply_optional_string, ensure_settings_object};
+use super::{apply_optional_string, ensure_settings_object};
 
 /// Legacy Freedom `settings` keys that select a resolve strategy the core no longer applies, in
 /// the core's precedence order (`targetStrategy` wins when non-empty).
@@ -97,10 +111,12 @@ pub struct FreedomSettingsDraft {
     pub redirect: String,
     /// `settings.userLevel`; `0` = key absent (Xray default).
     pub user_level: u64,
-    /// `settings.fragment`; `None` = key absent.
-    pub fragment: Option<FragmentDraft>,
-    /// `settings.noises[]`; empty = key absent.
-    pub noises: Vec<NoiseDraft>,
+    /// Read-only: the deprecated `settings.fragment` on disk (any non-`null` value), kept as is.
+    pub legacy_fragment: Option<Value>,
+    /// Read-only: the deprecated `settings.noises` on disk (any non-`null` value), kept as is.
+    pub legacy_noises: Option<Value>,
+    /// `true` after [`Self::migrate_legacy_obfuscation`]: Save removes `fragment` / `noises`.
+    pub remove_legacy_obfuscation: bool,
     /// `settings.proxyProtocol` (`0` disabled = key absent, `1`, `2`).
     pub proxy_protocol: u64,
     /// `settings.finalRules[]`; empty = key absent.
@@ -153,6 +169,170 @@ impl FreedomSettingsDraft {
         }
     }
 
+    /// Whether the deprecated `fragment` / `noises` are on disk and not yet migrated.
+    pub fn has_legacy_obfuscation(&self) -> bool {
+        (self.legacy_fragment.is_some() || self.legacy_noises.is_some()) && !self.remove_legacy_obfuscation
+    }
+
+    /// "Fix config": moves the deprecated `fragment` into a `fragment` layer of
+    /// `streamSettings.finalmask.tcp` and `noises[]` into one `noise` layer of `finalmask.udp`
+    /// (drafts only; Save writes both and removes the old keys). All or nothing: on an error nothing
+    /// changes. Refused when a target chain cannot be read by the editor or already has layers (the
+    /// order of the masks would be a guess), and for what FinalMask cannot express (`applyTo`
+    /// `ipv4` / `ipv6`) — those are left to the user.
+    pub fn migrate_legacy_obfuscation(
+        &mut self,
+        stream: &mut OutboundStreamDraft,
+    ) -> Result<LegacyObfuscationMigration, String> {
+        if !self.has_legacy_obfuscation() {
+            return Err("No deprecated fragment / noises to move.".to_owned());
+        }
+        let fragment = self.legacy_fragment.as_ref().map(fragment_to_finalmask_layer).transpose()?;
+        let noises = self.legacy_noises.as_ref().map(noises_to_finalmask_layer).transpose()?.flatten();
+        for (chain, needed, layers) in [
+            (FinalMaskChain::Tcp, fragment.is_some(), &stream.finalmask_tcp),
+            (FinalMaskChain::Udp, noises.is_some(), &stream.finalmask_udp),
+        ] {
+            if !needed {
+                continue;
+            }
+            if !stream.finalmask_chain_editable(chain) {
+                return Err(format!(
+                    "streamSettings.finalmask.{} can't be read by the editor; fix it on the Raw JSON tab first",
+                    chain.key()
+                ));
+            }
+            if !layers.is_empty() {
+                return Err(format!(
+                    "streamSettings.finalmask.{} already has layers — where the moved mask belongs in \
+                     that chain is your call; move it on the Raw JSON tab",
+                    chain.key()
+                ));
+            }
+        }
+        let migration = LegacyObfuscationMigration {
+            fragment: fragment.is_some(),
+            noises: noises.as_ref().map_or(0, |(_, count)| *count),
+        };
+        if let Some(layer) = fragment {
+            stream.finalmask_tcp.push(layer);
+            stream.write_finalmask_tcp = true;
+        }
+        if let Some((layer, _)) = noises {
+            stream.finalmask_udp.push(layer);
+            stream.write_finalmask_udp = true;
+        }
+        self.remove_legacy_obfuscation = true;
+        Ok(migration)
+    }
+}
+
+/// Result of [`FreedomSettingsDraft::migrate_legacy_obfuscation`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyObfuscationMigration {
+    /// `fragment` became a `fragment` layer in `finalmask.tcp`.
+    pub fragment: bool,
+    /// `noises[]` items now in the `noise` layer of `finalmask.udp` (`0` = no layer, e.g.
+    /// `noises: []`, which is only removed).
+    pub noises: usize,
+}
+
+/// Freedom `fragment` → FinalMask `fragment` (`FragmentMask`): the same `packets`, `length`,
+/// `maxSplit` (and any other key, kept verbatim); `interval` (ms) is named `delay` there.
+fn fragment_to_finalmask_layer(fragment: &Value) -> Result<FinalMaskLayerDraft, String> {
+    let object = fragment
+        .as_object()
+        .ok_or_else(|| "settings.fragment is not an object — fix it on the Raw JSON tab".to_owned())?;
+    if object.contains_key("delay") {
+        return Err("settings.fragment has both interval and delay — fix it on the Raw JSON tab".to_owned());
+    }
+    let settings = object
+        .iter()
+        .map(|(key, value)| {
+            let key = if key == "interval" { "delay".to_owned() } else { key.clone() };
+            (key, value.clone())
+        })
+        .collect();
+    Ok(FinalMaskLayerDraft { layer_type: "fragment".to_owned(), settings: Value::Object(settings) })
+}
+
+/// Freedom `noises[]` → one FinalMask `noise` layer, item by item as `ParseNoise` reads them
+/// (`infra/conf/freedom.go`): `rand` with `packet` "N-M" → `rand`; `str` / `hex` → the same
+/// `type` and the trimmed `packet`; `base64` (standard or URL alphabet, padding optional) →
+/// `type: base64` with standard padded base64, the only form `PraseByteSlice` decodes; `delay`
+/// as is. `applyTo` `""` / `ip` / `all` is the default and dropped. `None` for an empty list.
+fn noises_to_finalmask_layer(noises: &Value) -> Result<Option<(FinalMaskLayerDraft, usize)>, String> {
+    let items = noises
+        .as_array()
+        .ok_or_else(|| "settings.noises is not an array — fix it on the Raw JSON tab".to_owned())?;
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let converted = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| noise_item_to_finalmask(item).map_err(|message| format!("settings.noises[{index}]: {message}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut settings = Map::new();
+    settings.insert("noise".to_owned(), Value::Array(converted));
+    Ok(Some((
+        FinalMaskLayerDraft { layer_type: "noise".to_owned(), settings: Value::Object(settings) },
+        items.len(),
+    )))
+}
+
+fn noise_item_to_finalmask(item: &Value) -> Result<Value, String> {
+    use base64::Engine as _;
+
+    let object = item.as_object().ok_or_else(|| "not an object".to_owned())?;
+    let text = |key: &str| match object.get(key) {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(text)) => Ok(text.clone()),
+        Some(_) => Err(format!("{key} is not a string")),
+    };
+    let apply_to = text("applyTo")?;
+    if !matches!(apply_to.to_ascii_lowercase().as_str(), "" | "ip" | "all") {
+        return Err(format!(
+            "applyTo \"{apply_to}\" has no FinalMask equivalent (the noise layer applies to every \
+             address) — move this item by hand or drop applyTo first"
+        ));
+    }
+    let packet = text("packet")?.trim().to_owned();
+    let mut converted = Map::new();
+    match text("type")?.as_str() {
+        "rand" => {
+            converted.insert("rand".to_owned(), Value::String(packet));
+        }
+        kind @ ("str" | "hex") => {
+            converted.insert("type".to_owned(), Value::String(kind.to_owned()));
+            converted.insert("packet".to_owned(), Value::String(packet));
+        }
+        "base64" => {
+            // Freedom accepts both alphabets with or without padding; FinalMask only standard.
+            let url_safe = packet.replace('+', "-").replace('/', "_").replace('=', "");
+            let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(url_safe)
+                .map_err(|_| format!("packet \"{packet}\" is not valid base64"))?;
+            converted.insert("type".to_owned(), Value::String("base64".to_owned()));
+            converted.insert(
+                "packet".to_owned(),
+                Value::String(base64::engine::general_purpose::STANDARD.encode(bytes)),
+            );
+        }
+        other => return Err(format!("type \"{other}\" is not rand / str / hex / base64")),
+    }
+    for (key, value) in object {
+        match key.as_str() {
+            "type" | "packet" | "applyTo" => {}
+            "rand" | "randRange" => {
+                return Err(format!("{key} would change meaning in FinalMask — fix it on the Raw JSON tab"));
+            }
+            _ => {
+                converted.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    Ok(Value::Object(converted))
 }
 
 /// Reads the Freedom draft from an outbound object.
@@ -160,13 +340,7 @@ pub(super) fn parse_freedom_settings(outbound: &Value) -> FreedomSettingsDraft {
     let settings = outbound.get("settings").and_then(Value::as_object);
     let field = |key: &str| settings.and_then(|s| s.get(key));
 
-    let fragment = field("fragment")
-        .and_then(Value::as_object)
-        .map(super::parse_fragment);
-    let noises = field("noises")
-        .and_then(Value::as_array)
-        .map(|array| array.iter().filter_map(Value::as_object).map(super::parse_noise).collect())
-        .unwrap_or_default();
+    let legacy = |key: &str| field(key).filter(|value| !value.is_null()).cloned();
     let (final_rules, final_rules_foreign) = match parse_final_rules(field("finalRules")) {
         Some(rules) => (rules, false),
         None => (Vec::new(), true),
@@ -184,8 +358,9 @@ pub(super) fn parse_freedom_settings(outbound: &Value) -> FreedomSettingsDraft {
         remove_legacy_domain_strategy: false,
         redirect: super::string_field(field("redirect")),
         user_level: field("userLevel").and_then(Value::as_u64).unwrap_or(0),
-        fragment,
-        noises,
+        legacy_fragment: legacy("fragment"),
+        legacy_noises: legacy("noises"),
+        remove_legacy_obfuscation: false,
         proxy_protocol: field("proxyProtocol").and_then(Value::as_u64).unwrap_or(0),
         final_rules,
         final_rules_foreign,
@@ -292,7 +467,7 @@ fn final_rule_to_value(rule: &FreedomFinalRuleDraft) -> Value {
 }
 
 /// Writes the Freedom draft into `outbound`: the documented `settings` keys (and the removal of the
-/// legacy strategy keys after the migration). Every other key — in `settings` and the outbound
+/// legacy strategy keys, or of `fragment` / `noises`, after the migrations). Every other key — in `settings` and the outbound
 /// itself — is left as it was; `streamSettings` belongs to the stream draft.
 pub(super) fn apply_freedom_settings(
     outbound: &mut Value,
@@ -303,21 +478,10 @@ pub(super) fn apply_freedom_settings(
     let settings = ensure_settings_object(outbound)?;
     apply_optional_string(settings, "redirect", &draft.redirect);
     apply_untouched_zero_u64(settings, "userLevel", draft.user_level);
-    match &draft.fragment {
-        Some(fragment) => {
-            settings.insert("fragment".to_owned(), super::fragment_to_value(fragment));
-        }
-        None => {
-            settings.remove("fragment");
-        }
-    }
-    if draft.noises.is_empty() {
+    // `fragment` / `noises` are not edited any more: kept as they are until "Fix config".
+    if draft.remove_legacy_obfuscation {
+        settings.remove("fragment");
         settings.remove("noises");
-    } else {
-        settings.insert(
-            "noises".to_owned(),
-            Value::Array(draft.noises.iter().map(super::noise_to_value).collect()),
-        );
     }
     apply_untouched_zero_u64(settings, "proxyProtocol", draft.proxy_protocol);
     if !draft.final_rules_foreign {
@@ -353,14 +517,6 @@ fn validation_error(message: String) -> ConfigModifyError {
 }
 
 fn validate_freedom_settings(draft: &FreedomSettingsDraft) -> ConfigModifyResult<()> {
-    for noise in &draft.noises {
-        if noise.kind.trim().is_empty() {
-            return Err(validation_error("Freedom noise type must not be empty".to_owned()));
-        }
-        if noise.packet.trim().is_empty() {
-            return Err(validation_error("Freedom noise packet must not be empty".to_owned()));
-        }
-    }
     if !draft.final_rules_foreign {
         for (index, rule) in draft.final_rules.iter().enumerate() {
             validate_final_rule(rule).map_err(|message| {
@@ -431,6 +587,89 @@ mod tests {
 
     fn parse(outbound: &Value) -> FreedomSettingsDraft {
         parse_freedom_settings(outbound)
+    }
+
+    /// Runs "Fix config" on `outbound` and applies both drafts, as the Outbound Shell's Save does.
+    fn fix_config(outbound: &Value) -> Result<(Value, LegacyObfuscationMigration), String> {
+        use crate::xray::config::outbound_stream::{apply_outbound_stream, parse_outbound_stream};
+        let mut draft = parse(outbound);
+        let mut stream = parse_outbound_stream(outbound);
+        let migration = draft.migrate_legacy_obfuscation(&mut stream)?;
+        let mut result = outbound.clone();
+        apply_freedom_settings(&mut result, &draft).map_err(|e| e.to_string())?;
+        apply_outbound_stream(&mut result, &stream).map_err(|e| e.to_string())?;
+        Ok((result, migration))
+    }
+
+    #[test]
+    fn fix_config_moves_fragment_and_noises_into_finalmask() {
+        let outbound = json!({"protocol": "freedom", "settings": {
+            "fragment": {"packets": "tlshello", "length": "100-200", "interval": "10-20", "maxSplit": "2-4"},
+            "noises": [
+                {"type": "rand", "packet": " 10-20 ", "delay": "10-16"},
+                {"type": "str", "packet": "abc", "applyTo": "IP"},
+                {"type": "hex", "packet": "0a0b", "delay": 5},
+                {"type": "base64", "packet": "-_8"}
+            ],
+            "redirect": ":443"
+        }, "streamSettings": {"sockopt": {"mark": 7}}});
+        let (fixed, migration) = fix_config(&outbound).expect("fix");
+        assert_eq!(migration, LegacyObfuscationMigration { fragment: true, noises: 4 });
+        assert_eq!(fixed["settings"], json!({"redirect": ":443"}));
+        assert_eq!(fixed["streamSettings"]["sockopt"], json!({"mark": 7}));
+        assert_eq!(
+            fixed["streamSettings"]["finalmask"]["tcp"],
+            json!([{"type": "fragment", "settings": {"packets": "tlshello", "length": "100-200", "delay": "10-20", "maxSplit": "2-4"}}])
+        );
+        // `-_8` is URL-safe unpadded base64 for fb ff; FinalMask needs the standard padded "+/8=".
+        assert_eq!(
+            fixed["streamSettings"]["finalmask"]["udp"],
+            json!([{"type": "noise", "settings": {"noise": [
+                {"rand": "10-20", "delay": "10-16"},
+                {"type": "str", "packet": "abc"},
+                {"type": "hex", "packet": "0a0b", "delay": 5},
+                {"type": "base64", "packet": "+/8="}
+            ]}}])
+        );
+        // Done once: the button goes away.
+        let mut draft = parse(&outbound);
+        let mut stream = crate::xray::config::outbound_stream::parse_outbound_stream(&outbound);
+        draft.migrate_legacy_obfuscation(&mut stream).expect("first");
+        assert!(!draft.has_legacy_obfuscation());
+        assert!(draft.migrate_legacy_obfuscation(&mut stream).is_err());
+    }
+
+    #[test]
+    fn fix_config_refuses_what_finalmask_cannot_say_and_changes_nothing() {
+        let refused = |settings: Value, stream: Value| {
+            let outbound = json!({"protocol": "freedom", "settings": settings, "streamSettings": stream});
+            fix_config(&outbound).expect_err("refused")
+        };
+        let ipv6 = json!({"noises": [{"type": "rand", "packet": "5", "applyTo": "ipv6"}]});
+        assert!(refused(ipv6, json!({})).contains("applyTo"));
+        let busy_tcp = json!({"finalmask": {"tcp": [{"type": "sudoku", "settings": {"password": "p"}}]}});
+        let fragment = json!({"fragment": {"packets": "1-1", "length": "3", "interval": "0"}});
+        assert!(refused(fragment.clone(), busy_tcp).contains("already has layers"));
+        assert!(refused(json!({"fragment": {"interval": "1", "delay": "2"}}), json!({})).contains("interval and delay"));
+        assert!(refused(json!({"noises": [{"type": "base64", "packet": "!!"}]}), json!({})).contains("base64"));
+        assert!(refused(json!({"noises": [{"type": "Rand", "packet": "5"}]}), json!({})).contains("Rand"));
+        assert!(refused(json!({"fragment": "1-3"}), json!({})).contains("not an object"));
+        // A failed fix leaves the drafts as they were.
+        let outbound = json!({"protocol": "freedom", "settings": {
+            "fragment": {"packets": "1-1", "length": "3", "interval": "0"},
+            "noises": [{"type": "rand", "packet": "5", "applyTo": "ipv4"}]}});
+        let mut draft = parse(&outbound);
+        let mut stream = crate::xray::config::outbound_stream::parse_outbound_stream(&outbound);
+        assert!(draft.migrate_legacy_obfuscation(&mut stream).is_err());
+        assert!(draft.has_legacy_obfuscation());
+        assert!(stream.finalmask_tcp.is_empty() && !stream.write_finalmask_tcp);
+        // An empty list is only removed; a udp chain with layers does not matter for fragment.
+        let outbound = json!({"protocol": "freedom", "settings": {"noises": [], "fragment": {"packets": "1-1", "length": "3", "interval": "0"}},
+                              "streamSettings": {"finalmask": {"udp": [{"type": "salamander", "settings": {"password": "p"}}]}}});
+        let (fixed, migration) = fix_config(&outbound).expect("fix");
+        assert_eq!(migration, LegacyObfuscationMigration { fragment: true, noises: 0 });
+        assert_eq!(fixed["settings"], json!({}));
+        assert_eq!(fixed["streamSettings"]["finalmask"]["udp"][0]["type"], "salamander");
     }
 
     #[test]

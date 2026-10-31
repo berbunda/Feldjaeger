@@ -284,7 +284,7 @@ struct ApiConsoleForm {
 }
 
 fn api_console_form_id() -> egui::Id {
-    egui::Id::new("api_console_form")
+    egui::Id::unique("api_console_form")
 }
 
 fn api_console_form(ui: &Ui) -> ApiConsoleForm {
@@ -365,12 +365,12 @@ fn read_button(ui: &mut Ui, service: &mut ApplicationService, text: &str, reques
 
 fn mutation_error_slot(ui: &Ui) -> Option<String> {
     ui.ctx()
-        .data(|d| d.get_temp::<String>(egui::Id::new("api_console_mutation_error")))
+        .data(|d| d.get_temp::<String>(egui::Id::unique("api_console_mutation_error")))
 }
 
 fn set_mutation_error(ui: &Ui, message: Option<String>) {
     ui.ctx().data_mut(|d| {
-        let id = egui::Id::new("api_console_mutation_error");
+        let id = egui::Id::unique("api_console_mutation_error");
         match message {
             Some(message) => {
                 d.insert_temp(id, message);
@@ -406,7 +406,7 @@ struct PendingLiveRemoval {
 }
 
 fn pending_removal_id() -> egui::Id {
-    egui::Id::new("api_console_pending_removal")
+    egui::Id::unique("api_console_pending_removal")
 }
 
 fn pending_removal(ui: &Ui) -> Option<PendingLiveRemoval> {

@@ -10960,3 +10960,216 @@ XTLS/Xray-core#7185: `scheduled-assets-update.yml` и Docker-образы бер
   пропускаются.
 - `BASELINE_XRAY_CORE` = v26.10.21 (§135): пункты A–E аудита §136 закрыты (§137–141).
 - Тесты: **1461 + 16 passed / 0 failed**, clippy lib 65.
+
+# 143	Аудит дрейфа: Xray-core v26.10.29 и v26.10.31 (Roadmap §4.5) (документация, без изменения версии)
+
+## 143.1	Объём
+
+- Релизы: https://github.com/XTLS/Xray-core/compare/v26.10.21...v26.10.29 (19 коммитов, 61 файл;
+  в `infra/conf` — `freedom.go`, `geodata.go`, `transport_method.go`, `xray.go`) и
+  `0afec66...a4a3dff` = v26.10.29 → v26.10.31 (10 коммитов; в `infra/conf` — `tun.go`,
+  `transport_method.go`). **Тег v26.10.29 удалён в XTLS/Xray-core в день выхода v26.10.31**
+  (2026-10-31; теги после v26.9.30: v26.10.21, v26.10.31), поэтому второй дифф сравнивается по SHA
+  коммита релиза. v26.10.31 — первый в серии релиз без пометки prerelease.
+- **Принцип (решение пользователя 2026-10-31): Feldjäger в первую очередь совместим с актуальным
+  Xray-core.** Новые правила ядра применяются без привязки к версии, старые наборы правил не
+  сохраняются; устаревшие возможности уходят из форм, а в существующем конфиге остаются
+  предупреждение или кнопка **«Fix config»** (только где исправление однозначно).
+- Ядра: `xray-bin/xray.exe` = 26.10.31 (`a4a3dff`, go1.27.3), рядом `xray-26.10.29.exe`
+  (`0afec66`) и `xray-26.10.21.exe` (`1b1647c`); `Xray-windows-64.zip` всех трёх релизов сверены
+  по SHA2-256 с `.dgst`. Данные получены через `gh api` 2026-10-31; в документации (Context7
+  `/xtls/xray-docs-next`) по-прежнему нет XDRIVE.
+
+Проверки `run -test` (26.10.21 → 26.10.29; 26.10.31 совпадает с 26.10.29, если не указано иное):
+
+| Конфиг | 26.10.21 | 26.10.29 / 26.10.31 |
+|--------|----------|---------------------|
+| VLESS / Trojan без TLS на `100.64.0.1`, `198.18.0.1`, `0.0.0.1`, `192.0.2.1`, `224.0.0.1`, `::ffff:100.64.0.1` | OK | `… prohibited unless the server address is a private IP or domain` |
+| то же на `127.0.0.1`, `10.0.0.1`, `169.254.1.1`, `fd00::1`, `fe80::1`, `::ffff:10.0.0.1`, `localhost` | OK | OK |
+| то же на `2001:db8::1`, `example.com` | отказ | отказ |
+| `geodata` с `cron`: `@every 30s` / `@every 59.9s` | OK | `geodata cron interval must be at least 1 minute` |
+| `geodata` с `cron`: `@every 1m`, `@every 1m30s`, `*/1 * * * *` | OK | OK |
+| `geodata` с `cron`: `file: geoip.txt` / `GEOIP2.DAT` | OK / OK | `extension must be .dat` / OK |
+| `geodata` с `cron`: 101 / 100 assets | OK / OK | `at most 100 assets` / OK |
+| `geodata` **без** `cron`: 101 asset, `.txt` | OK | OK — `geodata.New()` выходит до проверок |
+| `geodata`: `http://` URL | `scheme must be https` | то же |
+| Freedom `fragment` / `noises` | OK | OK + `deprecated … migrated to "fragment" in "streamSettings.finalmask.tcp"` / `"noise" in "streamSettings.finalmask.udp"` |
+| `routing.script: "x.LUA"` | `Lua file extension must be .lua` | OK |
+| TUN `autoSystemWfpBlockLeak`: `tcp/853`, `UDP/443`, `windnsclient`, `tcp/053` (26.10.29 → 26.10.31) | — | `unknown … value` → OK |
+| то же: `tcp/0`, `tcp/65536`, `tcp/x`, `sctp/1`, `tcp/ 53`, `tcp/+53` | — | отказ на обоих |
+| inbound `sockopt.tcpMptcp: true` (26.10.31) | — | OK |
+
+Живые проверки (Python `-I`, `tunnel` inbound → Freedom → TCP / UDP-приёмники, 26.10.31):
+Freedom `fragment` (`packets 1-1`, `length 3-5`, `interval 5`) и тот же слой FinalMask
+(`delay 5`) режут 136-байтовую посылку на 40 / 38 TCP-сегментов (без маски — 1); `noises` и слой
+`noise` дают одинаковую последовательность датаграмм (`NOISE1`, 7 случайных байт, полезная
+нагрузка). **Наблюдение:** и Freedom `fragment`, и FinalMask `fragment` режут только первое
+TCP-соединение процесса — второе и последующие приходят целиком (у обоих одинаково; причина не
+исследована, на миграцию не влияет).
+
+## 143.2	Требует работы
+
+| # | PR | Изменение в ядре | Что затрагивает в Feldjäger |
+|---|----|------------------|------------------------------|
+| A | #7249 (v26.10.29) | `requiresTransportSecurity`: IP приватный только при `IsPrivate() \|\| IsLoopback() \|\| IsLinkLocalUnicast()`; `GetPrivateIPMatcher` расширен по реестрам IANA (NAT64 `64:ff9b::/96`, 6to4, Teredo, 240/4 …) и теперь нужен только правилу Freedom по умолчанию | `plaintext_outbound.rs` повторял старый список — VLESS/Trojan без TLS на 100.64.x / 198.18.x Feldjäger пропускал, ядро отвергает; `open_proxy.rs` брал тот же список; справка `finalRules` не говорила о блокировке по умолчанию |
+| B | #7267 (v26.10.29) | `geodata.New()` с `cron`: ≤ 100 assets, `file` на `.dat` (без учёта регистра), `@every` ≥ 1 мин; проверка файла перенесена из `Build()` в `New()` | `validate_geodata_settings` этого не знал — Save откатывался на `run -test`; `https` в URL тоже не проверялся |
+| C | #7242 (v26.10.29) | Freedom `fragment` / `noises` устарели (замена — FinalMask `fragment` / `noise`) | Форма Freedom предлагала их как штатные |
+| D | #7255 (v26.10.29) | `.lua` проверяется у самого имени, без учёта регистра и без разворачивания симлинков | Заметка `lua_script.rs` была чувствительна к регистру и обещала исключение для симлинков |
+| E | #7288 (v26.10.31) | TUN `autoSystemWfpBlockLeak`: `tcp/<порт>`, `udp/<порт>`, `windnsclient`; `dns` = udp/53, tcp/53, windnsclient, tcp/853, udp/853 | **Ошибка:** `validate_tun_settings` отвергал новые значения — Save корректного конфига блокировался |
+| F | #7291 (v26.10.31) | `DefaultListener` выключает MPTCP по умолчанию, включает только `sockopt.tcpMptcp` | `tcpMptcp` числился outbound-only — в inbound-форме его не было, хотя listener его читает (и читал раньше) |
+| G | #7290 (v26.10.31) | Сервер XHTTP принимает uplink `OPTIONS` (CORS preflight — только с `Access-Control-Request-Method`) | В пресетах `uplinkHTTPMethod` нет `OPTIONS` (свободный текст и так сохранялся) |
+
+## 143.3	Не касается
+
+| PR | Причина |
+|----|---------|
+| #7231, #7217 (XDRIVE `s3`, ring of slots) | XDRIVE отложен до документации (аудит v26.9.30 E); `xdriveSettings` сохраняется в extras. Для справки: `service: "s3"` + объект `s3 {endpoint, region, bucket, pathStyle}`, ключи в `secrets` (AccessKeyID, SecretAccessKey, [SessionToken]) |
+| #7295 (XHTTP `h2Params`, v26.10.31) | Объект Go `http.HTTP2Config` для сервера XHTTP; документации нет — сохраняется в `XhttpStreamSettings.extras`, формы нет |
+| #7294 (v26.10.31) | geodata сама распаковывает gzip-ответ — runtime; упомянуто в подсказке URL на GeoData Settings |
+| #7214, #7230, #7219 | TUN / sockopt Windows и Darwin — runtime, серверы Feldjäger — Linux |
+| #7238 | `blockDelay` Freedom для DispatchLink-inbound — runtime |
+| #7232 | `process` IPv6 на Linux — runtime |
+| #7276, #7299 | `xray api adrules` / `bi` с несколькими аргументами — Feldjäger передаёт одно тело / один тег |
+| #7225 | DNS outbound — runtime |
+| #7236 | WebSocket close → EOF — runtime |
+| #7284 | Порядок инициализации inbound — runtime |
+| #7292, #7298 | QUIC sniffer, HTTP inbound 100 Continue — runtime |
+| #7255 (остальное) | Расширение файла конфига без симлинков — Feldjäger пишет `config.json` |
+| #7267 (остальное) | Только HTTPS-клиент, лимит 256 MiB, до 20 редиректов — runtime |
+| #7263, #7287 | CI, перегенерация `*.pb.go` |
+| #7237, #7257 | Зависимости |
+| 0afec66, a4a3dff | Коммиты релизов v26.10.29 и v26.10.31 |
+
+Итого 29 коммитов: 7 — в 143.2, 22 — в 143.3 (#7255 и #7267 посчитаны в 143.2, их runtime-части перечислены и в 143.3).
+
+## 143.4	Следствия
+
+Пункты A–G заведены в Roadmap §4.5. Новый `CoreFeature` — только `TunWfpBlockLeakPorts`
+(v26.10.31): это новая возможность, а не новое правило, и на старом ядре значение отвергается.
+После A–G: `BASELINE_XRAY_CORE` → v26.10.31. Отдельным кандидатом по новому принципу остаётся
+Trojan: ядро (и 26.10.21, и 26.10.31) при загрузке пишет «Trojan (with no Flow, etc.) is
+deprecated … migrate to VLESS with Flow & Seed» — решение пользователя, в этот аудит не входит.
+
+# 144	Приватные адреса для VLESS / Trojan без TLS как в v26.10.29 (Roadmap §4.5, аудит v26.10.31 A) (0.5.73-0)
+
+- `compatibility/plaintext_outbound.rs`: `PRIVATE_IP_RANGES` удалён; `is_private_ip` = Go
+  `IsPrivate || IsLoopback || IsLinkLocalUnicast` (IPv4 — `is_private` / `is_loopback` /
+  `is_link_local` из std; IPv6 — `fc00::/7`, `::1`, `fe80::/10`; IPv4-mapped — как IPv4, `To4()`).
+  Без версии ядра: на 26.10.21 Feldjäger теперь предупреждает о конфиге, который это ядро ещё
+  принимает, — так задумано (§143.1, принцип).
+- `open_proxy.rs`: свой `is_local_listen_ip` = `is_private_ip` + CGNAT `100.64.0.0/10` (решение
+  пользователя: эвристика Feldjäger, оверлейные сети вроде Tailscale — не открытый Интернет).
+- Текст `PlaintextOutboundForbidden`: какие адреса приватны, что 100.64/10 и 198.18/15 с v26.10.29
+  публичны. Автоисправления нет — TLS за пользователя не настроить.
+- Справка `finalRules` (EN+RU): правило по умолчанию блокирует приватные и зарезервированные адреса
+  для трафика из VLESS / VMess / Trojan / Hysteria / Shadowsocks inbound, в том числе NAT64, 6to4,
+  Teredo и 240/4 (список v26.10.29); открыть — правилом `allow`.
+- Тесты: наборы адресов из таблицы §143.1; open_proxy — 100.64.x не open, 198.18.x open; parity
+  outbound — CGNAT / benchmarking / Trojan CGNAT против ядра. **Parity рассчитан на базовое ядро:**
+  с `XRAY_BIN` = 26.10.21 эти три кейса ожидаемо расходятся.
+
+# 145	GeoData Settings: ограничения ядра v26.10.29 и «Fix config» (Roadmap §4.5, аудит v26.10.31 B) (0.5.74-0)
+
+- `geodata_settings.rs`: `geodata_core_problems` — `https://` с хостом у каждого `url`
+  (`validateHTTPS`, всегда); только при `cron` — `GEODATA_MAX_ASSETS` = 100, `file` с расширением
+  `.dat` без учёта регистра, `@every` меньше минуты. Интервал считается как robfig/cron:
+  `time.ParseDuration` (свой `parse_go_duration`: `ns/us/µs/μs/ms/s/m/h`, дроби, составные,
+  знак, голый `0`), затем `Every()` — вниз до целых секунд, не меньше 1 с; префикс `TZ=` /
+  `CRON_TZ=` учитывается. Нераспознанная длительность не трогается (ядро скажет само).
+  `validate_geodata_settings` возвращает первую проблему — Save и предпросмотр блокируются.
+- Doc-комментарий модуля больше не говорит «HTTPS не проверяется»: ядро отвергает такой URL в
+  `Build()`, Feldjäger следует ядру.
+- «Fix config»: `geodata_cron_fix` → `@every 1m` (с сохранением `TZ=`);
+  `ApplicationService::fix_geodata_settings_cron` открывает редактирование при необходимости и
+  меняет только черновик. Модель страницы: `core_problems`, `cron_fix_available`; страница
+  показывает проблемы (и в режиме просмотра) и кнопку. Справка `cron` и подсказка `url` (gzip с
+  v26.10.31, 256 MiB).
+- Тесты (+3): разбор длительностей Go, ограничения «только с cron», https, Fix.
+
+# 146	Freedom `fragment` / `noises` → FinalMask: «Fix config» (Roadmap §4.5, аудит v26.10.31 C) (0.5.75-0)
+
+- Модель (`outbound_protocol/freedom.rs`): поля `fragment` / `noises` удалены из
+  `FreedomSettingsDraft`, вместо них только для чтения `legacy_fragment` / `legacy_noises` (сырой
+  JSON, не `null`) и `remove_legacy_obfuscation`. Save их не трогает (сохраняются как есть, даже
+  в форме, которую старая форма не показывала); после «Fix config» удаляет оба ключа.
+  `FragmentDraft`, `NoiseDraft`, `FREEDOM_NOISE_TYPES` и их разбор / запись удалены — других
+  пользователей не было; шаблонов и импорта, которые писали бы их, нет.
+- `migrate_legacy_obfuscation(&mut OutboundStreamDraft)` → `LegacyObfuscationMigration`
+  (всё или ничего):
+  - `fragment` → слой `fragment` в `finalmask.tcp`: те же ключи, `interval` → `delay` (оба сразу —
+    отказ);
+  - `noises[]` → один слой `noise` в `finalmask.udp`, по `ParseNoise`: `rand` + `packet "N-M"` →
+    `rand`; `str` / `hex` → тот же `type` и обрезанный `packet` (Freedom делает `TrimSpace`);
+    `base64` (оба алфавита, паддинг не обязателен) → стандартный base64 с паддингом —
+    единственная форма, которую декодирует `PraseByteSlice`; `delay` как есть; `applyTo` `""` /
+    `ip` / `all` отбрасывается; прочие ключи копируются (кроме `rand` / `randRange` — отказ);
+    `noises: []` только удаляется;
+  - отказ с объяснением: `applyTo` `ipv4` / `ipv6` (аналога нет), целевая цепочка не читается
+    редактором или уже содержит слои (место в цепочке пришлось бы угадывать), неверная форма
+    значения, тип не `rand` / `str` / `hex` / `base64` (с учётом регистра, как в ядре).
+- Предупреждения `FreedomFragmentDeprecated` / `FreedomNoisesDeprecated` (без версии), сервис
+  `migrate_outbound_freedom_obfuscation` (сообщение + diff-превью), кнопка «Fix config» вверху
+  секции Freedom; поля fragment / noises и их справка из формы убраны. Freedom не попадает под
+  `OutboundFinalMaskChainUnused` (`outbound_finalmask_chain_use` о Freedom выводов не делает),
+  так что перенесённые слои не помечаются как неиспользуемые.
+- Тесты: миграция (успех, base64 URL → стандартный, отказы без частичных изменений, `noises: []`,
+  занятая udp-цепочка не мешает fragment), предупреждения, Save сохраняет старые ключи; Add
+  больше их не пишет (`modify_tests`). Live-тест `outbound_protocol/freedom_live.rs`
+  (`local_xray`): Freedom и мигрированный конфиг — одинаковая фрагментация первого соединения и
+  одинаковые noise-датаграммы перед полезной нагрузкой; мигрированный конфиг проходит
+  `run -test` без строки deprecated. Проходит и на 26.10.21. Готовность ядра — по строке
+  `… started` в его логе: пробное подключение «съело» бы единственное фрагментируемое
+  соединение (§143.1).
+
+# 147	Lua `script`: расширение как в v26.10.29 (Roadmap §4.5, аудит v26.10.31 D) (0.5.75-1)
+
+`compatibility/lua_script.rs`: заметка «does not end in .lua» сравнивает без учёта регистра
+(`route.LUA` проходит, как в `run -test` 26.10.31) и больше не обещает исключение для симлинков —
+считается само имя. Doc-комментарий модуля — семантика #7255. Тест расширен.
+
+# 148	Багфикс: TUN `autoSystemWfpBlockLeak` — значения v26.10.31 (Roadmap §4.5, аудит v26.10.31 E) (0.5.76-0)
+
+- `inbound_protocol/mod.rs`: `TUN_WFP_BLOCK_LEAK_VALUES` = `dns`, `windnsclient`,
+  `misconfigtun`; `is_valid_tun_wfp_block_leak` — как `tun.ExpandWfpBlockLeak`: ключевое слово
+  или `tcp|udp/<1–65535>` (только десятичные цифры — `strconv.ParseUint(port, 10, 16)`: `tcp/053`
+  годится, `tcp/+53` и `tcp/ 53` нет), без учёта регистра. `validate_tun_settings` больше не
+  блокирует Save корректного конфига.
+- `CoreFeature::TunWfpBlockLeakPorts` (v26.10.31, PR 7288): `windnsclient` / `tcp/` / `udp/` на
+  ядре от v26.9.30 до v26.10.29 → `RequiresNewerCore` (ядру до v26.9.30 — по-прежнему прежнее
+  предупреждение о самом ключе). Текст `TunWfpBlockLeakWindowsOnly` перечисляет допустимые значения.
+- GUI: чекбоксы ключевых слов (+ `windnsclient`) и список портовых правил «tcp/PORT or udp/PORT,
+  one per line»; «unknown value(s)» — через `is_valid_tun_wfp_block_leak`. Справка EN+RU: что
+  значит каждое значение, что `dns` раскрывается в пять, что порт 53 и `windnsclient` требуют `dns`.
+- Тесты: значения из таблицы §143.1; предупреждение о версии.
+
+# 149	Багфикс: `sockopt.tcpMptcp` у inbound; XHTTP `OPTIONS` (Roadmap §4.5, аудит v26.10.31 F, G) (0.5.76-1)
+
+- `stream/sockopt.rs`: `tcpMptcp` убран из `OUTBOUND_ONLY_SOCKOPT_FIELDS` — `DefaultListener.Listen`
+  читает его и раньше (`SetMultipathTCP(true)` при `true`), а с v26.10.31 listener без него MPTCP
+  выключает (#7291). Строка `tcpMptcp` перенесена из outbound-only в общие строки редактора
+  sockopt и добавлена в его режим просмотра; справка EN+RU — про inbound и умолчание v26.10.31.
+- `inbound_stream/xhttp.rs`: `XHTTP_UPLINK_METHODS` + `OPTIONS` (#7290; старый сервер отвечал на
+  OPTIONS пустым 200).
+- Тест: `tcpMptcp` применим в обоих направлениях.
+
+# 150	Переход на Xray-core v26.10.31 (Roadmap §4.5, аудит v26.10.31) (0.5.76-2)
+
+- `xray-bin/xray.exe` (не в git) — 26.10.31 (`a4a3dff`); прежние ядра — `xray-26.10.29.exe`,
+  `xray-26.10.21.exe`, `xray-26.10.10.exe`. Parity-тесты на 26.10.31 — без пропусков.
+- `BASELINE_XRAY_CORE` = v26.10.31 (§135).
+- Итог: **1469 + 16 passed / 0 failed** (три прогона подряд), clippy lib 65. GUI в запущенном
+  приложении не проверялся (нужен сервер по SSH).
+
+# 151	egui/eframe 0.37: `Id::new` → `Id::unique` (0.5.76-3)
+
+- egui/eframe 0.36.2 → 0.37.0. В 0.37 `egui::Id::new` помечен `#[deprecated]` с подсказкой
+  «`Id::unique` (глобально уникальный id) или `IdSalt::new` (локальная соль)».
+- Все 40 вызовов в `src/gui/` (14 файлов: `about.rs`, `pages/{api_console, backups,
+  burst_observatory, confdir_files, inbounds, mod, outbounds, policy, routing, service,
+  target_lookup, users, xray_management}.rs`) — корневые id: ключи `ctx.data()` (temp-состояние
+  диалогов, pending-действий, полей ввода) и `Window::id` справки. Поэтому везде `Id::unique`, а
+  не `IdSalt` (соль нужна для `ui.id().with(..)` / `id_salt(..)` внутри родителя).
+- Поведение не меняется: в egui 0.37 `Id::new(s)` реализован как `Self::unique(s)` — тот же хеш
+  (`ahash` с фиксированными seed), значит ключи temp-данных между кадрами остаются прежними.
+- Итог: `cargo build` без предупреждений, **1469 passed / 0 failed**, clippy lib 65 (без
+  `deprecated`). `feldjaeger-ssh` не менялся. GUI в запущенном приложении не проверялся.

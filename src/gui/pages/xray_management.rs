@@ -29,7 +29,7 @@ enum MgmtDialogMode {
 }
 
 fn dialog_id() -> Id {
-    Id::new("feldjaeger_xray_management_dialog")
+    Id::unique("feldjaeger_xray_management_dialog")
 }
 
 /// Renders the Xray Management page.

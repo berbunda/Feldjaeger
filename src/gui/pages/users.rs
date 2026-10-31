@@ -464,7 +464,7 @@ fn show_trojan_action_bar(
 }
 
 fn summary_row_id() -> egui::Id {
-    egui::Id::new("users_page_selected_summary_row")
+    egui::Id::unique("users_page_selected_summary_row")
 }
 
 fn selected_summary_row_key(ui: &Ui) -> Option<(usize, usize)> {
@@ -766,7 +766,7 @@ fn cell_with_menu(
 }
 
 fn selected_row_id() -> egui::Id {
-    egui::Id::new("users_page_selected_row")
+    egui::Id::unique("users_page_selected_row")
 }
 
 fn selected_row_key(ui: &Ui) -> Option<(usize, usize)> {
@@ -828,7 +828,7 @@ fn show_user_context_menu(
 }
 
 fn dialog_id() -> egui::Id {
-    egui::Id::new("inbound_users_client_dialog")
+    egui::Id::unique("inbound_users_client_dialog")
 }
 
 /// Renders a dialog draft's stored "Preview changes" diff, if any (Roadmap §3:120).
@@ -1871,7 +1871,7 @@ fn show_dialogs(ui: &mut Ui, service: &mut ApplicationService) {
 }
 
 fn qr_dialog_id() -> egui::Id {
-    egui::Id::new("inbound_users_qr_dialog")
+    egui::Id::unique("inbound_users_qr_dialog")
 }
 
 /// Warning colour for why Share is unavailable (same amber as the inbound editor warnings).

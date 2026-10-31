@@ -146,7 +146,7 @@ enum ServiceDialogMode {
 }
 
 fn service_dialog_id() -> Id {
-    Id::new("feldjaeger_service_dialog")
+    Id::unique("feldjaeger_service_dialog")
 }
 
 /// Renders the Service page.

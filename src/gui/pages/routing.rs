@@ -586,7 +586,7 @@ fn display_optional(value: &Option<String>) -> String {
 }
 
 fn selected_rule_id() -> egui::Id {
-    egui::Id::new("routing_page_selected_rule")
+    egui::Id::unique("routing_page_selected_rule")
 }
 
 fn selected_rule_index(ui: &Ui) -> Option<usize> {

@@ -77,8 +77,9 @@ pub use env_settings::{
 pub use errors::{ConfigError, ConfigErrorKind};
 pub use geodata_settings::{
     GeodataAssetEntry, GeodataSettings, apply_geodata_settings_to_value,
-    geodata_settings_change_summary, geodata_settings_from_section, geodata_settings_to_new_value,
-    validate_geodata_settings,
+    geodata_core_problems, geodata_cron_fix, geodata_settings_change_summary,
+    geodata_settings_from_section, geodata_settings_to_new_value, validate_geodata_settings,
+    GEODATA_MAX_ASSETS,
 };
 pub use fakedns_settings::{
     FakeDnsPoolEntry, FakeDnsSettings, apply_fakedns_settings_to_value,
@@ -104,7 +105,7 @@ pub use inbound_fallbacks::{
 };
 pub use inbound_protocol::{
     InboundProtocolDraft, TUN_WFP_BLOCK_LEAK_VALUES, TUNNEL_NETWORKS, apply_inbound_protocol,
-    parse_inbound_protocol, validate_tun_settings,
+    is_valid_tun_wfp_block_leak, parse_inbound_protocol, validate_tun_settings,
     validate_port_map_target,
 };
 pub use inbound_security::{
@@ -242,9 +243,9 @@ pub use outbound_edit::{
 pub use outbound_protocol::{
     BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS, DnsRuleDraft,
     FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS, FREEDOM_FINAL_RULE_NETWORKS,
-    FREEDOM_LEGACY_STRATEGY_KEYS, FREEDOM_NOISE_TYPES, FREEDOM_PROXY_PROTOCOL_VERSIONS,
-    FragmentDraft, FreedomFinalRuleDraft, FreedomSettingsDraft, LegacyDomainStrategyMigration, LoopbackRouting, LoopbackSettingsDraft, loopback_routing,
-    NoiseDraft, OutboundSettingsDraft,
+    FREEDOM_LEGACY_STRATEGY_KEYS, FREEDOM_PROXY_PROTOCOL_VERSIONS,
+    FreedomFinalRuleDraft, FreedomSettingsDraft, LegacyDomainStrategyMigration, LegacyObfuscationMigration, LoopbackRouting, LoopbackSettingsDraft, loopback_routing,
+    OutboundSettingsDraft,
     HYSTERIA_OUTBOUND_VERSION, SHELL_EDITABLE_PROTOCOLS, apply_outbound_settings, is_shell_editable_protocol, outbound_shell_blocker,
     parse_outbound_settings,
 };

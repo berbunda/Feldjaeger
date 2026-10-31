@@ -1165,8 +1165,7 @@ fn replace_and_remove_wireguard_outbound() {
 fn add_freedom_outbound_shell_writes_settings() {
     use super::outbound_edit::OutboundGeneral;
     use super::outbound_protocol::{
-        FragmentDraft, FreedomFinalRuleDraft, FreedomSettingsDraft, NoiseDraft,
-        OutboundSettingsDraft,
+        FreedomFinalRuleDraft, FreedomSettingsDraft, OutboundSettingsDraft,
     };
 
     let mut config = single_file_editable(r#"{"outbounds":[]}"#);
@@ -1187,18 +1186,6 @@ fn add_freedom_outbound_shell_writes_settings() {
             settings: OutboundSettingsDraft::Freedom(FreedomSettingsDraft {
                 redirect: "127.0.0.1:3366".to_owned(),
                 user_level: 1,
-                fragment: Some(FragmentDraft {
-                    packets: "tlshello".to_owned(),
-                    length: "100-200".to_owned(),
-                    interval: "10-20".to_owned(),
-                    extras: Default::default(),
-                }),
-                noises: vec![NoiseDraft {
-                    kind: "rand".to_owned(),
-                    packet: "10-20".to_owned(),
-                    delay: "10-16".to_owned(),
-                    extras: Default::default(),
-                }],
                 proxy_protocol: 2,
                 final_rules: vec![FreedomFinalRuleDraft::new("block")],
                 ..FreedomSettingsDraft::default()
@@ -1218,8 +1205,9 @@ fn add_freedom_outbound_shell_writes_settings() {
     assert_eq!(outbound["settings"]["finalRules"], serde_json::json!([{"action": "block"}]));
     assert_eq!(outbound["settings"]["redirect"], "127.0.0.1:3366");
     assert_eq!(outbound["settings"]["userLevel"], 1);
-    assert_eq!(outbound["settings"]["fragment"]["packets"], "tlshello");
-    assert_eq!(outbound["settings"]["noises"][0]["type"], "rand");
+    // The deprecated Freedom fragment / noises (Xray-core v26.10.29) are never written by Add.
+    assert!(outbound["settings"].get("fragment").is_none());
+    assert!(outbound["settings"].get("noises").is_none());
     // Routing untouched.
     assert!(config.sections().routing().is_none());
 }

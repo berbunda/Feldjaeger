@@ -2567,6 +2567,24 @@ impl ApplicationService {
         )
     }
 
+    /// "Fix config" on the GeoData Settings page: sets `cron` to `@every 1m` when it is an `@every`
+    /// interval under one minute, which Xray-core v26.10.29+ refuses (XTLS/Xray-core#7267). Opens
+    /// edit mode first when needed; nothing is saved until the user clicks Save.
+    pub fn fix_geodata_settings_cron(&mut self) -> Result<(), String> {
+        if self.geodata_settings_draft.is_none() {
+            self.begin_edit_geodata_settings()?;
+        }
+        let draft = self
+            .geodata_settings_draft
+            .as_mut()
+            .ok_or_else(|| "Not in edit mode.".to_owned())?;
+        let fixed = crate::xray::geodata_cron_fix(draft).ok_or_else(|| "Nothing to fix in cron.".to_owned())?;
+        draft.cron = Some(fixed);
+        self.geodata_settings_error = None;
+        self.geodata_settings_diff_preview = None;
+        Ok(())
+    }
+
     /// `true` while a geodata-settings save is in flight.
     pub fn is_geodata_settings_mutation_busy(&self) -> bool {
         self.geodata_settings_rx.is_some()
@@ -4265,6 +4283,35 @@ impl ApplicationService {
             LegacyDomainStrategyMigration::NothingToMigrate => {
                 return Err("No legacy domainStrategy to migrate.".to_owned());
             }
+        };
+        session.diff_preview = None;
+        self.preview_outbound_shell_diff()?;
+        Ok(message)
+    }
+
+    /// "Fix config" for the Freedom `fragment` / `noises` deprecated by Xray-core v26.10.29
+    /// (XTLS/Xray-core#7242): moves them into `streamSettings.finalmask.tcp` / `.udp` in the
+    /// editor drafts and refreshes the diff preview; Save writes it. All or nothing.
+    pub fn migrate_outbound_freedom_obfuscation(&mut self) -> Result<String, String> {
+        let session = self
+            .outbound_editor_session
+            .as_mut()
+            .ok_or_else(|| "Not editing an outbound.".to_owned())?;
+        let OutboundSettingsDraft::Freedom(settings) = &mut session.settings else {
+            return Err("Only Freedom outbounds have fragment / noises.".to_owned());
+        };
+        let migration = settings.migrate_legacy_obfuscation(&mut session.stream)?;
+        let mut moved = Vec::new();
+        if migration.fragment {
+            moved.push("fragment → streamSettings.finalmask.tcp".to_owned());
+        }
+        if migration.noises > 0 {
+            moved.push(format!("{} noise(s) → streamSettings.finalmask.udp", migration.noises));
+        }
+        let message = if moved.is_empty() {
+            "The empty noises list will be removed — review the preview and Save.".to_owned()
+        } else {
+            format!("{} — review the preview and Save.", moved.join(", "))
         };
         session.diff_preview = None;
         self.preview_outbound_shell_diff()?;

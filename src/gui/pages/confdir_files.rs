@@ -202,7 +202,7 @@ struct PendingConfdirFileAdd {
 }
 
 fn pending_add_id() -> egui::Id {
-    egui::Id::new("confdir_files_pending_add")
+    egui::Id::unique("confdir_files_pending_add")
 }
 
 fn pending_add(ui: &Ui) -> Option<PendingConfdirFileAdd> {
@@ -289,7 +289,7 @@ struct PendingConfdirFileRemove {
 }
 
 fn pending_remove_id() -> egui::Id {
-    egui::Id::new("confdir_files_pending_remove")
+    egui::Id::unique("confdir_files_pending_remove")
 }
 
 fn pending_remove(ui: &Ui) -> Option<PendingConfdirFileRemove> {

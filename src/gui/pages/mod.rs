@@ -336,11 +336,11 @@ pub(crate) fn danger_warning(ui: &mut Ui, text: &str) {
 // ─── Field help overlays (Roadmap §3:124) ────────────────────────────────────
 
 fn help_dialog_id() -> egui::Id {
-    egui::Id::new("field_help_dialog")
+    egui::Id::unique("field_help_dialog")
 }
 
 fn help_language_id() -> egui::Id {
-    egui::Id::new("field_help_language")
+    egui::Id::unique("field_help_language")
 }
 
 /// Gap between the pointer and the nearest edge of the help window.
@@ -479,7 +479,7 @@ pub(crate) fn show_help_dialog(ui: &mut Ui) {
 
     let language = help_language(&ctx);
     let chrome = HelpChrome::of(language);
-    let window_id = egui::Id::new(("field_help_window", dialog.title));
+    let window_id = egui::Id::unique(("field_help_window", dialog.title));
     let mut window = egui::Window::new(format!("{} — {}", chrome.caption, dialog.title))
         .id(window_id)
         .collapsible(false)

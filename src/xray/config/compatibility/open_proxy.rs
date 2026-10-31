@@ -12,12 +12,14 @@
 //!   no account left means no authentication.
 //!
 //! "Outside-facing" `listen`: absent / empty (the core's default `0.0.0.0`), an unspecified
-//! address, or a public IP. Loopback and private ranges ([`super::plaintext_outbound`]'s list of
-//! the core's reserved ranges) are the LAN / local use the docs describe; a Unix socket path
-//! (`/…`, abstract `@…`) is no network listener. Anything else (a non-IP string the core would
-//! not listen on) makes no claim.
+//! address, or a public IP. The LAN / local use the docs describe is what the core itself treats
+//! as private for plaintext outbounds ([`super::plaintext_outbound`]: RFC 1918, `fc00::/7`,
+//! loopback, link-local) plus CGNAT `100.64.0.0/10` — Feldjäger's own choice, not a core rule:
+//! that range carries overlay networks such as Tailscale, which are not the open Internet. A Unix
+//! socket path (`/…`, abstract `@…`) is no network listener. Anything else (a non-IP string the
+//! core would not listen on) makes no claim.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use serde_json::Value;
 
@@ -75,8 +77,17 @@ fn listen_is_exposed(listen: Option<&Value>) -> bool {
         .parse::<IpAddr>()
         .ok()
         .or_else(|| text.parse::<SocketAddr>().ok().map(|address| address.ip()));
-    // `0.0.0.0` and `::` sit inside the core's private ranges, so they are checked first.
-    ip.is_some_and(|ip| ip.is_unspecified() || !is_private_ip(ip))
+    ip.is_some_and(|ip| ip.is_unspecified() || !is_local_listen_ip(ip))
+}
+
+/// A private / loopback / link-local address ([`is_private_ip`]) or CGNAT `100.64.0.0/10`.
+fn is_local_listen_ip(ip: IpAddr) -> bool {
+    let cgnat = |v4: Ipv4Addr| v4.octets()[0] == 100 && v4.octets()[1] & 0xc0 == 64;
+    let v4 = match ip {
+        IpAddr::V4(v4) => Some(v4),
+        IpAddr::V6(v6) => v6.to_ipv4_mapped(),
+    };
+    is_private_ip(ip) || v4.is_some_and(cgnat)
 }
 
 #[cfg(test)]
@@ -119,7 +130,10 @@ mod tests {
 
     #[test]
     fn local_and_private_listen_addresses_are_not_open() {
-        for listen in ["127.0.0.1", "::1", "[::1]", "10.0.0.5", "192.168.1.1", "fd00::1", "/run/xray.sock", "@xray"] {
+        for listen in [
+            "127.0.0.1", "::1", "[::1]", "10.0.0.5", "192.168.1.1", "fd00::1", "100.64.1.1", "100.127.255.254",
+            "/run/xray.sock", "@xray",
+        ] {
             let inbound = json!({"protocol": "socks", "listen": listen});
             assert_eq!(open_proxy_location(&inbound), None, "{listen}");
         }
@@ -127,7 +141,8 @@ mod tests {
 
     #[test]
     fn wildcard_and_public_listen_addresses_are_open() {
-        for listen in ["", "0.0.0.0", "::", "[::]", "1.2.3.4", "2a01:4f8::1"] {
+        // 198.18.0.0/15 is no LAN range since v26.10.29; 100.128.0.1 is just past CGNAT.
+        for listen in ["", "0.0.0.0", "::", "[::]", "1.2.3.4", "2a01:4f8::1", "198.18.0.1", "100.128.0.1"] {
             let inbound = json!({"protocol": "http", "listen": listen});
             assert!(open_proxy_location(&inbound).is_some(), "{listen}");
         }

@@ -451,13 +451,13 @@ fn muted(ui: &mut Ui, text: &str) {
 
 fn selected_ping_config(ui: &Ui) -> bool {
     ui.ctx()
-        .data(|data| data.get_temp(egui::Id::new("burst_observatory_selected_ping")))
+        .data(|data| data.get_temp(egui::Id::unique("burst_observatory_selected_ping")))
         .unwrap_or(false)
 }
 
 fn set_selected_ping_config(ui: &Ui, selected: bool) {
     ui.ctx().data_mut(|data| {
-        data.insert_temp(egui::Id::new("burst_observatory_selected_ping"), selected);
+        data.insert_temp(egui::Id::unique("burst_observatory_selected_ping"), selected);
     });
 }
 

@@ -10,10 +10,10 @@ use super::{HelpText, optional_string_combo};
 use crate::app::{
     ApplicationService, BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS,
     DnsRuleDraft, FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS,
-    FREEDOM_FINAL_RULE_NETWORKS, FREEDOM_NOISE_TYPES, FREEDOM_PROXY_PROTOCOL_VERSIONS,
-    FragmentDraft, FreedomFinalRuleDraft, MISSING_FIELD, MUX_CONCURRENCY_EFFECTIVE_MAX,
+    FREEDOM_FINAL_RULE_NETWORKS, FREEDOM_PROXY_PROTOCOL_VERSIONS,
+    FreedomFinalRuleDraft, MISSING_FIELD, MUX_CONCURRENCY_EFFECTIVE_MAX,
     HYSTERIA_OUTBOUND_VERSION, MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX, MUX_XUDP_PROXY_UDP443_VALUES,
-    NoiseDraft, OutboundKind,
+    OutboundKind,
     OutboundMux, OutboundSettingsDraft, OutboundsPageState, OutboundsSortColumn,
     outbound_row_display, validate_outbound_mux,
 };
@@ -72,44 +72,21 @@ const HELP_FREEDOM_PROXY_PROTOCOL: HelpText = HelpText::new(
      реальный адрес клиента. Получатель должен его ожидать, иначе соединение сломается. 0 (по \
      умолчанию) — выключено.",
 );
-const HELP_FREEDOM_FRAGMENT: HelpText = HelpText::new(
-    "Splits what Freedom sends into small pieces, so DPI that needs a whole message (the TLS \
-     ClientHello with its SNI) sees only fragments. Applies to TCP only.",
-    "Разбивает то, что отправляет Freedom, на мелкие части, чтобы DPI, которому нужно сообщение \
-     целиком (TLS ClientHello с его SNI), видел только фрагменты. Действует только для TCP.",
-);
-const HELP_FREEDOM_FRAGMENT_PACKETS: HelpText = HelpText::new(
-    "Which writes to split: tlshello — the TLS ClientHello; FROM-TO (e.g. 1-3) — those writes of \
-     the TCP stream, counting from 1.",
-    "Какие записи разбивать: tlshello — TLS ClientHello; FROM-TO (например, 1-3) — эти записи \
-     TCP-потока, считая с 1.",
-);
-const HELP_FREEDOM_FRAGMENT_LENGTH: HelpText = HelpText::new(
-    "Piece size in bytes: a number or a range such as 100-200 (a random value per piece).",
-    "Размер части в байтах: число или диапазон вроде 100-200 (случайное значение для каждой \
-     части).",
-);
-const HELP_FREEDOM_FRAGMENT_INTERVAL: HelpText = HelpText::new(
-    "Pause between pieces in milliseconds, a number or a range such as 10-20. With tlshello, 0 \
-     sends the fragmented ClientHello in one TCP packet.",
-    "Пауза между частями в миллисекундах, число или диапазон вроде 10-20. С tlshello значение 0 \
-     отправляет фрагментированный ClientHello одним TCP-пакетом.",
-);
-const HELP_FREEDOM_NOISES: HelpText = HelpText::new(
-    "UDP junk packets sent before the real data to confuse DPI. type: rand — random bytes, \
-     packet is the length (N or MIN-MAX); str — the text in packet; hex / base64 — packet \
-     decoded. delay — milliseconds to wait after the noise (N or MIN-MAX).",
-    "Мусорные UDP-пакеты перед настоящими данными, чтобы запутать DPI. type: rand — случайные \
-     байты, packet задаёт длину (N или MIN-MAX); str — текст из packet; hex / base64 — \
-     декодированный packet. delay — пауза в миллисекундах после шума (N или MIN-MAX).",
-);
 const HELP_FREEDOM_FINAL_RULES: HelpText = HelpText::new(
     "Final allow / block filter on the real destination, checked in order before and after \
      dialing; the first matching rule decides. Domain targets are resolved with \
-     sockopt.domainStrategy first. Not applied when sockopt.dialerProxy is set.",
+     sockopt.domainStrategy first. Not applied when sockopt.dialerProxy is set. When no rule \
+     matches, traffic that came in through a VLESS, VMess, Trojan, Hysteria or Shadowsocks \
+     inbound is blocked if it goes to a private or reserved address — besides the LAN ranges \
+     also NAT64 64:ff9b::/96, 6to4 2002::/16, Teredo 2001::/32 and 240.0.0.0/4 (list of \
+     Xray-core v26.10.29); add an allow rule to reach them.",
     "Итоговый фильтр allow / block по реальному адресу назначения; правила проверяются по порядку \
      до и после подключения, решает первое совпавшее. Доменные адреса сначала разрешаются через \
-     sockopt.domainStrategy. Не применяется, когда задан sockopt.dialerProxy.",
+     sockopt.domainStrategy. Не применяется, когда задан sockopt.dialerProxy. Если ни одно правило \
+     не совпало, трафик, пришедший через inbound VLESS, VMess, Trojan, Hysteria или Shadowsocks, \
+     блокируется, когда он идёт на приватный или зарезервированный адрес — кроме диапазонов \
+     локальной сети это ещё NAT64 64:ff9b::/96, 6to4 2002::/16, Teredo 2001::/32 и 240.0.0.0/4 \
+     (список Xray-core v26.10.29); чтобы до них достучаться, добавьте правило allow.",
 );
 const HELP_FINAL_RULE_ACTION: HelpText = HelpText::new(
     "allow — let the connection through; block — hold it open for blockDelay seconds, then \
@@ -757,7 +734,7 @@ struct PendingOutboundDelete {
 }
 
 fn pending_outbound_delete_id() -> egui::Id {
-    egui::Id::new("outbounds_pending_delete")
+    egui::Id::unique("outbounds_pending_delete")
 }
 
 fn pending_outbound_delete(ui: &Ui) -> Option<PendingOutboundDelete> {
@@ -850,7 +827,7 @@ struct PendingOutboundDuplicate {
 }
 
 fn pending_outbound_duplicate_id() -> egui::Id {
-    egui::Id::new("outbounds_pending_duplicate")
+    egui::Id::unique("outbounds_pending_duplicate")
 }
 
 fn pending_outbound_duplicate(ui: &Ui) -> Option<PendingOutboundDuplicate> {
@@ -948,7 +925,7 @@ struct PendingOutboundRename {
 }
 
 fn pending_outbound_rename_id() -> egui::Id {
-    egui::Id::new("outbounds_pending_rename")
+    egui::Id::unique("outbounds_pending_rename")
 }
 
 fn pending_outbound_rename(ui: &Ui) -> Option<PendingOutboundRename> {
@@ -1065,7 +1042,7 @@ struct RawJsonOutboundEditState {
 }
 
 fn raw_json_outbound_id() -> egui::Id {
-    egui::Id::new("outbounds_raw_json_edit")
+    egui::Id::unique("outbounds_raw_json_edit")
 }
 
 fn raw_json_outbound_state(ui: &Ui) -> Option<RawJsonOutboundEditState> {
@@ -1498,6 +1475,28 @@ fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
         }
         ui.add_space(6.0);
     }
+    // Deprecated `fragment` / `noises` (Xray-core v26.10.29): no form any more, only the move into
+    // FinalMask; the button disappears once the move is scheduled.
+    let has_legacy_obfuscation = matches!(
+        service.outbound_editor_session().map(|s| &s.settings),
+        Some(OutboundSettingsDraft::Freedom(draft)) if draft.has_legacy_obfuscation()
+    );
+    if has_legacy_obfuscation {
+        if ui
+            .button("Fix config")
+            .on_hover_text(
+                "Moves settings.fragment into a fragment layer of streamSettings.finalmask.tcp and \
+                 settings.noises into a noise layer of finalmask.udp, then shows the diff; nothing \
+                 is written until Save",
+            )
+            .clicked()
+        {
+            match service.migrate_outbound_freedom_obfuscation() {
+                Ok(message) | Err(message) => service.show_status_message(message),
+            }
+        }
+        ui.add_space(6.0);
+    }
 
     let Some(session) = service.outbound_editor_session_mut() else {
         return;
@@ -1536,45 +1535,6 @@ fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
     draft.redirect = redirect_text;
     draft.user_level = level.max(0) as u64;
     draft.proxy_protocol = proxy_protocol;
-
-    ui.add_space(6.0);
-    let mut fragment_enabled = draft.fragment.is_some();
-    let fragment_toggled = ui
-        .horizontal(|ui| {
-            super::help_button(ui, "fragment", HELP_FREEDOM_FRAGMENT);
-            ui.checkbox(&mut fragment_enabled, "fragment").changed()
-        })
-        .inner;
-    if fragment_toggled {
-        draft.fragment = if fragment_enabled {
-            Some(FragmentDraft::default())
-        } else {
-            None
-        };
-    }
-    if let Some(fragment) = &mut draft.fragment {
-        egui::Grid::new("freedom_fragment_edit_grid")
-            .num_columns(2)
-            .spacing([16.0, 6.0])
-            .show(ui, |ui| {
-                super::field_label(ui, "packets", HELP_FREEDOM_FRAGMENT_PACKETS);
-                ui.text_edit_singleline(&mut fragment.packets);
-                ui.end_row();
-                super::field_label(ui, "length", HELP_FREEDOM_FRAGMENT_LENGTH);
-                ui.text_edit_singleline(&mut fragment.length);
-                ui.end_row();
-                super::field_label(ui, "interval", HELP_FREEDOM_FRAGMENT_INTERVAL);
-                ui.text_edit_singleline(&mut fragment.interval);
-                ui.end_row();
-            });
-    }
-
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        super::help_button(ui, "noises", HELP_FREEDOM_NOISES);
-        ui.strong("noises");
-    });
-    show_freedom_noises_edit(ui, &mut draft.noises);
 
     ui.add_space(8.0);
     ui.horizontal(|ui| {
@@ -1717,52 +1677,6 @@ fn show_freedom_final_rules_edit(ui: &mut Ui, rules: &mut Vec<FreedomFinalRuleDr
     ui.add_space(4.0);
     if ui.button("Add final rule").clicked() {
         rules.push(FreedomFinalRuleDraft::new("block"));
-    }
-}
-
-fn show_freedom_noises_edit(ui: &mut Ui, noises: &mut Vec<NoiseDraft>) {
-    let mut remove_idx: Option<usize> = None;
-    egui::Grid::new("freedom_noises_edit_grid")
-        .num_columns(4)
-        .spacing([12.0, 4.0])
-        .show(ui, |ui| {
-            ui.label(RichText::new("type").strong());
-            ui.label(RichText::new("packet").strong());
-            ui.label(RichText::new("delay").strong());
-            ui.label("");
-            ui.end_row();
-
-            for (idx, noise) in noises.iter_mut().enumerate() {
-                egui::ComboBox::from_id_salt(("freedom_noise_type", idx))
-                    .selected_text(if noise.kind.is_empty() {
-                        "(unset)"
-                    } else {
-                        noise.kind.as_str()
-                    })
-                    .show_ui(ui, |ui| {
-                        for &preset in FREEDOM_NOISE_TYPES {
-                            ui.selectable_value(&mut noise.kind, preset.to_owned(), preset);
-                        }
-                    });
-                ui.text_edit_singleline(&mut noise.packet);
-                ui.text_edit_singleline(&mut noise.delay);
-                if ui.small_button("Del").clicked() {
-                    remove_idx = Some(idx);
-                }
-                ui.end_row();
-            }
-        });
-    if let Some(idx) = remove_idx {
-        noises.remove(idx);
-    }
-
-    if ui.button("Add noise").clicked() {
-        noises.push(NoiseDraft {
-            kind: "rand".to_owned(),
-            packet: String::new(),
-            delay: String::new(),
-            extras: Default::default(),
-        });
     }
 }
 
