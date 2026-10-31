@@ -11173,3 +11173,24 @@ deprecated … migrate to VLESS with Flow & Seed» — решение польз
   (`ahash` с фиксированными seed), значит ключи temp-данных между кадрами остаются прежними.
 - Итог: `cargo build` без предупреждений, **1469 passed / 0 failed**, clippy lib 65 (без
   `deprecated`). `feldjaeger-ssh` не менялся. GUI в запущенном приложении не проверялся.
+
+# 152	Багфикс: окно «Import from Share URI» выходило за экран (0.5.76-4)
+
+- Симптом: после вставки длинной `vless://`-ссылки окно росло по высоте и уходило за нижнюю
+  границу экрана; размер окна менять было нельзя (`.resizable(false)`).
+- Причина: `TextEdit::multiline` растёт вместе с переносами строк (ссылка без пробелов
+  переносится посимвольно), а `egui::Resize` в 0.37 на каждом кадре делает
+  `desired_size = desired_size.max(last_content_size)` по осям без скролла — окно всегда
+  подстраивается под контент, в том числе под превью после «Parse».
+- `show_import_dialog` (`gui/pages/inbounds.rs`): окно `.resizable(true).vscroll(true)`,
+  `default_width(520)`, `default_height(min(480, max))`, `min 360×200`, `max_height` = высота
+  `ctx.content_rect()` − 40 (не меньше 200) — окно не может стать выше области приложения.
+- Поле ссылки — в `ScrollArea::vertical()` (`id_salt("inbound_import_uri_scroll")`,
+  `max_height` = 5 строк `TextStyle::Body` + 8, `auto_shrink([false, false])`), `TextEdit` с
+  `min_size(0, ту же высоту)` и `desired_width(∞)`: высота поля фиксирована, длинная ссылка
+  прокручивается собственным вертикальным scrollbar. Добавлен `hint_text` со схемами ссылок.
+- Общий `resizable_multiline` (`pages/mod.rs`) не использован: он растёт до 160 px и включает
+  `code_editor()` (моноширинный шрифт, Tab вставляет отступ), а здесь нужна неизменная высота.
+- Логика импорта (`preview_inbound_import`, применение превью) не менялась.
+- Итог: `cargo build` без предупреждений, **1469 passed / 0 failed**, clippy lib 65 (без новых).
+  `feldjaeger-ssh` не менялся. GUI в запущенном приложении не проверялся.

@@ -5057,10 +5057,19 @@ fn show_import_dialog(ui: &mut Ui, service: &mut ApplicationService) {
     };
     let mut open = true;
     let mut closed = false;
+    // Resizable + vscroll: without a scroll axis egui's `Resize` grows the window to its content
+    // every frame, so the parsed preview (and a long pasted link) pushed it past the screen edge.
+    // The max height keeps even the initial/auto size inside the app area.
+    let max_height = (ui.ctx().content_rect().height() - 40.0).max(200.0);
     egui::Window::new("Import from Share URI")
         .collapsible(false)
-        .resizable(false)
-        .default_width(480.0)
+        .resizable(true)
+        .vscroll(true)
+        .default_width(520.0)
+        .default_height(480.0_f32.min(max_height))
+        .min_width(360.0)
+        .min_height(200.0)
+        .max_height(max_height)
         .open(&mut open)
         .show(ui.ctx(), |ui| {
             ui.label(
@@ -5074,7 +5083,21 @@ fn show_import_dialog(ui: &mut Ui, service: &mut ApplicationService) {
                 .color(Color32::from_rgb(140, 140, 140)),
             );
             ui.add_space(6.0);
-            ui.text_edit_multiline(&mut pending.uri_text);
+            // Fixed-height link box: a long link wraps into many lines; those scroll inside the
+            // box instead of growing the window.
+            let uri_box_height = ui.text_style_height(&egui::TextStyle::Body) * 5.0 + 8.0;
+            egui::ScrollArea::vertical()
+                .id_salt("inbound_import_uri_scroll")
+                .max_height(uri_box_height)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::TextEdit::multiline(&mut pending.uri_text)
+                            .desired_width(f32::INFINITY)
+                            .min_size(egui::vec2(0.0, uri_box_height))
+                            .hint_text("vless://… / trojan://… / hy2://…"),
+                    );
+                });
             if let Some(error) = &pending.error {
                 ui.add_space(6.0);
                 ui.label(

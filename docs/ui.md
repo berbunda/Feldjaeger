@@ -290,6 +290,8 @@ Add Inbound:
 Import from Share URI (Roadmap §3:133):
 - "Import from Share URI" button next to "Add Inbound" opens a paste-a-link dialog (`vless://` /
   `trojan://` / `hy2://`, `hysteria2://` accepted as an alias on import)
+- The dialog is resizable and scrolls vertically (capped to the app area height); the link box
+  has a fixed ~5-line height — a long pasted link scrolls inside it instead of growing the window
 - "Parse" shows a read-only preview (protocol / port / security / transport / credential / flow)
   plus every warning about what a share link can't fully reproduce — REALITY's private key and
   TLS certificate files are never in a client link (confirmed in the generation code), so those
