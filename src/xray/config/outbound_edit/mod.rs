@@ -7,6 +7,7 @@ use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind
 
 mod mux;
 pub use mux::{
+    MuxBehavior,
     MUX_CONCURRENCY_EFFECTIVE_MAX, MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX, MUX_XUDP_PROXY_UDP443_VALUES,
     OutboundMux, parse_outbound_mux, validate_outbound_mux,
 };

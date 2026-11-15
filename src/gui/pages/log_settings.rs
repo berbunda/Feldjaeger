@@ -58,7 +58,7 @@ const HELP_ERROR: HelpText = HelpText::new(
      не запустится; сам Xray файл не ротирует). Disabled — \"none\".",
 );
 const HELP_LOG_LEVEL: HelpText = HelpText::new(
-    "loglevel — verbosity of the error log; each level also includes the more severe ones. \
+    "logLevel (legacy spelling: loglevel) — verbosity of the error log; each level also includes the more severe ones. \
      Debug — everything, including per-connection internals: very verbose, for troubleshooting \
      only. Info — routing decisions (taking detour, sniffed domain) and every failed or closed \
      connection. Warning (default) — configuration problems Xray works around, e.g. a routing \
@@ -67,8 +67,10 @@ const HELP_LOG_LEVEL: HelpText = HelpText::new(
      turns off both the error log and the access log (including DNS entries), whatever their \
      destinations.\n\n\
      Case does not matter; Xray does not reject an unknown value — it uses warning, as when the \
-     field is omitted. The access log has no levels.",
-    "loglevel — подробность журнала ошибок; каждый уровень включает и более серьёзные. Debug — \
+     field is omitted. The access log has no levels.\n\n\
+     Existing key spelling is preserved. Multiple spellings of this field require an explicit \
+     choice of level and consent to replace those keys with one logLevel key on Save.",
+    "logLevel (прежнее написание: loglevel) — подробность журнала ошибок; каждый уровень включает и более серьёзные. Debug — \
      всё, включая внутренние подробности соединений: очень много строк, только для поиска \
      неисправностей. Info — решения маршрутизации (taking detour, sniffed domain) и каждое \
      неудачное или закрытое соединение. Warning (по умолчанию) — проблемы конфигурации, которые \
@@ -77,7 +79,9 @@ const HELP_LOG_LEVEL: HelpText = HelpText::new(
      None — выключает и журнал ошибок, и журнал доступа \
      (вместе с DNS-записями), куда бы они ни были направлены.\n\n\
      Регистр не важен; неизвестное значение Xray не отвергает, а использует warning, как и при \
-     отсутствии поля. У журнала доступа уровней нет.",
+     отсутствии поля. У журнала доступа уровней нет.\n\n\
+     Исходное написание ключа сохраняется. При нескольких вариантах ключа нужно явно выбрать \
+     уровень и согласиться заменить эти ключи одним logLevel при сохранении.",
 );
 const HELP_DNS_LOG: HelpText = HelpText::new(
     "dnsLog — adds the queries of Xray's built-in DNS (the dns section) to the access log: \
@@ -416,7 +420,7 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
     ui.add_space(4.0);
     edit_output(ui, "error", HELP_ERROR, &mut draft.error);
     ui.horizontal(|ui| {
-        super::help_button(ui, "loglevel", HELP_LOG_LEVEL);
+        super::help_button(ui, "logLevel", HELP_LOG_LEVEL);
         ui.label("Log level");
         let current = draft.log_level.display_label();
         ComboBox::from_id_salt("log_settings_level")
@@ -444,6 +448,18 @@ fn show_edit_form(ui: &mut Ui, service: &mut ApplicationService) {
                 }
             });
     });
+    if draft.log_level_keys.len() > 1 {
+        ui.label(
+            RichText::new(format!(
+                "Multiple keys: {}. Choose the level to keep.",
+                draft.log_level_keys.join(", "),
+            )).size(14.0),
+        );
+        ui.checkbox(
+            &mut draft.replace_log_level_keys,
+            "Replace listed log level keys with logLevel on Save",
+        );
+    }
     if matches!(draft.log_level, LogLevel::None) && !matches!(draft.access, LogOutput::Disabled) {
         ui.label(
             RichText::new("Log level None also turns off the access log.")

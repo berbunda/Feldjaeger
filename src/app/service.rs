@@ -3913,6 +3913,7 @@ impl ApplicationService {
             .get(general.tag.as_deref(), inbound_index)
             .cloned();
         self.inbound_editor_session = Some(InboundEditorSession {
+            xdrive_editor_id:uuid::Uuid::new_v4(),
             inbound_index,
             inbound_ref: Some(inbound_ref),
             general,
@@ -3985,6 +3986,7 @@ impl ApplicationService {
             _ => InboundStreamDraft::default(),
         };
         self.inbound_editor_session = Some(InboundEditorSession {
+            xdrive_editor_id:uuid::Uuid::new_v4(),
             inbound_index: usize::MAX,
             inbound_ref: None,
             general: InboundGeneral {
@@ -4221,6 +4223,13 @@ impl ApplicationService {
         Ok(())
     }
 
+    /// Presentation of Mux limits based on Discovery, without changing the editor draft.
+    pub fn outbound_mux_behavior(&self) -> crate::xray::MuxBehavior {
+        let mux = self.outbound_editor_session.as_ref()
+            .and_then(|session| session.general.mux.as_ref()).cloned().unwrap_or_default();
+        mux.behavior_for_core(self.xray_core_version())
+    }
+
     /// Non-blocking compatibility warnings for the outbound being edited, computed on the JSON a
     /// Save / Add would write (Roadmap §2.4:105). Empty without a session or while the draft
     /// doesn't compose (Save reports that error itself). Outbounds are small, so no cache.
@@ -4316,6 +4325,43 @@ impl ApplicationService {
         session.diff_preview = None;
         self.preview_outbound_shell_diff()?;
         Ok(message)
+    }
+
+    /// Explicitly migrates a Freedom rule's effective `blockDelay` into `delay` in the draft.
+    pub fn migrate_outbound_freedom_final_rule_delay(&mut self, index: usize) -> Result<String, String> {
+        self.edit_outbound_freedom_final_rule(index, |rule| rule.migrate_block_delay())?;
+        Ok("blockDelay moved to delay and removed — review Preview changes and Save.".to_owned())
+    }
+
+    /// Explicitly removes all block-only fields from one Freedom rule in the draft.
+    pub fn remove_outbound_freedom_final_rule_block_fields(&mut self, index: usize) -> Result<String, String> {
+        self.edit_outbound_freedom_final_rule(index, |rule| {
+            rule.remove_block_fields();
+            Ok(())
+        })?;
+        Ok("delay, blockDelay and logLevel removed from the draft — review Preview changes and Save.".to_owned())
+    }
+
+    fn edit_outbound_freedom_final_rule(
+        &mut self,
+        index: usize,
+        edit: impl FnOnce(&mut crate::xray::FreedomFinalRuleDraft) -> Result<(), String>,
+    ) -> Result<(), String> {
+        if self.is_any_remote_busy() {
+            return Err("Another operation is already running.".to_owned());
+        }
+        let session = self.outbound_editor_session.as_mut()
+            .ok_or_else(|| "Not editing an outbound.".to_owned())?;
+        let OutboundSettingsDraft::Freedom(settings) = &mut session.settings else {
+            return Err("Only Freedom outbounds have finalRules.".to_owned());
+        };
+        let rule = settings.final_rules.get_mut(index)
+            .ok_or_else(|| "Final rule no longer exists.".to_owned())?;
+        edit(rule)?;
+        session.diff_preview = None;
+        // Other incomplete rules may still prevent preview; never show the old preview.
+        let _ = self.preview_outbound_shell_diff();
+        Ok(())
     }
 
     /// Explicit removal of Freedom `streamSettings.sockopt.addressPortStrategy`, which Xray-core
@@ -4538,11 +4584,20 @@ impl ApplicationService {
     /// Reality PublicKey is taken from Generate ephemerals / retained store, or
     /// derived locally from `realitySettings.privateKey`. VLESS client encryption
     /// still requires Generate when inbound `decryption` is not `none`.
+    /// XDRIVE has no official Share URI schema; applies to the active draft and saved config.
+    pub fn inbound_xdrive_share_blocked_reason(&self,index:usize)->Option<&'static str>{
+        let active=if let Some(session)=self.inbound_editor_session.as_ref().filter(|s|!s.is_add && s.inbound_index==index){
+            session.stream.method==Some(crate::xray::StreamMethod::Xdrive)
+        }else{self.loaded_config.editable().and_then(|e|e.sections().inbounds().get(index)).is_some_and(|i|crate::xray::xdrive_is_active(i.value()))};
+        active.then_some("XDRIVE Share URI/QR is unavailable: no official format has been defined.")
+    }
+
     pub fn build_client_share_uri(
         &mut self,
         inbound_index: usize,
         client_index: usize,
     ) -> Result<String, String> {
+        if let Some(reason)=self.inbound_xdrive_share_blocked_reason(inbound_index){return Err(reason.to_owned());}
         use crate::xray::{
             ShareProtocol, ShareSecurity, ShareTransport, ShareUriRequest, StreamMethod,
             build_share_uri, parse_inbound_protocol, parse_inbound_security, parse_inbound_stream,
@@ -4807,6 +4862,7 @@ impl ApplicationService {
         }
 
         let transport = match stream_draft.method {
+            Some(StreamMethod::Xdrive) => return Err("XDRIVE Share URI/QR is unavailable: no official format has been defined.".to_owned()),
             Some(StreamMethod::Tcp) => ShareTransport::Tcp,
             Some(StreamMethod::Xhttp) => {
                 use crate::xray::xhttp_extra_json;
@@ -7190,6 +7246,7 @@ impl ApplicationService {
             return Err("Another operation is already running.".to_owned());
         }
         self.outbound_editor_session = Some(super::outbound_ops::OutboundEditorSession {
+            xdrive_editor_id:uuid::Uuid::new_v4(),
             outbound_index: usize::MAX,
             outbound_ref: None,
             general: OutboundGeneral {
@@ -7233,6 +7290,7 @@ impl ApplicationService {
         let general = parse_outbound_general(&outbound_value);
         let stream = parse_outbound_stream(&outbound_value);
         self.outbound_editor_session = Some(super::outbound_ops::OutboundEditorSession {
+            xdrive_editor_id:uuid::Uuid::new_v4(),
             outbound_index,
             outbound_ref: Some(outbound_ref),
             general,
@@ -13146,6 +13204,7 @@ mod tests {
         // Roadmap §3:126: same dry-run contract as the inbound Shell Preview (IB-L5).
         let mut service = service_with_outbound("preview-outbound-shell-add");
         service.outbound_editor_session = Some(crate::app::outbound_ops::OutboundEditorSession {
+            xdrive_editor_id:uuid::Uuid::new_v4(),
             outbound_index: usize::MAX,
             outbound_ref: None,
             general: crate::xray::OutboundGeneral {
@@ -13448,6 +13507,184 @@ mod tests {
         stream.finalmask_udp.push(crate::xray::FinalMaskLayerDraft::default());
         stream.write_finalmask_udp = true;
         assert!(service.inbound_editor_warnings().is_empty());
+    }
+
+    #[test]
+    fn freedom_final_rule_actions_change_only_drafts_and_refresh_preview() {
+        let json = r#"{"outbounds":[{"tag":"direct","protocol":"freedom","settings":{"finalRules":[
+            {"action":"block","delay":0,"blockDelay":"1-3","future":true}
+        ]}}]}"#;
+        let mut service = loaded_service_from_json("freedom-final-rule-actions", json);
+        let original = service.loaded_config.editable().unwrap().clone();
+        service.begin_edit_outbound_shell(0).unwrap();
+        service.migrate_outbound_freedom_final_rule_delay(0).unwrap();
+        let session = service.outbound_editor_session().unwrap();
+        let preview = format!("{:?}", session.diff_preview.as_ref().unwrap());
+        assert!(preview.contains("blockDelay") && preview.contains("delay"));
+        assert_eq!(service.loaded_config.editable().unwrap(), &original);
+        service.cancel_outbound_editor_session();
+        service.begin_edit_outbound_shell(0).unwrap();
+        let OutboundSettingsDraft::Freedom(draft) = &mut service.outbound_editor_session_mut().unwrap().settings else { panic!("Freedom expected"); };
+        draft.final_rules[0].action = "allow".to_owned();
+        service.remove_outbound_freedom_final_rule_block_fields(0).unwrap();
+        assert!(service.outbound_editor_session().unwrap().diff_preview.is_some());
+        assert_eq!(service.loaded_config.editable().unwrap(), &original);
+        service.cancel_outbound_editor_session();
+        assert_eq!(service.loaded_config.editable().unwrap(), &original);
+        assert!(service.migrate_outbound_freedom_final_rule_delay(0).is_err());
+    }
+
+    #[test]
+    fn mux_presentation_uses_discovery_without_changing_editor_or_loaded_config() {
+        let mut service = loaded_service_from_json("mux-core-behavior", r#"{
+            "outbounds": [{"protocol":"socks", "tag":"local", "settings":{
+                "address":"127.0.0.1", "port":1080},
+                "mux":{"enabled":true,"concurrency":8,"future":true}}]
+        }"#);
+        service.begin_edit_outbound_shell(0).expect("edit");
+        let before = service.outbound_editor_session().unwrap().clone();
+        let loaded = service.loaded_config.editable().unwrap().clone();
+        assert!(!service.outbound_mux_behavior().version_known);
+        for (version, effective, reuse) in [("26.10.31", 8, 128), ("26.11.9", 128, 1024)] {
+            service.discovery = DiscoveryState::Succeeded(crate::xray::XrayInstallation {
+                operating_system: "Debian".to_owned(), architecture: "x86_64".to_owned(),
+                init_system: crate::xray::InitSystemKind::Systemd,
+                binary_path: None, version: Some(version.to_owned()), service_name: None,
+                service_state: None, exec_start: None,
+                config_source: crate::xray::ConfigSource::NotFound, config_readable: false,
+                config_files: Vec::new(), discovery_warnings: Vec::new(),
+            });
+            let behavior = service.outbound_mux_behavior();
+            assert!(behavior.version_known);
+            assert_eq!(behavior.effective_concurrency, Some(effective));
+            assert_eq!(behavior.connection_reuse_limit, reuse);
+            assert_eq!(service.outbound_editor_session(), Some(&before));
+            assert_eq!(service.loaded_config.editable(), Some(&loaded));
+        }
+        let _ = fs::remove_dir_all(service.config.path().parent().unwrap());
+    }
+
+    fn xdrive_editor_root() -> serde_json::Value {
+        let pair=crate::xray::parse_vlessenc_stdout(include_str!("../xray/remote_cli/fixtures/vlessenc.stdout.txt"));
+        // Fixture lives under src/xray, alongside the official generation parser.
+        let pair=pair.unwrap().x25519;
+        let storage=serde_json::json!({"service":"google-drive","remoteFolder":"folder-id",
+            "secrets":["client-canary","secret-canary","refresh-canary"],"eagerWindowMs":0,"future":{"keep":true}});
+        serde_json::json!({"inbounds":[{"tag":"drive-in","protocol":"vless","port":443,
+            "settings":{"decryption":pair.decryption,"clients":[{"id":"b5cef9a0-8321-47f4-9909-d72ba3d37d94"}]},
+            "streamSettings":{"network":"xdrive","security":"tls","tlsSettings":{"alpn":["h3"],"futureTLS":true},"xdriveSettings":storage}}],
+            "outbounds":[{"tag":"drive-out","protocol":"vless","settings":{"address":"127.0.0.1","port":443,
+                "id":"b5cef9a0-8321-47f4-9909-d72ba3d37d94","encryption":pair.encryption},"mux":{"enabled":true},
+                "streamSettings":{"network":"xdrive","security":"tls","tlsSettings":{"alpn":["h3"],"futureTLS":true},"xdriveSettings":storage}}]})
+    }
+
+    #[test]
+    fn xdrive_forms_open_without_changes_and_cancel_preserves_all_config() {
+        use super::super::XdriveEditorSide::{Inbound,Outbound};
+        let root=xdrive_editor_root();let mut service=loaded_service_from_json("xdrive-open",&root.to_string());
+        let original=service.loaded_config.editable().unwrap().clone();
+        service.begin_edit_inbound_shell(0).unwrap();service.begin_edit_outbound_shell(0).unwrap();
+        let inbound=service.inbound_editor_session().unwrap().clone();let outbound=service.outbound_editor_session().unwrap().clone();
+        for side in [Inbound,Outbound]{let view=service.xdrive_editor_view(side).unwrap();assert!(view.editable);assert!(view.problem.is_none());}
+        let context=egui::Context::default();
+        for side in [Inbound,Outbound]{for _ in 0..2 {
+            let output=context.run_ui(egui::RawInput::default(),|ui|crate::gui::render_xdrive_for_test(ui,&mut service,side));
+            let drawn=format!("{:?}",output.shapes);
+            for secret in ["client-canary","secret-canary","refresh-canary"]{assert!(!drawn.contains(secret));}
+            output.drop_without_applying_deltas();
+        }}
+        assert_eq!(service.inbound_editor_session(),Some(&inbound));assert_eq!(service.outbound_editor_session(),Some(&outbound));
+        service.preview_inbound_shell_diff().unwrap();service.preview_outbound_shell_diff().unwrap();
+        assert!(service.inbound_editor_session().unwrap().diff_preview.as_ref().unwrap().is_empty());
+        assert!(service.outbound_editor_session().unwrap().diff_preview.as_ref().unwrap().is_empty());
+        service.set_xdrive_field(Inbound,"secret1","new-secret-canary".to_owned()).unwrap();
+        assert!(service.inbound_editor_session().unwrap().dirty);
+        assert_eq!(service.inbound_editor_session().unwrap().stream.xdrive.secrets.as_ref().unwrap()[2],"refresh-canary");
+        service.cancel_inbound_editor_session();service.cancel_outbound_editor_session();
+        assert_eq!(service.loaded_config.editable(),Some(&original));
+        service.begin_edit_inbound_shell(0).unwrap();
+        assert_ne!(service.inbound_editor_session().unwrap().xdrive_editor_id,inbound.xdrive_editor_id,"new session resets reveal state");
+        let _=fs::remove_dir_all(service.config.path().parent().unwrap());
+    }
+
+    #[test]
+    fn xdrive_template_and_numeric_text_keep_invalid_input_but_block_preview() {
+        use super::super::XdriveEditorSide::Outbound;
+        let root=xdrive_editor_root();let mut service=loaded_service_from_json("xdrive-template",&root.to_string());
+        service.begin_edit_outbound_shell(0).unwrap();
+        service.set_xdrive_field(Outbound,"segmentBytes","4294967296".to_owned()).unwrap();
+        assert!(service.preview_outbound_shell_diff().is_err());
+        assert_eq!(service.xdrive_editor_view(Outbound).unwrap().fields.iter().find(|f|f.id=="segmentBytes").unwrap().text,"4294967296");
+        service.set_xdrive_field(Outbound,"segmentBytes","0".to_owned()).unwrap();
+        service.set_xdrive_field(Outbound,"service","template".to_owned()).unwrap();
+        service.set_xdrive_field(Outbound,"template","{invalid-secret-canary".to_owned()).unwrap();
+        assert!(service.preview_outbound_shell_diff().is_err());
+        assert_eq!(service.xdrive_editor_view(Outbound).unwrap().template.as_deref(),Some("{invalid-secret-canary"));
+        assert!(!service.xdrive_editor_view(Outbound).unwrap().problem.unwrap().contains("invalid-secret-canary"));
+        service.set_xdrive_field(Outbound,"template",r#"{"get":{"headers":{"X-Custom-Key":"template-secret-canary"}}}"#.to_owned()).unwrap();
+        service.preview_outbound_shell_diff().unwrap();
+        let diff=format!("{:?}",service.outbound_editor_session().unwrap().diff_preview);
+        assert!(!diff.contains("template-secret-canary"));assert!(diff.contains("REDACTED"));
+        let context=egui::Context::default();
+        let output=context.run_ui(egui::RawInput::default(),|ui|crate::gui::render_xdrive_for_test(ui,&mut service,Outbound));
+        assert!(!format!("{:?}",output.shapes).contains("template-secret-canary"));
+        output.drop_without_applying_deltas();
+        assert!(service.outbound_editor_session().unwrap().stream.xdrive.extras.contains_key("future"));
+        let _=fs::remove_dir_all(service.config.path().parent().unwrap());
+    }
+
+    #[test]
+    fn xdrive_preset_is_explicit_and_never_replaces_existing_storage() {
+        use super::super::XdriveEditorSide::{Inbound,Outbound};
+        let mut root=xdrive_editor_root();
+        for key in ["inbounds","outbounds"]{let s=root[key][0]["streamSettings"].as_object_mut().unwrap();s.remove("xdriveSettings");s.remove("tlsSettings");s.insert("network".to_owned(),serde_json::json!("tcp"));s.insert("security".to_owned(),serde_json::json!("none"));}
+        let mut service=loaded_service_from_json("xdrive-preset",&root.to_string());
+        service.begin_edit_inbound_shell(0).unwrap();service.begin_edit_outbound_shell(0).unwrap();
+        service.inbound_editor_session_mut().unwrap().stream.method=Some(crate::xray::StreamMethod::Xdrive);
+        service.outbound_editor_session_mut().unwrap().stream.select_transport(crate::xray::OutboundTransport::Xdrive);
+        for side in [Inbound,Outbound]{
+            service.apply_xdrive_google_preset(side).unwrap();
+            let fields=service.xdrive_editor_view(side).unwrap().fields;
+            assert_eq!(fields.iter().find(|f|f.id=="eagerWindowMs").unwrap().text,"10000");
+            for (id,text) in [("remoteFolder","new-folder"),("secret0","a"),("secret1","b"),("secret2","c")]{service.set_xdrive_field(side,id,text.to_owned()).unwrap();}
+            assert!(service.apply_xdrive_google_preset(side).is_err());
+        }
+        service.preview_inbound_shell_diff().unwrap();service.preview_outbound_shell_diff().unwrap();
+        assert_eq!(service.inbound_editor_session().unwrap().stream.xdrive_security.tls.alpn,["h2"]);
+        assert!(service.outbound_editor_session().unwrap().general.mux.as_ref().unwrap().enabled);
+        assert_eq!(service.loaded_config.editable().unwrap().sections().inbounds()[0].value()["streamSettings"]["network"],"tcp");
+        let _=fs::remove_dir_all(service.config.path().parent().unwrap());
+    }
+
+    #[test]
+    fn xdrive_share_is_disabled_before_resolving_certificates_or_generation_material() {
+        let root=xdrive_editor_root();let mut service=loaded_service_from_json("xdrive-share",&root.to_string());
+        assert!(service.inbound_xdrive_share_blocked_reason(0).is_some());
+        assert!(service.build_client_share_uri(0,0).unwrap_err().contains("no official format"));
+        service.begin_edit_inbound_shell(0).unwrap();
+        assert!(service.build_client_share_uri(0,0).unwrap_err().contains("no official format"));
+        let _=fs::remove_dir_all(service.config.path().parent().unwrap());
+    }
+
+    #[test]
+    fn xdrive_s3_and_xmux_fields_preserve_credentials_and_validate_conflicts() {
+        use super::super::XdriveEditorSide::Outbound;
+        let root=xdrive_editor_root();let mut service=loaded_service_from_json("xdrive-s3-fields",&root.to_string());
+        service.begin_edit_outbound_shell(0).unwrap();
+        for (field,text) in [("service","s3"),("s3.endpoint","https://s3.example.com/base"),("s3.region","us-east-1"),
+            ("s3.bucket","bucket"),("s3.pathStyle","false"),("secret0","access-id"),("xmux.maxConnections","1"),("xmux.maxConcurrency","1")] {
+            service.set_xdrive_field(Outbound,field,text.to_owned()).unwrap();
+        }
+        assert!(service.preview_outbound_shell_diff().is_err());
+        service.set_xdrive_field(Outbound,"xmux.maxConcurrency",String::new()).unwrap();
+        service.preview_outbound_shell_diff().unwrap();
+        let settings=&service.outbound_editor_session().unwrap().stream.xdrive;
+        assert_eq!(settings.secrets.as_ref().unwrap(),&["access-id","secret-canary","refresh-canary"]);
+        assert_eq!(settings.s3.as_ref().unwrap().path_style,Some(false));
+        service.set_xdrive_field(Outbound,"service","local".to_owned()).unwrap();
+        assert!(service.outbound_editor_session().unwrap().stream.xdrive.s3.is_some());
+        assert!(service.outbound_editor_session().unwrap().stream.xdrive.extras.contains_key("future"));
+        let _=fs::remove_dir_all(service.config.path().parent().unwrap());
     }
 
     const LEGACY_FREEDOM_OUTBOUND: &str = r#"{

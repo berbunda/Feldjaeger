@@ -4,10 +4,19 @@
 ///
 /// Future write-back uses [`source_file`](Self::source_file) to decide which
 /// remote (or local) path should receive updates for this fragment.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SourcedSection<T> {
     source_file: String,
     value: T,
+}
+
+impl<T> std::fmt::Debug for SourcedSection<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SourcedSection")
+            .field("source_file", &self.source_file)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl<T> SourcedSection<T> {

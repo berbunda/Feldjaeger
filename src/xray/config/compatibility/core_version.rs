@@ -48,7 +48,7 @@ impl fmt::Display for XrayCoreVersion {
 }
 
 /// The Xray-core release Feldjäger is developed and verified against (shown in the About dialog).
-pub const BASELINE_XRAY_CORE: XrayCoreVersion = XrayCoreVersion::new(26, 10, 31);
+pub const BASELINE_XRAY_CORE: XrayCoreVersion = XrayCoreVersion::new(26, 11, 9);
 
 /// A config feature (or a schema change) that appeared in a specific Xray-core release.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -124,6 +124,14 @@ pub enum CoreFeature {
     /// TUN `autoSystemWfpBlockLeak` values `windnsclient`, `tcp/<port>`, `udp/<port>` (and `dns`
     /// standing for udp/53, tcp/53, windnsclient, tcp/853, udp/853) — XTLS/Xray-core#7288.
     TunWfpBlockLeakPorts,
+    /// Freedom `finalRules.delay` / `logLevel`, and block-only field checks — #7329.
+    FreedomFinalRuleDelayAndLogLevel,
+    /// Extended TUN WFP selector grammar (#7315); WFP behavior itself remains Windows-only.
+    TunWfpLeakSelectors,
+    /// Explicit Chrome 155 uTLS fingerprint (#7135).
+    Chrome155Fingerprint,
+    /// Public XDRIVE beta and its transport constraints (#7352).
+    XdriveBeta,
 }
 
 /// The table of Roadmap §2.6 stage 0.7, oldest first.
@@ -150,6 +158,10 @@ pub const CORE_FEATURES: &[CoreFeature] = &[
     CoreFeature::NoiseLuaScript,
     CoreFeature::FinalMaskFilter,
     CoreFeature::TunWfpBlockLeakPorts,
+    CoreFeature::FreedomFinalRuleDelayAndLogLevel,
+    CoreFeature::TunWfpLeakSelectors,
+    CoreFeature::Chrome155Fingerprint,
+    CoreFeature::XdriveBeta,
 ];
 
 impl CoreFeature {
@@ -178,6 +190,8 @@ impl CoreFeature {
             Self::NoiseLuaScript => XrayCoreVersion::new(26, 10, 17),
             Self::FinalMaskFilter => XrayCoreVersion::new(26, 10, 21),
             Self::TunWfpBlockLeakPorts => XrayCoreVersion::new(26, 10, 31),
+            Self::FreedomFinalRuleDelayAndLogLevel => XrayCoreVersion::new(26, 11, 9),
+            Self::TunWfpLeakSelectors | Self::Chrome155Fingerprint | Self::XdriveBeta => XrayCoreVersion::new(26, 11, 9),
         }
     }
 
@@ -206,6 +220,10 @@ impl CoreFeature {
             Self::NoiseLuaScript => 7124,
             Self::FinalMaskFilter => 7206,
             Self::TunWfpBlockLeakPorts => 7288,
+            Self::FreedomFinalRuleDelayAndLogLevel => 7329,
+            Self::TunWfpLeakSelectors => 7315,
+            Self::Chrome155Fingerprint => 7135,
+            Self::XdriveBeta => 7352,
         }
     }
 
@@ -234,6 +252,10 @@ impl CoreFeature {
             Self::NoiseLuaScript => "`noise` Lua `script` (HandleNoise)",
             Self::FinalMaskFilter => "`filter` mask (source-IP filtering)",
             Self::TunWfpBlockLeakPorts => "TUN `autoSystemWfpBlockLeak` `windnsclient` / `tcp/PORT` / `udp/PORT`",
+            Self::FreedomFinalRuleDelayAndLogLevel => "Freedom `finalRules.delay` / `logLevel` (older cores ignore these fields)",
+            Self::TunWfpLeakSelectors => "TUN WFP selectors (keywords, port ranges, CIDR prefixes)",
+            Self::Chrome155Fingerprint => "TLS/REALITY fingerprint `hellochrome_155`",
+            Self::XdriveBeta => "XDRIVE public beta (use the same Xray version on both ends)",
         }
     }
 

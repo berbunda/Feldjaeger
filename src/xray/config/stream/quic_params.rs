@@ -297,6 +297,8 @@ pub enum QuicTransport {
     Hysteria,
     /// `network: xhttp` / `splithttp` with `security: tls` and `tlsSettings.alpn` exactly `["h3"]`.
     XhttpH3,
+    /// XDRIVE storage client with TLS ALPN exactly h3, on either side.
+    XdriveH3,
 }
 
 /// `congestion` values XHTTP/3 accepts (empty = bbr).
@@ -308,6 +310,7 @@ impl QuicTransport {
         match self {
             Self::Hysteria => "Hysteria",
             Self::XhttpH3 => "XHTTP/3",
+            Self::XdriveH3 => "XDRIVE/3",
         }
     }
 
@@ -316,6 +319,7 @@ impl QuicTransport {
         match self {
             Self::Hysteria => QUIC_CONGESTION_MODES,
             Self::XhttpH3 => XHTTP3_CONGESTION_MODES,
+            Self::XdriveH3 => &["reno", "bbr"],
         }
     }
 
@@ -323,7 +327,7 @@ impl QuicTransport {
     pub fn default_congestion(self) -> &'static str {
         match self {
             Self::Hysteria => "brutal",
-            Self::XhttpH3 => "bbr",
+            Self::XhttpH3 | Self::XdriveH3 => "bbr",
         }
     }
 
@@ -357,8 +361,9 @@ pub fn quic_transport_of(stream_settings: &Value) -> Option<QuicTransport> {
             .and_then(Value::as_str)
             .map(|value| value.trim().to_ascii_lowercase())
     };
-    let method = text("network").or_else(|| text("method")).unwrap_or_default();
+    let method = text("method").or_else(|| text("network")).unwrap_or_default();
     match method.as_str() {
+        "xdrive" if super::xdrive::xdrive_uses_h3(stream_settings) => Some(QuicTransport::XdriveH3),
         "hysteria" => Some(QuicTransport::Hysteria),
         "xhttp" | "splithttp" => {
             let tls = text("security").as_deref() == Some("tls");

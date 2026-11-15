@@ -95,6 +95,19 @@ fn diff_values(path: &str, before: &Value, after: &Value, out: &mut Vec<JsonDiff
         return;
     }
 
+    // Stop at the secret-bearing field itself. Descending into its array would lose
+    // the field name and expose credentials as ordinary indexed string changes.
+    let leaf_key = path_leaf_key(path);
+    if is_secret_key(leaf_key) {
+        out.push(JsonDiffEntry {
+            path: path.to_owned(),
+            kind: JsonDiffKind::Changed,
+            before: Some(display_value(leaf_key, before)),
+            after: Some(display_value(leaf_key, after)),
+        });
+        return;
+    }
+
     match (before, after) {
         (Value::Object(left), Value::Object(right)) => {
             let mut keys: Vec<&String> = left.keys().chain(right.keys()).collect();
@@ -181,7 +194,9 @@ fn join_path(parent: &str, key: &str) -> String {
 }
 
 fn is_secret_key(key: &str) -> bool {
-    matches!(
+    // XDRIVE templates may embed credentials in arbitrary headers, URLs and request bodies.
+    // Treat the whole template as opaque instead of guessing secret key names inside it.
+    key.eq_ignore_ascii_case("secrets") || key.eq_ignore_ascii_case("template") || matches!(
         key,
         "password"
             | "passwd"
@@ -205,7 +220,7 @@ fn display_value(key: &str, value: &Value) -> String {
             Value::Null => "null".to_owned(),
             Value::String(s) if s.is_empty() => "\"\"".to_owned(),
             Value::String(_) | Value::Number(_) | Value::Bool(_) => "[REDACTED]".to_owned(),
-            Value::Array(_) | Value::Object(_) => redact_value(value).to_string(),
+            Value::Array(_) | Value::Object(_) => "[REDACTED]".to_owned(),
         };
     }
     match value {
@@ -262,6 +277,80 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn raw_configuration_debug_omits_payloads() {
+        use crate::xray::{EditableXrayConfig, ReplaceInboundRawJsonRequest,
+            ReplaceOutboundRawJsonRequest, XrayConfigParser, ModifyConfigOutcome};
+        use crate::xray::config::SourcedSection;
+
+        let value = json!({"inbounds": [{"streamSettings": {"xdriveSettings": {
+            "secrets": ["oauth-client-value", "oauth-refresh-value"]}}}]});
+        let section = SourcedSection::new("/etc/xray/config.json", value.clone());
+        let parsed = XrayConfigParser::new().parse_str(&value.to_string());
+        let editable = EditableXrayConfig::from_single_file("/etc/xray/config.json", value.clone(), parsed.into_sections());
+        let inbound = ReplaceInboundRawJsonRequest { inbound_index: 0, expected_fingerprint: None, new_value: value.clone() };
+        let outbound = ReplaceOutboundRawJsonRequest { outbound_index: 0, expected_fingerprint: None, new_value: value.clone() };
+        let outcome = ModifyConfigOutcome { source_file: "/etc/xray/config.json".to_owned(),
+            serialized: value.to_string().into_bytes(), original_serialized: value.to_string().into_bytes() };
+        for debug in [format!("{section:?}"), format!("{editable:?}"), format!("{inbound:?}"),
+            format!("{outbound:?}"), format!("{outcome:?}")] {
+            assert!(!debug.contains("oauth-client-value"));
+            assert!(!debug.contains("oauth-refresh-value"));
+            assert!(!debug.contains("streamSettings"));
+            assert!(!debug.contains("serialized: ["));
+        }
+    }
+
+    #[test]
+    fn credential_arrays_are_redacted_at_every_structural_boundary() {
+        let original = json!({"inbounds": [{"streamSettings": {"network": "xdrive",
+            "xdriveSettings": {"service": "google-drive", "secrets": ["oauth-id", "oauth-client", "oauth-refresh"]}}}]});
+        let mut variants = vec![json!({}), json!({"inbounds": []})];
+        for replacement in [json!(["replacement-id", "replacement-client", "replacement-refresh"]),
+            json!(["oauth-id", "replacement-client", "oauth-refresh"]),
+            json!(["oauth-id"]), json!([]), Value::Null, json!("replacement-refresh"),
+            json!({"credential": "replacement-refresh"})] {
+            let mut changed = original.clone();
+            changed["inbounds"][0]["streamSettings"]["xdriveSettings"]["secrets"] = replacement;
+            variants.push(changed);
+        }
+        let mut removed = original.clone();
+        removed["inbounds"][0]["streamSettings"]["xdriveSettings"].as_object_mut().unwrap().remove("secrets");
+        variants.push(removed);
+        for pointer in ["/inbounds/0/streamSettings", "/inbounds/0/streamSettings/xdriveSettings"] {
+            let mut changed = original.clone();
+            *changed.pointer_mut(pointer).unwrap() = json!({});
+            variants.push(changed);
+        }
+        for changed in variants {
+            for (before, after) in [(&original, &changed), (&changed, &original)] {
+                let diff = redacted_json_diff(before, after);
+                assert!(!diff.is_empty());
+                let debug = format!("{diff:?}");
+                for credential in ["oauth-id", "oauth-client", "oauth-refresh", "replacement-id", "replacement-client", "replacement-refresh"] {
+                    assert!(!debug.contains(credential), "credential leaked in diff");
+                }
+                assert!(debug.contains("REDACTED"));
+            }
+        }
+        let changed = json!({"inbounds": [{"streamSettings": {"network": "xdrive",
+            "xdriveSettings": {"service": "local", "secrets": ["oauth-id", "oauth-client", "oauth-refresh"]}}}]});
+        let diff = redacted_json_diff(&original, &changed);
+        assert_eq!(diff.len(), 1);
+        assert!(diff[0].after.as_deref().unwrap().contains("local"));
+        // Go also accepts case variants of the secrets field in imported configurations.
+        for key in ["Secrets", "SECRETS"] {
+            let before = json!({key: ["oauth-id", "oauth-client", "oauth-refresh"]});
+            let after = json!({key: ["oauth-id", "replacement-client", "oauth-refresh"]});
+            for (left, right) in [(&before, &after), (&json!({}), &before)] {
+                let debug = format!("{:?}", redacted_json_diff(left, right));
+                for secret in ["oauth-id", "oauth-client", "oauth-refresh", "replacement-client"] {
+                    assert!(!debug.contains(secret));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn detects_email_change_and_redacts_password() {
         let before = json!({
             "inbounds": [{
@@ -304,6 +393,25 @@ mod tests {
         assert!(!joined.contains("secret-one"));
         assert!(!joined.contains("secret-two"));
         assert!(!joined.contains("11111111"));
+    }
+
+    #[test]
+    fn opaque_storage_templates_are_redacted_for_leaf_parent_add_and_remove_changes() {
+        let before = serde_json::json!({"inbounds":[{"streamSettings":{"xdriveSettings":{
+            "service":"template","template":{"get":{"headers":{"X-Custom-Credential":"template-canary-one"}}}
+        }}}]});
+        let mut changed = before.clone();
+        changed["inbounds"][0]["streamSettings"]["xdriveSettings"]["template"]["get"]["headers"]["X-Custom-Credential"] = serde_json::json!("template-canary-two");
+        let mut removed = before.clone();
+        removed["inbounds"][0]["streamSettings"]["xdriveSettings"].as_object_mut().unwrap().remove("template");
+        for (a,b) in [(&before,&changed),(&before,&removed),(&removed,&before),
+            (&serde_json::json!({}),&before),(&before,&serde_json::json!({}))] {
+            let diff = redacted_json_diff(a,b);
+            assert!(!diff.is_empty());
+            let display = format!("{diff:?}");
+            assert!(!display.contains("template-canary"));
+            assert!(display.contains("REDACTED"));
+        }
     }
 
     #[test]

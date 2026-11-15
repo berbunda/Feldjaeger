@@ -1,13 +1,13 @@
 //! CompatibilityGate for inbound Shell Save / Add / client mutate, and for outbound Shell Save /
 //! Add.
 //!
-//! Wave A Save order: **G9→G10→G6→G5→G1→G2→G8→G12→G3→G13** (G7 retired; G4 retired in Roadmap
+//! Save order: **G15→G9→G10→G6→G5→G1→G2→G8→G12→G3→G13** (G7 retired; G4 retired in Roadmap
 //! §2.6 stage 5.1 — now a warning; G11 predicate+tests only — the Shadowsocks editor
 //! it was meant for is retired, Roadmap §4.1).
 //!
-//! Outbound gates ([`first_failing_outbound_gate`]): **G14**. Unlike the inbound ones they depend
-//! on the installed Xray-core version — a rule the core introduced in a release only blocks Save
-//! from that release on (unknown version = current core).
+//! Outbound gates ([`first_failing_outbound_gate`]): **G15→G14**. G14 depends on the installed
+//! core version (unknown = current). G15 checks XDRIVE settings and constraints shared by
+//! the pre-beta v26.10.31 and public beta v26.11.9. The beta version requirement is a warning.
 
 mod core_version;
 mod lua_script;
@@ -36,7 +36,7 @@ use serde_json::Value;
 use super::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 
 /// Stable gate identifiers (design G1–G12; G13 added for Roadmap §2.5:105; G14 — the first
-/// outbound gate, Roadmap §4.2).
+/// outbound gate, Roadmap §4.2; G15 — shared XDRIVE beta checks).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompatibilityGateId {
     /// Reality + method not in {raw,tcp,xhttp,grpc}.
@@ -70,6 +70,8 @@ pub enum CompatibilityGateId {
     /// Freedom ⇒ no `streamSettings.sockopt.addressPortStrategy` other than `none` (outbound,
     /// Xray-core v26.9.8+, [`CoreFeature::FreedomAddressPortStrategyForbidden`]; Roadmap §4.2).
     G14,
+    /// XDRIVE beta settings and VLESS/encryption/Mux/port/h3 constraints (v26.11.9).
+    G15,
 }
 
 impl CompatibilityGateId {
@@ -95,12 +97,14 @@ impl CompatibilityGateId {
                 "Freedom does not support sockopt.addressPortStrategy (Xray-core v26.9.8+ refuses to \
                  load it); remove it or set none"
             }
+            Self::G15 => "XDRIVE requires valid storage settings and compatible VLESS Encryption, Mux, port and h3 settings",
         }
     }
 }
 
 /// Runs all applicable gates against one inbound JSON object.
 pub fn check_inbound_compatibility(inbound: &Value) -> ConfigModifyResult<()> {
+    check_xdrive(inbound, super::stream::StreamDirection::Inbound)?;
     if let Some(id) = first_failing_gate(inbound) {
         return Err(ConfigModifyError::new(
             ConfigModifyErrorKind::ValidationFailed,
@@ -112,8 +116,11 @@ pub fn check_inbound_compatibility(inbound: &Value) -> ConfigModifyResult<()> {
 
 /// Returns the first failing gate id, if any.
 ///
-/// Wave A order: **G9→G10→G11→G6→G5→G1→G2→G8→G12→G3→G13** (G4 retired, stage 5.1).
+/// Order: **G15→G9→G10→G11→G6→G5→G1→G2→G8→G12→G3→G13** (G4 retired, stage 5.1).
 pub fn first_failing_gate(inbound: &Value) -> Option<CompatibilityGateId> {
+    if super::stream::xdrive::validate_xdrive_entity(inbound, super::stream::StreamDirection::Inbound).is_err() {
+        return Some(CompatibilityGateId::G15);
+    }
     let protocol = inbound
         .get("protocol")
         .and_then(Value::as_str)
@@ -145,7 +152,7 @@ pub fn first_failing_gate(inbound: &Value) -> Option<CompatibilityGateId> {
         return Some(CompatibilityGateId::G5);
     }
 
-    if security == "reality" {
+    if security == "reality" && !super::stream::xdrive::xdrive_is_active(inbound) {
         if !matches!(method.as_str(), "raw" | "tcp" | "xhttp" | "grpc") {
             return Some(CompatibilityGateId::G1);
         }
@@ -158,7 +165,7 @@ pub fn first_failing_gate(inbound: &Value) -> Option<CompatibilityGateId> {
     }
 
     // G12: TLS ⇒ every certificates[] entry complete (file or PEM; verify key optional)
-    if security == "tls" && !tls_certificates_ok(inbound) {
+    if security == "tls" && !super::stream::xdrive::xdrive_is_active(inbound) && !tls_certificates_ok(inbound) {
         return Some(CompatibilityGateId::G12);
     }
 
@@ -179,6 +186,7 @@ pub fn first_failing_gate(inbound: &Value) -> Option<CompatibilityGateId> {
 /// Runs all applicable outbound gates against one outbound JSON object. `core` is the installed
 /// Xray-core version from Discovery; `None` = unknown, treated as the current core.
 pub fn check_outbound_compatibility(outbound: &Value, core: Option<XrayCoreVersion>) -> ConfigModifyResult<()> {
+    check_xdrive(outbound, super::stream::StreamDirection::Outbound)?;
     if let Some(id) = first_failing_outbound_gate(outbound, core) {
         return Err(ConfigModifyError::new(
             ConfigModifyErrorKind::ValidationFailed,
@@ -190,6 +198,9 @@ pub fn check_outbound_compatibility(outbound: &Value, core: Option<XrayCoreVersi
 
 /// Returns the first failing outbound gate id, if any (see the module docs).
 pub fn first_failing_outbound_gate(outbound: &Value, core: Option<XrayCoreVersion>) -> Option<CompatibilityGateId> {
+    if super::stream::xdrive::validate_xdrive_entity(outbound, super::stream::StreamDirection::Outbound).is_err() {
+        return Some(CompatibilityGateId::G15);
+    }
     if CoreFeature::FreedomAddressPortStrategyForbidden.available_in(core)
         && freedom_address_port_strategy_set(outbound)
     {
@@ -198,11 +209,12 @@ pub fn first_failing_outbound_gate(outbound: &Value, core: Option<XrayCoreVersio
     None
 }
 
-/// G14 predicate: a Freedom outbound whose `streamSettings.sockopt.addressPortStrategy` the core
-/// builds to anything but `AddressPortStrategy_None`. `SocketConfig.Build()` lowercases without
-/// trimming: `""` / `"none"` (any case) are `None`, every other string is either a strategy
-/// Freedom refuses or an unsupported value — both fail the load. A non-string is a decode error
-/// outside this gate.
+fn check_xdrive(entity: &Value, direction: super::stream::StreamDirection) -> ConfigModifyResult<()> {
+    super::stream::xdrive::validate_xdrive_entity(entity, direction)
+        .map_err(|message| ConfigModifyError::new(ConfigModifyErrorKind::ValidationFailed, message))
+}
+
+/// G14: Freedom refuses a non-none addressPortStrategy; SocketConfig lowercases without trimming.
 fn freedom_address_port_strategy_set(outbound: &Value) -> bool {
     let is_freedom = outbound
         .get("protocol")

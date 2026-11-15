@@ -120,9 +120,11 @@ const HELP_TLS_ALPN: HelpText = HelpText::new(
     "ALPN, предлагаемый при рукопожатии (например, h2, http/1.1; для XHTTP/3 — ровно h3).",
 );
 const HELP_TLS_FINGERPRINT: HelpText = HelpText::new(
-    "uTLS ClientHello to imitate; empty = chrome. unsafe = Go's own hello (not recommended).",
+    "uTLS ClientHello to imitate; empty = chrome, which follows the core's default Chrome version. \
+     hellochrome_155 requires Xray v26.11.9+. unsafe = Go's own hello (not recommended).",
     "uTLS ClientHello, который нужно имитировать; пусто — chrome. unsafe — собственный hello Go \
-     (не рекомендуется).",
+     (не рекомендуется). chrome следует версии Chrome по умолчанию в ядре; hellochrome_155 \
+     требует Xray v26.11.9+.",
 );
 const HELP_TLS_PINNED: HelpText = HelpText::new(
     "pinnedPeerCertSha256 — SHA-256 of the server's certificate (hex, colons allowed, several \
@@ -186,9 +188,11 @@ const HELP_REALITY_SERVER_NAME: HelpText = HelpText::new(
     "Одно из serverNames сервера.",
 );
 const HELP_REALITY_FINGERPRINT: HelpText = HelpText::new(
-    "uTLS ClientHello to imitate; empty = chrome. REALITY refuses unsafe and hellogolang.",
+    "uTLS ClientHello to imitate; empty = chrome, which follows the core's default Chrome version. \
+     hellochrome_155 requires Xray v26.11.9+. REALITY refuses unsafe and hellogolang.",
     "uTLS ClientHello, который нужно имитировать; пусто — chrome. REALITY отвергает unsafe и \
-     hellogolang.",
+     hellogolang. chrome следует версии Chrome по умолчанию в ядре; hellochrome_155 требует \
+     Xray v26.11.9+.",
 );
 const HELP_REALITY_PUBLIC_KEY: HelpText = HelpText::new(
     "The server's X25519 public key (`xray x25519` prints it next to the private key), base64url.",
@@ -268,6 +272,7 @@ pub(super) fn show_outbound_stream_edit(ui: &mut Ui, service: &mut ApplicationSe
         };
         service.show_status_message(message);
     }
+    super::xdrive::show(ui,service,crate::app::XdriveEditorSide::Outbound);
 }
 
 /// Socket options (`streamSettings.sockopt`) of the outbound — every protocol that dials
@@ -457,6 +462,7 @@ fn show_transport_selector(ui: &mut Ui, stream: &mut OutboundStreamDraft, protoc
 fn show_transport_fields(ui: &mut Ui, stream: &mut OutboundStreamDraft) -> bool {
     let mut dirty = false;
     match stream.transport.unwrap_or(OutboundTransport::Raw) {
+        OutboundTransport::Xdrive => {},
         OutboundTransport::Raw => {
             ui.label(RichText::new("RAW has no client fields.").size(12.0).color(GREY));
             if !stream.raw.extras.is_empty() {

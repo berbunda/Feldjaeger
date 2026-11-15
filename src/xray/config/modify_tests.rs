@@ -616,7 +616,7 @@ fn update_log_settings_creates_missing_log_object_on_save() {
     assert_eq!(outcome.source_file, "/etc/xray/config.json");
     let root = config.file_roots().get("/etc/xray/config.json").unwrap();
     assert_eq!(root["log"]["access"], "/var/log/xray/access.log");
-    assert_eq!(root["log"]["loglevel"], "info");
+    assert_eq!(root["log"]["logLevel"], "info");
     assert_eq!(root["log"]["dnsLog"], true);
     assert!(config.sections().log().is_some());
 }
@@ -644,6 +644,33 @@ fn update_log_settings_preserves_unknown_fields() {
     assert_eq!(root["log"]["futureField"], true);
     assert_eq!(root["log"]["extra"]["nested"], 1);
     assert_eq!(root["log"]["loglevel"], "debug");
+}
+
+#[test]
+fn modern_log_level_confdir_edit_preserves_other_files_and_resolves_aliases_explicitly() {
+    let mut config = directory_editable(&[
+        ("/cfg/01-log.json", r#"{"log":{"logLevel":"none","loglevel":"info","future":{"keep":true}}}"#),
+        ("/cfg/02-outbounds.json", r#"{"outbounds":[{"protocol":"vless","streamSettings":{"network":"xdrive","xdriveSettings":{"secrets":["oauth-client","oauth-token"]}}}]}"#),
+    ]);
+    let original = config.clone();
+    let settings = config.log_settings();
+    let error = update_log_settings(&mut config, UpdateLogSettingsRequest { settings }).unwrap_err();
+    assert_eq!(error.kind(), ConfigModifyErrorKind::UnsupportedLogValue);
+    assert_eq!(config, original);
+
+    let mut settings = config.log_settings();
+    settings.log_level = super::log_settings::LogLevel::None;
+    settings.replace_log_level_keys = true;
+    let outcome = update_log_settings(&mut config, UpdateLogSettingsRequest { settings }).unwrap();
+    assert_eq!(outcome.source_file, "/cfg/01-log.json");
+    let root = &config.file_roots()["/cfg/01-log.json"];
+    assert_eq!(root["log"]["logLevel"], "none");
+    assert!(root["log"].get("loglevel").is_none());
+    assert_eq!(root["log"]["future"]["keep"], true);
+    assert_eq!(config.file_roots()["/cfg/02-outbounds.json"], original.file_roots()["/cfg/02-outbounds.json"]);
+    let view = crate::xray::logs::log_config_view(config.sections().log());
+    assert_eq!(view.access, crate::xray::logs::XrayLogDestination::Disabled);
+    assert_eq!(view.error, crate::xray::logs::XrayLogDestination::Disabled);
 }
 
 #[test]

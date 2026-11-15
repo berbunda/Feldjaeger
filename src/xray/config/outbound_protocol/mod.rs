@@ -27,6 +27,7 @@ mod trojan;
 mod vless;
 pub use freedom::{
     FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS, FREEDOM_FINAL_RULE_NETWORKS,
+    FREEDOM_FINAL_RULE_LOG_LEVELS,
     FREEDOM_LEGACY_STRATEGY_KEYS, FREEDOM_PROXY_PROTOCOL_VERSIONS, FreedomFinalRuleDraft,
     FreedomSettingsDraft, LegacyDomainStrategyMigration, LegacyObfuscationMigration,
 };

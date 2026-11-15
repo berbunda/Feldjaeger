@@ -24,7 +24,7 @@ use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind
 pub const TLS_KNOWN_FINGERPRINTS: &[&str] = &[
     "chrome", "firefox", "safari", "ios", "android", "edge", "360", "qq", "random", "randomized",
     "randomizednoalpn", "unsafe", "hellofirefox_120", "hellofirefox_148", "hellochrome_120",
-    "hellochrome_131", "hellochrome_133", "helloios_13", "helloios_14", "helloedge_106",
+    "hellochrome_131", "hellochrome_133", "hellochrome_155", "helloios_13", "helloios_14", "helloedge_106",
     "hellosafari_26_3", "hello360_11_0", "helloqq_11_1", "hellogolang", "hellorandomized",
     "hellorandomizedalpn", "hellorandomizednoalpn", "hellofirefox_auto", "hellofirefox_55",
     "hellofirefox_56", "hellofirefox_63", "hellofirefox_65", "hellofirefox_99",
@@ -198,7 +198,7 @@ impl OutboundSecurityDraft {
 }
 
 /// Reads the security part of an outbound `streamSettings` object.
-pub(super) fn parse_outbound_security(stream: &Map<String, Value>) -> OutboundSecurityDraft {
+pub(crate) fn parse_outbound_security(stream: &Map<String, Value>) -> OutboundSecurityDraft {
     let mut draft = OutboundSecurityDraft::default();
     match stream.get("security") {
         None | Some(Value::Null) => {}
@@ -267,7 +267,7 @@ fn parse_reality_client(reality: &Map<String, Value>) -> RealityClientDraft {
 }
 
 /// Validates the selected security form like the client branch of the core's `Build()`.
-pub(super) fn validate_outbound_security(draft: &OutboundSecurityDraft) -> ConfigModifyResult<()> {
+pub(crate) fn validate_outbound_security(draft: &OutboundSecurityDraft) -> ConfigModifyResult<()> {
     match draft.mode {
         _ if !draft.is_editable() => Ok(()),
         InboundSecurityMode::None => Ok(()),
@@ -361,7 +361,7 @@ fn validate_fingerprint(object: &str, value: &str, refused: &[&str]) -> ConfigMo
 
 /// Writes the security part into `stream`; an unknown wire `security` leaves every security key
 /// as it is. Validate first ([`validate_outbound_security`]).
-pub(super) fn apply_outbound_security(stream: &mut Map<String, Value>, draft: &OutboundSecurityDraft) {
+pub(crate) fn apply_outbound_security(stream: &mut Map<String, Value>, draft: &OutboundSecurityDraft) {
     if !draft.is_editable() {
         return;
     }
@@ -485,6 +485,24 @@ mod tests {
     }
 
     const PUBLIC_KEY: &str = "Z84J2IelR9ch3k8VtlVhhs5ycBUlXA7wHBWcBrjqnAw";
+
+    #[test]
+    fn chrome155_validates_and_preserves_tls_and_reality_settings() {
+        for security in ["tls", "reality"] {
+            let key = format!("{security}Settings");
+            let mut s = stream(json!({"security": security, key.clone(): {
+                "fingerprint": "hellochrome_155", "serverName": "example.com",
+                "publicKey": PUBLIC_KEY, "future": {"preserve": true}
+            }}));
+            // REALITY's existing writer explicitly emits the default shortId.
+            if security == "reality" { s[&key]["shortId"] = json!(""); }
+            let before = s.clone();
+            let draft = parse_outbound_security(&s);
+            assert!(validate_outbound_security(&draft).is_ok());
+            apply_outbound_security(&mut s, &draft);
+            assert_eq!(s, before);
+        }
+    }
 
     #[test]
     fn tls_client_round_trips_and_keeps_extras() {

@@ -12,8 +12,16 @@ use serde_json::{Map, Value};
 use super::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
 use super::sourced_section::SourcedSection;
 
-/// Known JSON keys inside the `log` object.
-const KNOWN_KEYS: &[&str] = &["access", "error", "loglevel", "dnsLog", "maskAddress"];
+/// Finds every spelling accepted by Go's case-insensitive LogLevel field decoder.
+/// Multiple aliases are ambiguous: the original JSON order is no longer available here.
+pub(crate) fn log_level_fields(value: &Value) -> Vec<(&str, &Value)> {
+    value.as_object()
+        .into_iter()
+        .flat_map(|object| object.iter())
+        .filter(|(key, _)| key.eq_ignore_ascii_case("logLevel"))
+        .map(|(key, value)| (key.as_str(), value))
+        .collect()
+}
 
 /// Access / error log destination for editing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,14 +163,14 @@ impl LogLevel {
         }
     }
 
-    fn write_to(&self, object: &mut Map<String, Value>) {
+    fn write_to(&self, object: &mut Map<String, Value>, key: &str) {
         match self {
             Self::Unknown(raw) => {
-                object.insert("loglevel".to_owned(), Value::String(raw.clone()));
+                object.insert(key.to_owned(), Value::String(raw.clone()));
             }
             other => {
                 object.insert(
-                    "loglevel".to_owned(),
+                    key.to_owned(),
                     Value::String(other.as_str().to_owned()),
                 );
             }
@@ -267,6 +275,10 @@ pub struct LogSettings {
     pub error: LogOutput,
     /// Error log level (`loglevel`).
     pub log_level: LogLevel,
+    /// Loaded spellings of `logLevel`; multiple keys require explicit resolution.
+    pub log_level_keys: Vec<String>,
+    /// Explicit consent to replace multiple loaded aliases with one `logLevel` key on Save.
+    pub replace_log_level_keys: bool,
     /// Whether DNS query logging is enabled (`dnsLog`).
     pub dns_log: bool,
     /// IP address masking (`maskAddress`).
@@ -291,6 +303,8 @@ impl LogSettings {
             access: LogOutput::Disabled,
             error: LogOutput::Stdout,
             log_level: LogLevel::default_effective(),
+            log_level_keys: Vec::new(),
+            replace_log_level_keys: false,
             dns_log: false,
             mask_address: MaskAddress::Disabled,
             section_present: false,
@@ -328,7 +342,19 @@ pub fn log_settings_from_section(section: Option<&SourcedSection<Value>>) -> Log
 
     let access = LogOutput::parse(value.get("access"));
     let error = LogOutput::parse(value.get("error"));
-    let log_level = LogLevel::parse(value.get("loglevel"));
+    let level_fields = log_level_fields(value);
+    let log_level = if level_fields.len() > 1 {
+        warnings.push(
+            "Multiple log level keys. Choose a level and explicitly replace the aliases in \
+             Log Settings before saving.".to_owned(),
+        );
+        LogLevel::Unknown("multiple log level keys".to_owned())
+    } else {
+        LogLevel::parse(level_fields.first().map(|(_, value)| *value))
+    };
+    let log_level_keys = level_fields.iter()
+        .map(|(key, _)| (*key).to_owned())
+        .collect();
     let dns_log = parse_dns_log(value.get("dnsLog"), &mut warnings);
     let mask_address = MaskAddress::parse(value.get("maskAddress"));
 
@@ -356,6 +382,8 @@ pub fn log_settings_from_section(section: Option<&SourcedSection<Value>>) -> Log
         access,
         error,
         log_level,
+        log_level_keys,
+        replace_log_level_keys: false,
         dns_log,
         mask_address,
         section_present: true,
@@ -366,6 +394,18 @@ pub fn log_settings_from_section(section: Option<&SourcedSection<Value>>) -> Log
 
 /// Applies typed settings onto a `log` JSON object, preserving unknown keys.
 pub fn apply_log_settings_to_value(target: &mut Value, settings: &LogSettings) -> ConfigModifyResult<()> {
+    validate_log_settings(settings)?;
+    let fields = log_level_fields(target);
+    validate_log_level_aliases(fields.len(), settings)?;
+    let level_key = if fields.len() == 1 {
+        fields[0].0.to_owned()
+    } else {
+        "logLevel".to_owned()
+    };
+    // Preserve the spelling and raw value (including null / unknown JSON) when unchanged.
+    let level_unchanged = fields.len() == 1
+        && LogLevel::parse(Some(fields[0].1)) == settings.log_level;
+    let level_keys: Vec<String> = fields.iter().map(|(key, _)| (*key).to_owned()).collect();
     let object = match target {
         Value::Object(map) => map,
         Value::Null => {
@@ -382,12 +422,17 @@ pub fn apply_log_settings_to_value(target: &mut Value, settings: &LogSettings) -
 
     settings.access.write_to(object, "access");
     settings.error.write_to(object, "error");
-    settings.log_level.write_to(object);
+    if !level_unchanged {
+        if level_keys.len() > 1 {
+            for key in level_keys {
+                object.remove(&key);
+            }
+        }
+        settings.log_level.write_to(object, &level_key);
+    }
     object.insert("dnsLog".to_owned(), Value::Bool(settings.dns_log));
     settings.mask_address.write_to(object);
 
-    // Drop accidental non-object pollution is already handled; unknown keys stay.
-    let _ = KNOWN_KEYS;
     Ok(())
 }
 
@@ -401,6 +446,9 @@ pub fn log_settings_to_new_value(settings: &LogSettings) -> Value {
 /// Human-readable change lines for the save confirmation summary.
 pub fn log_settings_change_summary(before: &LogSettings, after: &LogSettings) -> Vec<String> {
     let mut lines = Vec::new();
+    if before.log_level_keys.len() > 1 && after.replace_log_level_keys {
+        lines.push(format!("Replace log level keys: {} → logLevel", before.log_level_keys.join(", ")));
+    }
 
     if before.access != after.access {
         lines.push(format!(
@@ -445,9 +493,23 @@ pub fn log_settings_change_summary(before: &LogSettings, after: &LogSettings) ->
 
 /// Validates draft settings before they are written remotely.
 pub fn validate_log_settings(settings: &LogSettings) -> ConfigModifyResult<()> {
+    validate_log_level_aliases(settings.log_level_keys.len(), settings)?;
     validate_output_path(&settings.access, "access")?;
     validate_output_path(&settings.error, "error")?;
     validate_mask_for_save(&settings.mask_address)?;
+    Ok(())
+}
+
+fn validate_log_level_aliases(count: usize, settings: &LogSettings) -> ConfigModifyResult<()> {
+    if count > 1
+        && (!settings.replace_log_level_keys || matches!(settings.log_level, LogLevel::Unknown(_)))
+    {
+        return Err(ConfigModifyError::new(
+            ConfigModifyErrorKind::UnsupportedLogValue,
+            "Multiple log level keys: choose a supported Log level and select \
+             Replace log level keys with logLevel before saving.".to_owned(),
+        ));
+    }
     Ok(())
 }
 
@@ -571,6 +633,86 @@ mod tests {
 
     fn section(value: Value) -> SourcedSection<Value> {
         SourcedSection::new("/etc/xray/config.json", value)
+    }
+
+    #[test]
+    fn level_aliases_preserve_spelling_and_unedited_raw_values() {
+        for key in ["logLevel", "loglevel", "LOGLEVEL"] {
+            for raw in [json!(" NONE "), json!("future-level"), Value::Null, json!({"future": 1})] {
+                let mut value = json!({key: raw, "future": [1, 2]});
+                let mut settings = log_settings_from_section(Some(&section(value.clone())));
+                settings.dns_log = true;
+                apply_log_settings_to_value(&mut value, &settings).unwrap();
+                assert_eq!(value[key], raw);
+                assert_eq!(log_level_fields(&value).len(), 1);
+                assert_eq!(value["future"], json!([1, 2]));
+                settings.log_level = LogLevel::Info;
+                apply_log_settings_to_value(&mut value, &settings).unwrap();
+                assert_eq!(value[key], "info");
+                assert_eq!(log_level_fields(&value).len(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn alias_resolution_requires_consent_and_a_selected_level_before_any_mutation() {
+        for second in ["info", "none"] {
+            let mut value = json!({"logLevel": "none", "loglevel": second, "future": 7});
+            let original = value.clone();
+            let mut settings = log_settings_from_section(Some(&section(value.clone())));
+            assert!(settings.has_unknown_values());
+            assert!(apply_log_settings_to_value(&mut value, &settings).is_err());
+            assert_eq!(value, original);
+            settings.replace_log_level_keys = true;
+            assert!(apply_log_settings_to_value(&mut value, &settings).is_err());
+            settings.log_level = LogLevel::Error;
+            settings.replace_log_level_keys = false;
+            assert!(apply_log_settings_to_value(&mut value, &settings).is_err());
+            assert_eq!(value, original);
+            settings.replace_log_level_keys = true;
+            assert!(log_settings_change_summary(&log_settings_from_section(Some(&section(original))), &settings)
+                .iter().any(|line| line.contains("loglevel") && line.contains("logLevel")));
+            apply_log_settings_to_value(&mut value, &settings).unwrap();
+            assert_eq!(value["logLevel"], "error");
+            assert!(value.get("loglevel").is_none());
+            assert_eq!(value["future"], 7);
+        }
+    }
+
+    #[test]
+    fn writer_checks_actual_target_aliases_even_without_draft_metadata() {
+        let mut value = json!({"logLevel": "none", "loglevel": "info"});
+        let original = value.clone();
+        assert!(apply_log_settings_to_value(&mut value, &LogSettings::defaults()).is_err());
+        assert_eq!(value, original);
+    }
+
+    #[test]
+    fn generated_log_settings_pass_local_xray_validation() {
+        let Some(binary) = crate::xray::local_xray::local_xray_bin() else {
+            eprintln!("no local Xray — skipping Log Settings parity check");
+            return;
+        };
+        let directory = std::env::temp_dir().join(format!("feldjaeger-log-parity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.json");
+        let mut failures = Vec::new();
+        for mut log in [json!({}), json!({"loglevel": "none"}), json!({"LOGLEVEL": "info"}),
+            json!({"logLevel": "none", "loglevel": "info"})] {
+            let mut settings = log_settings_from_section(Some(&section(log.clone())));
+            settings.log_level = LogLevel::None;
+            settings.replace_log_level_keys = settings.log_level_keys.len() > 1;
+            apply_log_settings_to_value(&mut log, &settings).unwrap();
+            let contents = serde_json::to_vec(&json!({"log": log})).unwrap();
+            std::fs::write(&path, contents).unwrap();
+            let output = std::process::Command::new(&binary).args(["run", "-test", "-c"])
+                .arg(&path).output().unwrap();
+            if !output.status.success() {
+                failures.push(settings.log_level_keys);
+            }
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
+        assert!(failures.is_empty(), "core refused generated log settings: {failures:?}");
     }
 
     #[test]
@@ -726,7 +868,7 @@ mod tests {
         let value = log_settings_to_new_value(&LogSettings::defaults());
         assert_eq!(value["access"], json!("none"));
         assert!(value.get("error").is_none());
-        assert_eq!(value["loglevel"], json!("warning"));
+        assert_eq!(value["logLevel"], json!("warning"));
     }
 
     #[test]
@@ -740,6 +882,8 @@ mod tests {
             access: LogOutput::File("/var/log/xray/access.log".to_owned()),
             error: LogOutput::Stdout,
             log_level: LogLevel::Info,
+            log_level_keys: vec!["loglevel".to_owned()],
+            replace_log_level_keys: false,
             dns_log: true,
             mask_address: MaskAddress::Half,
             section_present: true,

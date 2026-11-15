@@ -441,7 +441,7 @@ pub struct DuplicateInboundRequest {
 
 /// Request to replace an inbound's entire JSON object wholesale (Roadmap §3:125 raw JSON
 /// escape hatch — any protocol, including ones with no structured editor).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReplaceInboundRawJsonRequest {
     /// Merged inbound index.
     pub inbound_index: usize,
@@ -451,8 +451,16 @@ pub struct ReplaceInboundRawJsonRequest {
     pub new_value: Value,
 }
 
+impl std::fmt::Debug for ReplaceInboundRawJsonRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplaceInboundRawJsonRequest")
+            .field("inbound_index", &self.inbound_index)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Result of a successful in-memory modification before remote write.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ModifyConfigOutcome {
     /// Absolute/relative path of the file that must be backed up and rewritten.
     pub source_file: String,
@@ -460,6 +468,16 @@ pub struct ModifyConfigOutcome {
     pub serialized: Vec<u8>,
     /// Serialized JSON bytes for that file before mutation (conflict detection).
     pub original_serialized: Vec<u8>,
+}
+
+impl std::fmt::Debug for ModifyConfigOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModifyConfigOutcome")
+            .field("source_file", &self.source_file)
+            .field("serialized_bytes", &self.serialized.len())
+            .field("original_bytes", &self.original_serialized.len())
+            .finish()
+    }
 }
 
 /// Alias retained for existing VLESS user call sites.
@@ -993,11 +1011,20 @@ pub fn compose_inbound_shell(
         apply_tunnel_stream(inbound, stream)?;
     } else {
         apply_inbound_stream(inbound, stream)?;
-        if let Some(security) = security {
+        if stream.method != Some(super::inbound_stream::StreamMethod::Xdrive) && let Some(security) = security {
+            let stored_tls=inbound.pointer("/streamSettings/tlsSettings").cloned();
+            let stored_reality=inbound.pointer("/streamSettings/realitySettings").cloned();
+            let retains_storage=inbound.pointer("/streamSettings/xdriveSettings").is_some();
             apply_inbound_security(inbound, security)?;
+            if retains_storage && let Some(settings)=inbound.get_mut("streamSettings").and_then(Value::as_object_mut){
+                if !settings.contains_key("tlsSettings") && let Some(value)=stored_tls{settings.insert("tlsSettings".to_owned(),value);}
+                if !settings.contains_key("realitySettings") && let Some(value)=stored_reality{settings.insert("realitySettings".to_owned(),value);}
+            }
         }
         // Wave C2: strip fallbacks when not TCP+TLS/Reality; else patch ALPN.
-        let _ = reconcile_inbound_fallbacks(inbound)?;
+        if stream.method != Some(super::inbound_stream::StreamMethod::Xdrive) {
+            let _ = reconcile_inbound_fallbacks(inbound)?;
+        }
     }
 
     apply_inbound_sniffing(inbound, sniffing)
@@ -1886,7 +1913,7 @@ pub fn remove_outbound(
 
 /// Request to replace an outbound's entire JSON object wholesale (Roadmap §3:125 raw JSON
 /// escape hatch — any protocol, including ones with no structured editor).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ReplaceOutboundRawJsonRequest {
     /// Merged outbound index.
     pub outbound_index: usize,
@@ -1894,6 +1921,14 @@ pub struct ReplaceOutboundRawJsonRequest {
     pub expected_fingerprint: Option<String>,
     /// The user-edited JSON, parsed. Must be a JSON object with a unique `tag`.
     pub new_value: Value,
+}
+
+impl std::fmt::Debug for ReplaceOutboundRawJsonRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReplaceOutboundRawJsonRequest")
+            .field("outbound_index", &self.outbound_index)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Replaces an outbound's entire JSON object wholesale (Roadmap §3:125 raw JSON escape hatch).

@@ -17,6 +17,7 @@ pub mod fakedns;
 pub mod geodata;
 pub mod geodata_settings;
 pub mod inbounds;
+pub(crate) mod xdrive;
 pub mod log_settings;
 pub mod logs;
 pub mod metrics;

@@ -28,6 +28,7 @@ pub fn transport_security_allowed(transport: &str, security: &str) -> bool {
     let t = matrix_transport(transport);
     let s = security.trim().to_ascii_lowercase();
     match t.as_str() {
+        "xdrive" => matches!(s.as_str(), "none" | "tls"),
         "tcp" | "xhttp" | "grpc" => matches!(s.as_str(), "none" | "tls" | "reality"),
         "websocket" | "httpupgrade" | "http" | "mkcp" => {
             matches!(s.as_str(), "none" | "tls")
@@ -68,6 +69,7 @@ pub fn g11_shadowsocks_tcp_only(protocol: &str, transport: &str) -> bool {
 }
 
 fn protocol_allows_editable_transport(protocol: &str, method: StreamMethod) -> bool {
+    if method == StreamMethod::Xdrive { return protocol.trim().eq_ignore_ascii_case("vless"); }
     match protocol.trim().to_ascii_lowercase().as_str() {
         "shadowsocks" | "tunnel" => method == StreamMethod::Tcp,
         "hysteria" => method == StreamMethod::Hysteria,
@@ -93,6 +95,7 @@ pub fn allowed_stream_methods(
 /// should coerce security (Wave C1: Reality → WebSocket).
 pub fn selectable_stream_methods(protocol: &str, vision_active: bool) -> Vec<StreamMethod> {
     [
+        StreamMethod::Xdrive,
         StreamMethod::Tcp,
         StreamMethod::Xhttp,
         StreamMethod::Grpc,
@@ -415,6 +418,7 @@ mod tests {
         assert_eq!(
             open,
             vec![
+                StreamMethod::Xdrive,
                 StreamMethod::Tcp,
                 StreamMethod::Xhttp,
                 StreamMethod::Grpc,
@@ -432,6 +436,7 @@ mod tests {
         assert_eq!(
             selectable_stream_methods("vless", false),
             vec![
+                StreamMethod::Xdrive,
                 StreamMethod::Tcp,
                 StreamMethod::Xhttp,
                 StreamMethod::Grpc,

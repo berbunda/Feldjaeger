@@ -10,8 +10,8 @@ use super::{HelpText, optional_string_combo};
 use crate::app::{
     ApplicationService, BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS,
     DnsRuleDraft, FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS,
-    FREEDOM_FINAL_RULE_NETWORKS, FREEDOM_PROXY_PROTOCOL_VERSIONS,
-    FreedomFinalRuleDraft, MISSING_FIELD, MUX_CONCURRENCY_EFFECTIVE_MAX,
+    FREEDOM_FINAL_RULE_NETWORKS, FREEDOM_FINAL_RULE_LOG_LEVELS, FREEDOM_PROXY_PROTOCOL_VERSIONS,
+    FreedomFinalRuleDraft, MISSING_FIELD,
     HYSTERIA_OUTBOUND_VERSION, MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX, MUX_XUDP_PROXY_UDP443_VALUES,
     OutboundKind,
     OutboundMux, OutboundSettingsDraft, OutboundsPageState, OutboundsSortColumn,
@@ -89,9 +89,10 @@ const HELP_FREEDOM_FINAL_RULES: HelpText = HelpText::new(
      (список Xray-core v26.10.29); чтобы до них достучаться, добавьте правило allow.",
 );
 const HELP_FINAL_RULE_ACTION: HelpText = HelpText::new(
-    "allow — let the connection through; block — hold it open for blockDelay seconds, then \
-     close it.",
-    "allow — пропустить подключение; block — удерживать его blockDelay секунд, затем закрыть.",
+    "allow — let the connection through; block — hold it open for delay seconds, then \
+     close it. delay, logLevel and the legacy blockDelay are only supported for block.",
+    "allow — пропустить подключение; block — удерживать его delay секунд, затем закрыть. \
+     delay, logLevel и прежний blockDelay допустимы только для block.",
 );
 const HELP_FINAL_RULE_NETWORK: HelpText = HelpText::new(
     "tcp, udp or tcp,udp; (any) = every network.",
@@ -104,9 +105,21 @@ const HELP_FINAL_RULE_PORT: HelpText = HelpText::new(
 );
 const HELP_FINAL_RULE_BLOCK_DELAY: HelpText = HelpText::new(
     "Seconds a blocked connection is held open before it is closed, a number or a range such as \
-     30-90; empty = 30-90.",
+     30-90; empty = 30-90. Since v26.11.9 the key is delay. A legacy blockDelay takes \
+     precedence when both exist; it is preserved until explicit migration. Only for block.",
     "Сколько секунд заблокированное подключение удерживается перед закрытием, число или диапазон \
-     вроде 30-90; пусто — 30-90.",
+     вроде 30-90; пусто — 30-90. С v26.11.9 ключ называется delay. Старый blockDelay \
+     имеет приоритет, когда заданы оба; он сохраняется до явной миграции. Только для block.",
+);
+const HELP_FINAL_RULE_LOG_LEVEL: HelpText = HelpText::new(
+    "logLevel — severity of messages about blocked connections (v26.11.9+). \
+     Unset or empty = info; none suppresses those messages. Only for block rules. \
+     Older cores ignore this field. The top-level log.logLevel still filters these severities. \
+     This does not change Feldjaeger application logging.",
+    "logLevel — уровень сообщений о заблокированных соединениях (v26.11.9+). \
+     Пусто или отсутствует — info; none выключает эти сообщения. Только для block. \
+     Старое ядро игнорирует поле. Общий log.logLevel по-прежнему фильтрует эти уровни. \
+     Журнал приложения Feldjaeger не меняется.",
 );
 const HELP_FINAL_RULE_IP: HelpText = HelpText::new(
     "Destination addresses in routing syntax, one per line: a CIDR (10.0.0.0/8) or geoip:… \
@@ -251,22 +264,26 @@ const HELP_MUX_ENABLED: HelpText = HelpText::new(
      xudpProxyUDP443 всё равно проверяется при загрузке конфигурации.",
 );
 const HELP_MUX_CONCURRENCY: HelpText = HelpText::new(
-    "How many TCP connections share one Mux connection. Empty or 0 = 8; from 1 to 128 — more acts \
-     as 128 (a connection is reused at most 128 times); -1 = TCP is not carried by Mux (only UDP \
-     via XUDP, when xudpConcurrency is set). Must be a whole number from -32768 to 32767, or \
-     Xray does not load the config.",
-    "Сколько TCP-соединений делят одно Mux-соединение. Пусто или 0 — 8; от 1 до 128 — большее \
-     значение работает как 128 (соединение переиспользуется не больше 128 раз); -1 — TCP не идёт \
-     через Mux (только UDP через XUDP, если задан xudpConcurrency). Целое число от -32768 до \
-     32767, иначе Xray не загрузит конфигурацию.",
+    "TCP streams sharing one Mux connection. Before v26.11.9: empty/0 = 8, reuse limit 128. \
+     Since v26.11.9: 0 through 128 (also empty) becomes 128, reuse limit 1024. Larger positive \
+     values retain their configured MaxConcurrency but cannot exceed the reuse limit in practice. \
+     Negative = TCP is not carried by Mux. Whole int16 (-32768 to 32767) required. \
+     Effective values below follow Discovery; the configured number is never rewritten.",
+    "TCP-потоки в одном Mux-соединении. До v26.11.9: пусто/0 — 8, лимит использований 128. \
+     С v26.11.9: 0–128 (и пустое поле) становится 128, лимит использований 1024. У больших \
+     положительных значений MaxConcurrency сохраняется, но на практике ограничен числом \
+     использований. Отрицательное значение — TCP не идёт через Mux. Нужен int16 (-32768–32767). \
+     Действующие значения ниже рассчитаны по Discovery; число в конфигурации не переписывается.",
 );
 const HELP_MUX_XUDP_CONCURRENCY: HelpText = HelpText::new(
     "UDP over Mux. Empty or 0 = UDP rides the same Mux connections as TCP; 1 to 1024 = a separate \
      XUDP tunnel with that many UDP sessions per connection; -1 = UDP is not carried by Mux and \
-     uses the protocol's own UDP (UDP over TCP for VLESS).",
+     uses the protocol's own UDP (UDP over TCP for VLESS). Positive concurrency is also limited \
+     by connection reuse: 128 before v26.11.9, 1024 since v26.11.9.",
     "UDP через Mux. Пусто или 0 — UDP идёт по тем же Mux-соединениям, что и TCP; от 1 до 1024 — \
      отдельный туннель XUDP с таким числом UDP-сессий на соединение; -1 — UDP не идёт через Mux, \
-     а использует собственный UDP протокола (для VLESS — UDP поверх TCP).",
+     а использует собственный UDP протокола (для VLESS — UDP поверх TCP). Положительное число \
+     также ограничено лимитом использований: 128 до v26.11.9, 1024 с v26.11.9.",
 );
 const HELP_MUX_XUDP_PROXY_UDP443: HelpText = HelpText::new(
     "UDP to port 443 (QUIC) while Mux is on. reject (default, empty) — refused, browsers fall back \
@@ -391,6 +408,18 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     super::show_help_dialog(ui);
 
     ui.heading("Outbounds");
+    ui.add(
+        egui::Label::new(
+            RichText::new(
+                "Note: The first outbound in configuration order is the default for traffic \
+                 that does not match a routing rule. To let this traffic through, use a \
+                 forwarding outbound such as Direct Connection (freedom) first; blackhole \
+                 would block it.",
+            )
+            .color(Color32::RED),
+        )
+        .wrap(),
+    );
     ui.add_space(8.0);
 
     let model = service.outbounds_page_model();
@@ -1336,6 +1365,7 @@ fn show_outbound_general_edit(ui: &mut Ui, service: &mut ApplicationService, is_
 /// Mux section (Roadmap §4.2): the full editor on proxy outbounds; elsewhere — and for a `mux`
 /// the core cannot load — only a "Remove mux" for one found on disk.
 fn show_outbound_mux_edit(ui: &mut Ui, service: &mut ApplicationService, protocol: &str) {
+    let behavior = service.outbound_mux_behavior();
     // Computing warnings borrows the service immutably, so before the mutable session borrow.
     let mux_warnings: Vec<_> = service
         .outbound_editor_warnings()
@@ -1388,7 +1418,8 @@ fn show_outbound_mux_edit(ui: &mut Ui, service: &mut ApplicationService, protoco
         .spacing([16.0, 6.0])
         .show(ui, |ui| {
             super::field_label(ui, "concurrency", HELP_MUX_CONCURRENCY);
-            ui.add(egui::TextEdit::singleline(&mut mux.concurrency).desired_width(80.0).hint_text("8"));
+            ui.add(egui::TextEdit::singleline(&mut mux.concurrency).desired_width(80.0)
+                .hint_text(behavior.default_concurrency.to_string()));
             ui.end_row();
 
             super::field_label(ui, "xudpConcurrency", HELP_MUX_XUDP_CONCURRENCY);
@@ -1405,12 +1436,24 @@ fn show_outbound_mux_edit(ui: &mut Ui, service: &mut ApplicationService, protoco
         ui.label(RichText::new(message).size(12.0).color(Color32::from_rgb(220, 80, 80)));
     }
     let number = |text: &str| text.trim().parse::<i64>().ok();
-    if number(&mux.concurrency).is_some_and(|value| value > MUX_CONCURRENCY_EFFECTIVE_MAX) {
-        ui.label(
-            RichText::new(format!("concurrency above {MUX_CONCURRENCY_EFFECTIVE_MAX} acts as {MUX_CONCURRENCY_EFFECTIVE_MAX}."))
-                .size(12.0)
-                .color(Color32::from_rgb(210, 170, 40)),
-        );
+    let tcp = match behavior.effective_concurrency {
+        Some(value) if value < 0 => "disabled".to_owned(),
+        Some(value) => value.to_string(),
+        None => "invalid".to_owned(),
+    };
+    let udp = match behavior.effective_xudp_concurrency {
+        Some(value) if value < 0 => "protocol UDP".to_owned(),
+        Some(0) => "shared TCP Mux".to_owned(),
+        Some(value) => value.to_string(),
+        None => "invalid".to_owned(),
+    };
+    ui.label(RichText::new(format!(
+        "When enabled: effective TCP concurrency {tcp}; XUDP {udp}; connection reuse limit {}.",
+        behavior.connection_reuse_limit,
+    )).size(12.0));
+    if !behavior.version_known {
+        ui.label(RichText::new("Xray version unknown: assuming v26.11.9+ Mux defaults.")
+            .size(12.0).color(Color32::from_rgb(210, 170, 40)));
     }
     if number(&mux.xudp_concurrency).is_some_and(|value| value > MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX) {
         ui.label(
@@ -1551,7 +1594,16 @@ fn show_freedom_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {
             .color(Color32::from_rgb(210, 170, 40)),
         );
     } else {
-        show_freedom_final_rules_edit(ui, &mut draft.final_rules);
+        let action = show_freedom_final_rules_edit(ui, &mut draft.final_rules);
+        if let Some(action) = action {
+            let result = match action {
+                FinalRuleAction::MigrateDelay(index) => service.migrate_outbound_freedom_final_rule_delay(index),
+                FinalRuleAction::RemoveBlockFields(index) => service.remove_outbound_freedom_final_rule_block_fields(index),
+            };
+            match result {
+                Ok(message) | Err(message) => service.show_status_message(message),
+            }
+        }
     }
 }
 
@@ -1592,7 +1644,13 @@ pub(super) fn show_outbound_compatibility_warnings(ui: &mut Ui, warnings: &[Comp
 
 /// Ordered `settings.finalRules[]` editor (Add/Remove/Move up/down; mirrors the DNS `rules[]`
 /// editor).
-fn show_freedom_final_rules_edit(ui: &mut Ui, rules: &mut Vec<FreedomFinalRuleDraft>) {
+enum FinalRuleAction {
+    MigrateDelay(usize),
+    RemoveBlockFields(usize),
+}
+
+fn show_freedom_final_rules_edit(ui: &mut Ui, rules: &mut Vec<FreedomFinalRuleDraft>) -> Option<FinalRuleAction> {
+    let mut action = None;
     let mut remove_idx: Option<usize> = None;
     let mut move_up_idx: Option<usize> = None;
     let mut move_down_idx: Option<usize> = None;
@@ -1651,13 +1709,42 @@ fn show_freedom_final_rules_edit(ui: &mut Ui, rules: &mut Vec<FreedomFinalRuleDr
                     ui.text_edit_singleline(&mut rule.port.text);
                     ui.end_row();
 
-                    super::field_label(ui, "blockDelay", HELP_FINAL_RULE_BLOCK_DELAY);
-                    ui.add(
-                        egui::TextEdit::singleline(&mut rule.block_delay.text)
+                    let block = rule.action.eq_ignore_ascii_case("block");
+                    super::field_label(ui, "delay", HELP_FINAL_RULE_BLOCK_DELAY);
+                    ui.add_enabled(block && !rule.has_legacy_block_delay(),
+                        egui::TextEdit::singleline(&mut rule.delay.text)
                             .hint_text(FREEDOM_DEFAULT_BLOCK_DELAY),
                     );
                     ui.end_row();
+
+                    super::field_label(ui, "logLevel", HELP_FINAL_RULE_LOG_LEVEL);
+                    ui.add_enabled_ui(block, |ui| {
+                        egui::ComboBox::from_id_salt(("freedom_final_rule_log_level", idx))
+                            .selected_text(if rule.log_level.is_empty() { "(unset — info)" } else { &rule.log_level })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut rule.log_level, String::new(), "(unset — info)");
+                                for &level in FREEDOM_FINAL_RULE_LOG_LEVELS {
+                                    ui.selectable_value(&mut rule.log_level, level.to_owned(), level);
+                                }
+                            });
+                    });
+                    ui.end_row();
                 });
+
+            if rule.has_legacy_block_delay() {
+                ui.label(RichText::new(format!(
+                    "Legacy blockDelay: {} (takes precedence over delay; preserved until migration).",
+                    rule.block_delay.text,
+                )).size(14.0).color(Color32::from_rgb(210, 170, 40)));
+                if rule.action.eq_ignore_ascii_case("block") && ui.button("Use blockDelay as delay; remove blockDelay")
+                    .on_hover_text("Replaces any existing delay with blockDelay, preserving the effective timeout. Draft only until Save.")
+                    .clicked() {
+                    action = Some(FinalRuleAction::MigrateDelay(idx));
+                }
+            }
+            if rule.has_block_fields() && ui.button("Remove delay, blockDelay and logLevel").clicked() {
+                action = Some(FinalRuleAction::RemoveBlockFields(idx));
+            }
 
             super::field_label(ui, "ip (one per line)", HELP_FINAL_RULE_IP);
             super::persistent_list_text_edit(ui, ("freedom_final_rule_ip", idx), &mut rule.ip, |ui, text| {
@@ -1668,16 +1755,20 @@ fn show_freedom_final_rules_edit(ui: &mut Ui, rules: &mut Vec<FreedomFinalRuleDr
 
     if let Some(idx) = remove_idx {
         rules.remove(idx);
+        action = None;
     } else if let Some(idx) = move_up_idx {
         rules.swap(idx, idx - 1);
+        action = None;
     } else if let Some(idx) = move_down_idx {
         rules.swap(idx, idx + 1);
+        action = None;
     }
 
     ui.add_space(4.0);
     if ui.button("Add final rule").clicked() {
         rules.push(FreedomFinalRuleDraft::new("block"));
     }
+    action
 }
 
 fn show_blackhole_settings_edit(ui: &mut Ui, service: &mut ApplicationService) {

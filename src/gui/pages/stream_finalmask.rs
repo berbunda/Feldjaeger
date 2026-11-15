@@ -796,6 +796,9 @@ pub(crate) fn show_quic_params_edit(
     });
     // What differs per transport (Roadmap §2.6 stage 3.3).
     let transport_note = match transport {
+        QuicTransport::XdriveH3 => {
+            "XDRIVE over HTTP/3: empty congestion = bbr; use bbr or reno. Brutal and force-brutal are rejected."
+        }
         QuicTransport::Hysteria => {
             "Empty congestion = brutal (bbr while brutalUp or the client's brutalDown is 0)."
         }

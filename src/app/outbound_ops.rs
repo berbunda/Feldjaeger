@@ -24,6 +24,8 @@ use crate::xray::{
 /// instead, a standalone action available for any protocol (Roadmap §2.4:99).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundEditorSession {
+    /// Per-session widget identity for masked storage forms.
+    pub xdrive_editor_id: uuid::Uuid,
     /// Outbound index in the merged list (`usize::MAX` for Add).
     pub outbound_index: usize,
     /// Identity + fingerprint for Shell Save; `None` for Add.

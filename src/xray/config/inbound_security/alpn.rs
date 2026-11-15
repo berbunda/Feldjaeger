@@ -62,6 +62,7 @@ pub const TLS_VERSION_PRESETS: &[&str] = &["1.0", "1.1", "1.2", "1.3"];
 /// uTLS fingerprint presets (+ free-text allowed in UI).
 pub const FINGERPRINT_PRESETS: &[&str] = &[
     "chrome",
+    "hellochrome_155",
     "firefox",
     "safari",
     "ios",

@@ -63,9 +63,10 @@ pub use security::{
     OutboundSecurityDraft, REALITY_REFUSED_FINGERPRINTS, RealityClientDraft, RealityPublicKeyField,
     TLS_KNOWN_FINGERPRINTS, TlsClientDraft,
 };
+pub(crate) use security::{apply_outbound_security, parse_outbound_security, validate_outbound_security};
 use security::{
-    append_extras, apply_outbound_security, bool_field, extras_without, insert_non_empty,
-    insert_true, parse_outbound_security, string_field, validate_outbound_security,
+    append_extras, bool_field, extras_without, insert_non_empty,
+    insert_true, string_field,
 };
 
 /// Default Hysteria transport `version` (the only one Xray-core accepts).
@@ -74,6 +75,8 @@ pub const HYSTERIA_TRANSPORT_VERSION: u64 = 2;
 /// Transports the outbound Stream editor writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboundTransport {
+    /// XDRIVE beta storage transport (VLESS only).
+    Xdrive,
     /// RAW (`tcp` / `raw`).
     Raw,
     /// XHTTP (`xhttp` / `splithttp`).
@@ -92,7 +95,8 @@ pub enum OutboundTransport {
 
 impl OutboundTransport {
     /// Every transport, in GUI order.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
+        Self::Xdrive,
         Self::Raw,
         Self::Xhttp,
         Self::Grpc,
@@ -105,6 +109,7 @@ impl OutboundTransport {
     /// Wire value written for a new transport (same spellings as the inbound editor).
     pub fn as_wire(self) -> &'static str {
         match self {
+            Self::Xdrive => "xdrive",
             Self::Raw => "tcp",
             Self::Xhttp => "xhttp",
             Self::Grpc => "grpc",
@@ -118,6 +123,7 @@ impl OutboundTransport {
     /// GUI label.
     pub fn label(self) -> &'static str {
         match self {
+            Self::Xdrive => "xdrive (beta)",
             Self::Raw => "raw / tcp",
             Self::Xhttp => "xhttp",
             Self::Grpc => "grpc",
@@ -131,6 +137,7 @@ impl OutboundTransport {
     /// Parses a wire value case-insensitively, like `TransportProtocol.Build()`.
     pub fn from_wire(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "xdrive" => Some(Self::Xdrive),
             "tcp" | "raw" => Some(Self::Raw),
             "xhttp" | "splithttp" => Some(Self::Xhttp),
             "grpc" => Some(Self::Grpc),
@@ -146,6 +153,7 @@ impl OutboundTransport {
     /// both are present).
     fn settings_keys(self) -> &'static [&'static str] {
         match self {
+            Self::Xdrive => &["xdriveSettings"],
             Self::Raw => &["rawSettings", "tcpSettings"],
             Self::Xhttp => &["xhttpSettings", "splithttpSettings"],
             Self::Grpc => &["grpcSettings"],
@@ -180,6 +188,7 @@ pub fn outbound_transports_for_protocol(protocol: &str) -> Vec<OutboundTransport
     OutboundTransport::ALL
         .into_iter()
         .filter(|transport| (*transport == OutboundTransport::Hysteria) == hysteria)
+        .filter(|transport| *transport != OutboundTransport::Xdrive || protocol.eq_ignore_ascii_case("vless"))
         .collect()
 }
 
@@ -273,6 +282,10 @@ impl Default for HysteriaClientSettings {
 /// Outbound Stream + Security draft.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboundStreamDraft {
+    /// Lossless XDRIVE storage settings, independent of the transport/security write flag.
+    pub xdrive: crate::xray::XdriveSettingsDraft,
+    /// True only after an explicit settings edit.
+    pub write_xdrive: bool,
     /// Selected transport; `None` with [`Self::other_transport`] = one this editor does not
     /// write (`masque`, `xdrive`, unknown) — then `streamSettings` stays untouched.
     pub transport: Option<OutboundTransport>,
@@ -333,6 +346,7 @@ pub struct OutboundStreamDraft {
 impl Default for OutboundStreamDraft {
     fn default() -> Self {
         Self {
+            xdrive: Default::default(), write_xdrive: false,
             transport: Some(OutboundTransport::Raw),
             other_transport: None,
             method_key: StreamMethodKey::Network,
@@ -405,6 +419,7 @@ impl OutboundStreamDraft {
     /// Hysteria, or XHTTP with TLS and ALPN exactly `["h3"]` (Roadmap §2.6 stage 3.3).
     pub fn quic_transport(&self) -> Option<QuicTransport> {
         match self.transport? {
+            OutboundTransport::Xdrive if self.security.mode == InboundSecurityMode::Tls && alpn_selects_http3(&self.security.tls.alpn) => Some(QuicTransport::XdriveH3),
             OutboundTransport::Hysteria => Some(QuicTransport::Hysteria),
             OutboundTransport::Xhttp
                 if self.security.is_editable()
@@ -493,6 +508,7 @@ pub fn parse_outbound_stream(outbound: &Value) -> OutboundStreamDraft {
         Some(_) => draft.sockopt_foreign = true,
     }
 
+    draft.xdrive = crate::xray::parse_xdrive_settings(stream.get("xdriveSettings"));
     // `StreamConfig.Build()`: `method`, when present, replaces `network`.
     let (wire_value, method_key) = match (stream.get("method"), stream.get("network")) {
         (Some(method), _) if !method.is_null() => (Some(method), StreamMethodKey::Method),
@@ -696,6 +712,7 @@ pub fn validate_outbound_stream(draft: &OutboundStreamDraft) -> ConfigModifyResu
         ));
     }
     match transport {
+        OutboundTransport::Xdrive => {},
         OutboundTransport::Raw => {}
         OutboundTransport::Xhttp => validate_xhttp_settings(&draft.xhttp)?,
         OutboundTransport::Grpc => {
@@ -801,10 +818,13 @@ fn validate_header_names(object: &str, headers: &[(String, String)]) -> ConfigMo
 /// the security keys are written, and — only when the transport changed — the other
 /// transports' `*Settings` objects are dropped (the core builds every one present).
 pub fn apply_outbound_stream(outbound: &mut Value, draft: &OutboundStreamDraft) -> ConfigModifyResult<()> {
+    if draft.write_xdrive {
+        crate::xray::validate_xdrive_settings(&draft.xdrive).map_err(|message| ConfigModifyError::new(ConfigModifyErrorKind::ValidationFailed, message))?;
+    }
     let transport = draft.transport.filter(|_| draft.write);
     let writes_finalmask = draft.writes_finalmask();
     let writes_sockopt = draft.sockopt_changed();
-    if transport.is_none() && !writes_finalmask && !writes_sockopt {
+    if transport.is_none() && !writes_finalmask && !writes_sockopt && !draft.write_xdrive {
         return Ok(());
     }
     // Everything is validated before the first mutation, so a rejected draft changes nothing.
@@ -815,7 +835,7 @@ pub fn apply_outbound_stream(outbound: &mut Value, draft: &OutboundStreamDraft) 
     if writes_sockopt {
         validate_outbound_sockopt(outbound, draft)?;
     }
-    if transport.is_none() && !writes_finalmask {
+    if transport.is_none() && !writes_finalmask && !draft.write_xdrive {
         return apply_outbound_sockopt(outbound, draft);
     }
 
@@ -829,8 +849,11 @@ pub fn apply_outbound_stream(outbound: &mut Value, draft: &OutboundStreamDraft) 
         ConfigModifyError::new(ConfigModifyErrorKind::ValidationFailed, "streamSettings must be a JSON object".to_owned())
     })?;
     let before = stream.clone();
-    if let Some(transport) = transport {
-        write_transport_and_security(stream, transport, draft);
+    if let Some(transport) = transport
+        && let Err(error)=write_transport_and_security(stream, transport, draft){*stream=before;return Err(error);
+    }
+    if draft.write_xdrive && let Some(value) = crate::xray::xdrive_settings_to_value(&draft.xdrive) {
+        stream.insert("xdriveSettings".to_owned(), value);
     }
     if writes_finalmask {
         write_finalmask(stream, draft);
@@ -1003,7 +1026,7 @@ fn write_transport_and_security(
     stream: &mut Map<String, Value>,
     transport: OutboundTransport,
     draft: &OutboundStreamDraft,
-) {
+) -> ConfigModifyResult<()> {
     let unchanged = transport == draft.disk_transport;
     let wire = match (&draft.disk_wire, unchanged) {
         (Some(disk), true) => disk.clone(),
@@ -1015,10 +1038,10 @@ fn write_transport_and_security(
     };
     stream.insert(method_key.to_owned(), Value::String(wire));
 
-    if !unchanged {
+    if !unchanged && transport != OutboundTransport::Xdrive && draft.disk_transport != OutboundTransport::Xdrive {
         for other in OutboundTransport::ALL {
             for key in other.settings_keys() {
-                stream.remove(*key);
+                if *key != "xdriveSettings" { stream.remove(*key); }
             }
         }
     }
@@ -1027,7 +1050,7 @@ fn write_transport_and_security(
         _ => transport.settings_keys()[0],
     };
     let settings = transport_settings_object(transport, draft);
-    match settings {
+    if transport != OutboundTransport::Xdrive { match settings {
         Some(object) => {
             stream.insert(settings_key.to_owned(), Value::Object(object));
         }
@@ -1036,7 +1059,41 @@ fn write_transport_and_security(
         }
     }
 
-    apply_outbound_security(stream, &draft.security);
+    }
+    if transport == OutboundTransport::Xdrive || stream.contains_key("xdriveSettings") { apply_storage_client_security(stream,&draft.security)?; }
+    else { apply_outbound_security(stream, &draft.security); }
+    Ok(())
+}
+
+/// Storage clients retain inactive security blocks; changing one field never deletes another mode.
+pub(crate) fn apply_storage_client_security(stream:&mut Map<String,Value>,security:&OutboundSecurityDraft)->ConfigModifyResult<()>{
+    if !security.is_editable(){return Ok(());}
+    let previous=parse_outbound_security(stream);
+    let mut baseline=previous.clone();baseline.mode=security.mode;baseline.unknown_wire=None;
+    let mut old=stream.clone();apply_outbound_security(&mut old,&baseline);
+    let mut new=stream.clone();apply_outbound_security(&mut new,security);
+    let key=match security.mode{InboundSecurityMode::Tls=>Some("tlsSettings"),InboundSecurityMode::Reality=>Some("realitySettings"),InboundSecurityMode::None=>None};
+    if let Some(key)=key {
+        if stream.get(key).is_some_and(|v|!v.is_object() && !v.is_null()){
+            return invalid("Storage security settings have an unsupported shape; edit Raw JSON first");
+        }
+        let old=old.get(key).and_then(Value::as_object).cloned().unwrap_or_default();
+        let new=new.get(key).and_then(Value::as_object).cloned().unwrap_or_default();
+        let mut merged=stream.get(key).and_then(Value::as_object).cloned().unwrap_or_default();
+        let mut edited=false;
+        for key in old.keys().chain(new.keys()) {
+            if old.get(key)!=new.get(key){
+                edited=true;
+                let matching:Vec<_>=merged.keys().filter(|stored|stored.eq_ignore_ascii_case(key)).cloned().collect();
+                if matching.len()>1{return invalid("Resolve duplicate storage security keys in Raw JSON before changing this field");}
+                let target=matching.first().unwrap_or(key);
+                match new.get(key){Some(value)=>{merged.insert(target.clone(),value.clone());},None=>{merged.remove(target);}}
+            }
+        }
+        if edited{stream.insert(key.to_owned(),Value::Object(merged));}
+    }
+    if previous.mode!=security.mode || previous.unknown_wire.is_some(){stream.insert("security".to_owned(),Value::String(security.mode.as_wire().to_owned()));}
+    Ok(())
 }
 
 /// The edited `finalmask` parts, keeping every other `finalmask` key (validated before; a
@@ -1062,6 +1119,7 @@ fn write_finalmask(stream: &mut Map<String, Value>, draft: &OutboundStreamDraft)
 /// preserved keys).
 fn transport_settings_object(transport: OutboundTransport, draft: &OutboundStreamDraft) -> Option<Map<String, Value>> {
     let object = match transport {
+        OutboundTransport::Xdrive => return None,
         OutboundTransport::Raw => {
             if draft.raw.extras.is_empty() {
                 return None;
@@ -1280,7 +1338,9 @@ mod tests {
     fn transports_per_protocol() {
         assert_eq!(outbound_transports_for_protocol("hysteria"), [OutboundTransport::Hysteria]);
         let vless = outbound_transports_for_protocol("VLESS");
-        assert_eq!(vless.len(), 6);
+        assert_eq!(vless.len(), 7);
+        assert!(vless.contains(&OutboundTransport::Xdrive));
+        assert!(!outbound_transports_for_protocol("trojan").contains(&OutboundTransport::Xdrive));
         assert!(!vless.contains(&OutboundTransport::Hysteria));
         assert!(outbound_protocol_has_transport("vless"));
         assert!(!outbound_protocol_has_transport("freedom"));

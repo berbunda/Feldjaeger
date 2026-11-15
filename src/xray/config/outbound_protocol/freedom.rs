@@ -50,10 +50,13 @@ pub const FREEDOM_FINAL_RULE_ACTIONS: &[&str] = &["allow", "block"];
 /// Documented `finalRules[].network` values (empty = key absent, matches every network).
 pub const FREEDOM_FINAL_RULE_NETWORKS: &[&str] = &["tcp", "udp", "tcp,udp"];
 
-/// Default `finalRules[].blockDelay` (seconds) applied by the core when the key is absent.
+/// Default `finalRules[].delay` (seconds), also used by the legacy `blockDelay` alias.
 pub const FREEDOM_DEFAULT_BLOCK_DELAY: &str = "30-90";
 
-const KNOWN_FINAL_RULE_KEYS: &[&str] = &["action", "network", "port", "ip", "blockDelay"];
+/// Supported `finalRules[].logLevel` values (empty / omitted means info).
+pub const FREEDOM_FINAL_RULE_LOG_LEVELS: &[&str] = &["none", "debug", "info", "warning", "error"];
+
+const KNOWN_FINAL_RULE_KEYS: &[&str] = &["action", "network", "port", "ip", "delay", "logLevel", "blockDelay"];
 
 /// JSON shape a list-like value (`NetworkList`, `StringList`) was read in, so that an untouched
 /// value is written back in the same shape. New values use the documented shape: a string for
@@ -84,6 +87,12 @@ pub struct FreedomFinalRuleDraft {
     /// `blockDelay` — `"30"` / `"30-90"` seconds (`Int32Range`); empty = key absent (core
     /// default [`FREEDOM_DEFAULT_BLOCK_DELAY`]).
     pub block_delay: RangeValue,
+    /// `delay` in seconds; available since v26.11.9. A legacy `blockDelay` takes precedence.
+    pub delay: RangeValue,
+    /// `logLevel` for blocked connections; empty = info. Raw spelling is preserved until edited.
+    pub log_level: String,
+    // Keep absent/null and raw number/string forms until the user edits or explicitly removes them.
+    original_block_fields: Map<String, Value>,
     /// Unknown rule keys, preserved verbatim.
     pub extras: Map<String, Value>,
 }
@@ -95,6 +104,61 @@ impl FreedomFinalRuleDraft {
             action: action.to_owned(),
             network_form: ListForm::Text,
             ..Self::default()
+        }
+    }
+
+    /// Whether a non-null legacy `blockDelay` is present in this draft.
+    pub fn has_legacy_block_delay(&self) -> bool {
+        self.range_value("blockDelay", &self.block_delay).is_some_and(|value| !value.is_null())
+    }
+
+    /// Whether block-only fields exist (including null keys that can be explicitly removed).
+    pub fn has_block_fields(&self) -> bool {
+        !self.original_block_fields.is_empty()
+            || !self.delay.text.is_empty() || !self.block_delay.text.is_empty()
+            || !self.log_level.is_empty()
+    }
+
+    /// Explicitly replaces `delay` with the effective legacy value and removes `blockDelay`.
+    /// No change is made on failure; the migration stays in the draft until Save.
+    pub fn migrate_block_delay(&mut self) -> Result<(), String> {
+        if !self.action.eq_ignore_ascii_case("block") {
+            return Err("delay is only supported for block rules; remove the block-only fields instead.".to_owned());
+        }
+        if !self.has_legacy_block_delay() || self.block_delay.bounds()?.is_none() {
+            return Err("No usable blockDelay to migrate.".to_owned());
+        }
+        self.delay = self.block_delay.clone();
+        self.block_delay = RangeValue::default();
+        self.original_block_fields.remove("blockDelay");
+        Ok(())
+    }
+
+    /// Explicitly removes `delay`, `blockDelay` and `logLevel`, leaving all other keys intact.
+    pub fn remove_block_fields(&mut self) {
+        self.delay = RangeValue::default();
+        self.block_delay = RangeValue::default();
+        self.log_level.clear();
+        self.original_block_fields.clear();
+    }
+
+    fn range_value(&self, key: &str, value: &RangeValue) -> Option<Value> {
+        let original = self.original_block_fields.get(key);
+        if RangeValue::parse(original).as_ref() == Some(value) {
+            original.cloned()
+        } else {
+            value.to_value()
+        }
+    }
+
+    fn log_level_value(&self) -> Option<Value> {
+        let original = self.original_block_fields.get("logLevel");
+        if original.and_then(Value::as_str).unwrap_or_default() == self.log_level {
+            original.cloned()
+        } else if self.log_level.is_empty() {
+            None
+        } else {
+            Some(Value::String(self.log_level.clone()))
         }
     }
 }
@@ -379,6 +443,20 @@ fn parse_final_rules(value: Option<&Value>) -> Option<Vec<FreedomFinalRuleDraft>
 
 fn parse_final_rule(value: &Value) -> Option<FreedomFinalRuleDraft> {
     let object = value.as_object()?;
+    // Go accepts case aliases too. Leave such objects on the lossless Raw JSON path
+    // rather than adding a second spelling whose precedence would depend on JSON order.
+    if object.keys().any(|key| ["delay", "blockDelay", "logLevel"].iter()
+        .any(|known| key.eq_ignore_ascii_case(known) && key.as_str() != *known)) {
+        return None;
+    }
+    let log_level = match object.get("logLevel") {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(text)) => text.clone(),
+        Some(_) => return None,
+    };
+    let original_block_fields = ["delay", "blockDelay", "logLevel"].into_iter()
+        .filter_map(|key| object.get(key).map(|value| (key.to_owned(), value.clone())))
+        .collect();
     let action = match object.get("action") {
         None | Some(Value::Null) => String::new(),
         Some(Value::String(text)) => text.trim().to_owned(),
@@ -402,6 +480,9 @@ fn parse_final_rule(value: &Value) -> Option<FreedomFinalRuleDraft> {
         ip,
         ip_form,
         block_delay: RangeValue::parse(object.get("blockDelay"))?,
+        delay: RangeValue::parse(object.get("delay"))?,
+        log_level,
+        original_block_fields,
         extras,
     })
 }
@@ -455,8 +536,14 @@ fn final_rule_to_value(rule: &FreedomFinalRuleDraft) -> Value {
     if let Some(ip) = string_list_to_value(&rule.ip, rule.ip_form) {
         object.insert("ip".to_owned(), ip);
     }
-    if let Some(block_delay) = rule.block_delay.to_value() {
-        object.insert("blockDelay".to_owned(), block_delay);
+    for (key, value) in [
+        ("delay", rule.range_value("delay", &rule.delay)),
+        ("blockDelay", rule.range_value("blockDelay", &rule.block_delay)),
+        ("logLevel", rule.log_level_value()),
+    ] {
+        if let Some(value) = value {
+            object.insert(key.to_owned(), value);
+        }
     }
     for (key, value) in &rule.extras {
         if !object.contains_key(key) {
@@ -529,7 +616,8 @@ fn validate_freedom_settings(draft: &FreedomSettingsDraft) -> ConfigModifyResult
 
 /// Mirrors `FreedomFinalRuleConfig.Build()` (`infra/conf/freedom.go`): `action` is matched
 /// case-insensitively, `ip` goes through `geodata.ParseIPRules` (CIDR/IP or a `geoip:` / `ext:`
-/// matcher), `port` is a `PortList`, `blockDelay` an `Int32Range` cast to unsigned seconds.
+/// matcher), `port` is a `PortList`, `delay` / `blockDelay` are `Int32Range` seconds.
+/// The editor keeps its existing non-negative timeout restriction; reading remains lossless.
 fn validate_final_rule(rule: &FreedomFinalRuleDraft) -> Result<(), String> {
     let action = rule.action.trim();
     if action.is_empty() {
@@ -547,13 +635,21 @@ fn validate_final_rule(rule: &FreedomFinalRuleDraft) -> Result<(), String> {
             return Err(format!("ip: \"{entry}\" is not an IP address or CIDR range"));
         }
     }
-    if let Some((from, _)) = rule
-        .block_delay
-        .bounds()
-        .map_err(|message| format!("blockDelay: {message}"))?
-        && from < 0
-    {
-        return Err("blockDelay: seconds must not be negative".to_owned());
+    for (key, range) in [("delay", &rule.delay), ("blockDelay", &rule.block_delay)] {
+        if let Some((from, _)) = range.bounds().map_err(|message| format!("{key}: {message}"))?
+            && from < 0 {
+            return Err(format!("{key}: seconds must not be negative"));
+        }
+    }
+    if !action.eq_ignore_ascii_case("block") {
+        let has_delay = [("delay", &rule.delay), ("blockDelay", &rule.block_delay)].into_iter()
+            .any(|(key, range)| rule.range_value(key, range).is_some_and(|value| !value.is_null()));
+        if has_delay || !rule.log_level.is_empty() {
+            return Err("delay, blockDelay and logLevel are only supported for block rules; use Remove block-only fields or edit Raw JSON.".to_owned());
+        }
+    } else if !rule.log_level.is_empty() && !FREEDOM_FINAL_RULE_LOG_LEVELS.iter()
+        .any(|known| known.eq_ignore_ascii_case(&rule.log_level)) {
+        return Err("logLevel: expected none, debug, info, warning or error".to_owned());
     }
     Ok(())
 }
@@ -750,7 +846,7 @@ mod tests {
         let rules = json!([
             {"action": "block", "network": "tcp,udp", "port": 25, "ip": ["10.0.0.0/8", "geoip:private"],
              "blockDelay": "30-90", "futureRuleKey": true},
-            {"action": "allow", "network": ["udp"], "port": "53,5353", "ip": "1.1.1.1,8.8.8.8", "blockDelay": 5},
+            {"action": "block", "network": ["udp"], "port": "53,5353", "ip": "1.1.1.1,8.8.8.8", "blockDelay": 5},
             {"action": "allow"}
         ]);
         let mut outbound = json!({"protocol": "freedom", "settings": {"finalRules": rules.clone()}});
@@ -760,6 +856,134 @@ mod tests {
         assert_eq!(draft.final_rules[1].ip, vec!["1.1.1.1", "8.8.8.8"]);
         apply_freedom_settings(&mut outbound, &draft).expect("apply");
         assert_eq!(outbound["settings"]["finalRules"], rules);
+    }
+
+    #[test]
+    fn final_rule_timing_fields_round_trip_without_normalization() {
+        for rule in [
+            json!({"action": "block", "delay": "003", "blockDelay": 7, "logLevel": "WARNING", "future": [1]}),
+            json!({"action": "block", "delay": null, "blockDelay": null, "logLevel": null}),
+            json!({"action": "allow", "delay": null, "logLevel": ""}),
+        ] {
+            let mut outbound = json!({"protocol": "freedom", "settings": {"finalRules": [rule.clone()]}});
+            let mut draft = parse(&outbound);
+            assert!(!draft.final_rules_foreign);
+            draft.redirect = ":443".to_owned();
+            apply_freedom_settings(&mut outbound, &draft).unwrap();
+            assert_eq!(outbound["settings"]["finalRules"][0], rule);
+        }
+    }
+
+    #[test]
+    fn explicit_timeout_migration_preserves_legacy_precedence_and_other_fields() {
+        let original = json!({"protocol": "freedom", "settings": {"finalRules": [
+            {"action": "block", "delay": 0, "blockDelay": "30-90", "logLevel": "WARNING", "future": {"keep": true}}
+        ]}});
+        let mut draft = parse(&original);
+        let mut unchanged = original.clone();
+        apply_freedom_settings(&mut unchanged, &draft).unwrap();
+        assert_eq!(unchanged, original);
+        draft.final_rules[0].migrate_block_delay().unwrap();
+        let migrated = draft.clone();
+        assert!(draft.final_rules[0].migrate_block_delay().is_err());
+        assert_eq!(draft, migrated);
+        let mut result = original;
+        apply_freedom_settings(&mut result, &draft).unwrap();
+        let rule = &result["settings"]["finalRules"][0];
+        assert_eq!(rule["delay"], "30-90");
+        assert!(rule.get("blockDelay").is_none());
+        assert_eq!(rule["logLevel"], "WARNING");
+        assert_eq!(rule["future"]["keep"], true);
+    }
+
+    #[test]
+    fn changing_action_never_implicitly_removes_block_fields() {
+        let mut outbound = json!({"protocol": "freedom", "settings": {"finalRules": [
+            {"action": "block", "delay": 5, "blockDelay": 9, "logLevel": "none", "future": true}
+        ]}});
+        let original = outbound.clone();
+        let mut draft = parse(&outbound);
+        draft.final_rules[0].action = "allow".to_owned();
+        assert!(apply_freedom_settings(&mut outbound, &draft).is_err());
+        assert_eq!(outbound, original);
+        let before = draft.clone();
+        assert!(draft.final_rules[0].migrate_block_delay().is_err());
+        assert_eq!(draft, before);
+        draft.final_rules[0].remove_block_fields();
+        apply_freedom_settings(&mut outbound, &draft).unwrap();
+        assert_eq!(outbound["settings"]["finalRules"][0], json!({"action": "allow", "future": true}));
+    }
+
+    #[test]
+    fn unsupported_timing_shapes_and_case_aliases_stay_on_raw_json_path() {
+        for rule in [json!({"action": "block", "delay": {"future": 1}}),
+            json!({"action": "block", "logLevel": 7}),
+            json!({"action": "block", "Delay": 7}),
+            json!({"action": "block", "loglevel": "info"})] {
+            let mut outbound = json!({"protocol": "freedom", "settings": {"finalRules": [rule.clone()]}});
+            let draft = parse(&outbound);
+            assert!(draft.final_rules_foreign);
+            apply_freedom_settings(&mut outbound, &draft).unwrap();
+            assert_eq!(outbound["settings"]["finalRules"][0], rule);
+        }
+    }
+
+    #[test]
+    fn final_rule_log_levels_and_allow_field_checks_match_latest_core() {
+        for level in ["", "none", "debug", "info", "warning", "error", "WARNING"] {
+            let rule = parse_final_rule(&json!({"action": "block", "logLevel": level})).unwrap();
+            assert!(validate_final_rule(&rule).is_ok());
+        }
+        for level in ["warn", "verbose", " INFO "] {
+            let rule = parse_final_rule(&json!({"action": "block", "logLevel": level})).unwrap();
+            assert!(validate_final_rule(&rule).is_err());
+        }
+        for field in ["delay", "blockDelay", "logLevel"] {
+            let value = if field == "logLevel" { json!("info") } else { json!(0) };
+            let rule = parse_final_rule(&json!({"action": "allow", field: value})).unwrap();
+            assert!(validate_final_rule(&rule).is_err());
+        }
+    }
+
+    #[test]
+    fn final_rule_parity_with_local_xray() {
+        use crate::xray::XrayCoreVersion;
+        let Some(binary) = crate::xray::local_xray::local_xray_bin() else {
+            eprintln!("no local Xray — skipping Freedom finalRules parity");
+            return;
+        };
+        let version = std::process::Command::new(&binary).arg("version").output().unwrap();
+        let version = XrayCoreVersion::parse(&String::from_utf8_lossy(&version.stdout)).unwrap();
+        let modern = version >= XrayCoreVersion::new(26, 11, 9);
+        let directory = std::env::temp_dir().join(format!("feldjaeger-finalrules-parity-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("config.json");
+        let mut failures = Vec::new();
+        let cases = [
+            (json!({"action": "block", "delay": "1-3", "logLevel": "debug"}), true),
+            (json!({"action": "block", "blockDelay": 1}), true),
+            (json!({"action": "block", "delay": 0, "blockDelay": "1"}), true),
+            (json!({"action": "block", "logLevel": "WARNING"}), true),
+            (json!({"action": "block", "logLevel": "none"}), true),
+            (json!({"action": "allow", "delay": null, "logLevel": ""}), true),
+            (json!({"action": "allow", "delay": 0}), false),
+            (json!({"action": "allow", "blockDelay": 0}), false),
+            (json!({"action": "allow", "logLevel": "info"}), false),
+            (json!({"action": "block", "logLevel": "verbose"}), false),
+        ];
+        for (index, (rule, expected)) in cases.iter().enumerate() {
+            let parsed = parse_final_rule(rule).unwrap();
+            assert_eq!(validate_final_rule(&parsed).is_ok(), *expected, "model case {index}");
+            let config = json!({"outbounds": [{"protocol": "freedom", "settings": {"finalRules": [rule]}}]});
+            std::fs::write(&path, serde_json::to_vec(&config).unwrap()).unwrap();
+            let output = std::process::Command::new(&binary).args(["run", "-test", "-c"])
+                .arg(&path).output().unwrap();
+            if output.status.success() != (!modern || *expected) {
+                failures.push(index);
+            }
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(failures.is_empty(), "Freedom finalRules core parity cases: {failures:?}");
     }
 
     #[test]

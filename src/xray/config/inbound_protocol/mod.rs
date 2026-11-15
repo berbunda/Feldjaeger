@@ -71,34 +71,15 @@ pub enum InboundProtocolDraft {
         /// `gateway`; `false` = key absent (an explicit `false` on disk is kept).
         auto_system_dns_to_gateway: bool,
         /// `settings.autoSystemWfpBlockLeak[]` (Windows, v26.9.30+) — `dns` / `windnsclient` /
-        /// `misconfigtun` / `tcp/<port>` / `udp/<port>` ([`is_valid_tun_wfp_block_leak`]);
+        /// `misconfigtun`, protocol/port/range and CIDR selectors ([`is_valid_tun_wfp_block_leak`]);
         /// empty = key absent.
         auto_system_wfp_block_leak: Vec<String>,
     },
 }
 
-/// Keyword values of `autoSystemWfpBlockLeak` (compared lower-cased) — besides them the core
-/// takes `tcp/<port>` / `udp/<port>` ([`is_valid_tun_wfp_block_leak`]).
-pub const TUN_WFP_BLOCK_LEAK_VALUES: &[&str] = &["dns", "windnsclient", "misconfigtun"];
-
-/// Whether `tun.ExpandWfpBlockLeak` (`proxy/tun/wfp_leak.go`, XTLS/Xray-core#7288, v26.10.31)
-/// accepts the value: a keyword of [`TUN_WFP_BLOCK_LEAK_VALUES`] or `tcp/<port>` / `udp/<port>`
-/// with a port of 1–65535 in decimal digits only (`strconv.ParseUint(port, 10, 16)`, so leading
-/// zeros pass and `+53` / ` 53` do not), all case-insensitive. Checked with `xray run -test`
-/// 26.10.31.
-pub fn is_valid_tun_wfp_block_leak(value: &str) -> bool {
-    let value = value.to_ascii_lowercase();
-    if TUN_WFP_BLOCK_LEAK_VALUES.contains(&value.as_str()) {
-        return true;
-    }
-    let Some((protocol, port)) = value.split_once('/') else {
-        return false;
-    };
-    matches!(protocol, "tcp" | "udp")
-        && !port.is_empty()
-        && port.bytes().all(|b| b.is_ascii_digit())
-        && port.parse::<u16>().is_ok_and(|port| port != 0)
-}
+mod tun_leak;
+pub use tun_leak::{TUN_WFP_BLOCK_LEAK_VALUES, is_valid_tun_wfp_block_leak};
+pub(crate) use tun_leak::is_legacy_tun_wfp_block_leak;
 
 impl InboundProtocolDraft {
     /// Default for Add VLESS.
@@ -419,7 +400,7 @@ struct TunSettings<'a> {
     auto_system_wfp_block_leak: &'a [String],
 }
 
-/// The checks of `TunConfig.Build()` (`infra/conf/tun.go`, v26.10.31) that fail the load on a
+/// The checks of `TunConfig.Build()` (`infra/conf/tun.go`, v26.11.9) that fail the load on a
 /// Linux server: an unknown `autoSystemWfpBlockLeak` value (any OS), and `autoSystemDnsToGateway`
 /// without a gateway (Linux). The Windows-only conditions of the same function never apply here.
 pub fn validate_tun_settings(
@@ -434,7 +415,8 @@ pub fn validate_tun_settings(
                 ConfigModifyErrorKind::ValidationFailed,
                 format!(
                     "TUN autoSystemWfpBlockLeak: unknown value \"{value}\" (allowed: dns, windnsclient, \
-                     misconfigtun, tcp/<port>, udp/<port>)"
+                     misconfigtun, all, allexceptlan, tcp, udp, icmp, ports/ranges, \
+                     tcp/PORT[-PORT], udp/PORT[-PORT]; optional IPv4-CIDR: or [IPv6-CIDR]: prefix)"
                 ),
             ));
         }
@@ -772,6 +754,23 @@ mod tests {
     }
 
     #[test]
+    fn extended_tun_selectors_keep_spelling_host_bits_and_unknown_fields() {
+        let original = json!({"protocol": "tun", "settings": {
+            "name": "xray0", "future": {"keep": true},
+            "autoSystemWfpBlockLeak": ["AllExceptLAN", "TCP/053-0853",
+                "1.1.1.123/24:TCP/853", "[2001:DB8::123/32]:udp/10-20"]
+        }});
+        let mut inbound = original.clone();
+        let mut draft = parse_inbound_protocol(&inbound).expect("parse");
+        apply_inbound_protocol(&mut inbound, &draft).expect("apply unchanged");
+        assert_eq!(inbound, original);
+        if let InboundProtocolDraft::Tun { mtu, .. } = &mut draft { *mtu = 1400; }
+        apply_inbound_protocol(&mut inbound, &draft).expect("apply unrelated edit");
+        assert_eq!(inbound["settings"]["autoSystemWfpBlockLeak"], original["settings"]["autoSystemWfpBlockLeak"]);
+        assert_eq!(inbound["settings"]["future"], original["settings"]["future"]);
+    }
+
+    #[test]
     fn tun_v26_9_30_keys_round_trip_unchanged() {
         let original = json!({
             "protocol": "tun",
@@ -821,7 +820,7 @@ mod tests {
         for valid in ["windnsclient", "tcp/853", "UDP/443", "tcp/053", "udp/65535", "tcp/1"] {
             assert!(is_valid_tun_wfp_block_leak(valid), "{valid}");
         }
-        for invalid in ["tcp/0", "tcp/65536", "tcp/x", "sctp/1", "tcp/ 53", "tcp/+53", "tcp/", "tcp", "routes"] {
+        for invalid in ["tcp/0", "tcp/65536", "tcp/x", "sctp/1", "tcp/ 53", "tcp/+53", "tcp/", "routes"] {
             assert!(!is_valid_tun_wfp_block_leak(invalid), "{invalid}");
         }
         assert!(validate_tun_settings(&[], false, &["windnsclient".into(), "tcp/853".into()]).is_ok());

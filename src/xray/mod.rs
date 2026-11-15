@@ -22,6 +22,9 @@ pub mod warp;
 mod x25519_local;
 
 pub use config::{
+    XDRIVE_SERVICES, XDRIVE_UINT32_FIELDS, XdriveSettingsDraft, XdriveS3Draft, XdriveXmuxDraft,
+    parse_xdrive_settings, xdrive_settings_to_value, validate_xdrive_settings,
+    validate_xdrive_entity, xdrive_is_active, xdrive_uses_h3,
     AddConfdirFileRequest, AddInboundClientRequest, AddInboundRequest, AddOutboundRequest,
     AddOutboundShellRequest,
     AddUserRequest, ApiSettings, DnsHostEntry, DnsServerEntry, DnsSettings, QueryStrategy,
@@ -29,10 +32,11 @@ pub use config::{
     KNOWN_API_SERVICES, UpdateApiSettingsRequest, UpdateDnsSettingsRequest,
     BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS, DnsRuleDraft,
     FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS, FREEDOM_FINAL_RULE_NETWORKS,
+    FREEDOM_FINAL_RULE_LOG_LEVELS,
     FREEDOM_PROXY_PROTOCOL_VERSIONS, FreedomFinalRuleDraft, LegacyObfuscationMigration,
     FreedomSettingsDraft, LegacyDomainStrategyMigration, LoopbackRouting, LoopbackSettingsDraft, loopback_routing,
     OutboundGeneral, OutboundRef, OutboundSettingsDraft, ProxySettingsMigration, UpdateOutboundShellRequest,
-    MUX_CONCURRENCY_EFFECTIVE_MAX, MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX, MUX_XUDP_PROXY_UDP443_VALUES,
+    MuxBehavior, MUX_CONCURRENCY_EFFECTIVE_MAX, MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX, MUX_XUDP_PROXY_UDP443_VALUES,
     OutboundMux, parse_outbound_mux, validate_outbound_mux,
     DialerProxyProblem, GrpcClientSettings, HYSTERIA_TRANSPORT_VERSION, HttpUpgradeClientSettings,
     HysteriaClientSettings, OutboundSecurityDraft, OutboundStreamDraft, OutboundTransport,

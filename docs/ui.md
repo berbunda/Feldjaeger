@@ -154,7 +154,13 @@ Page title: Log Settings
 Edits the remote Xray top-level `log` object only (not Feldjäger application logs).
 Modes: View / Edit with Edit, Save, Cancel.
 Sections: Access log, Error log, Additional log entries, Privacy.
-Supported fields: `access`, `error`, `loglevel`, `dnsLog`, `maskAddress`.
+Supported fields: `access`, `error`, `logLevel`, `dnsLog`, `maskAddress`.
+The level reader accepts `logLevel`, legacy `loglevel`, and other case variants accepted by Xray.
+Save keeps the spelling and raw value of an unchanged existing level; a new level uses `logLevel`.
+Multiple level keys are shown as ambiguous: select a supported level and explicitly check
+"Replace listed log level keys with logLevel on Save" to replace them. Cancel leaves them intact.
+Xray Logs marks Access/Error sources unavailable while those aliases remain unresolved;
+the independent System Journal source remains available when Discovery provides a unit.
 Unknown nested fields and unsupported values are preserved.
 Edit mode shows a typed field-level Change summary plus an optional "Preview changes" button
 (redacted structural JSON diff, same widget as Inbound Shell Preview, Roadmap §3:126).
@@ -320,8 +326,11 @@ Outbounds page (Roadmap §2.4:94, §2.4:95, §2.4:96):
 - Editor (single pane, no tabs — none of the three protocols has Stream/Security/Sniffing/Users); title and Protocol-section label show the active protocol name:
   - General (shared by all three protocols): `tag` (editable on Add only; read-only label on Edit — use the context-menu **Rename** action instead, §2.4:99), `sendThrough`
   - Protocol (Freedom): `redirect` (`host:port`), `userLevel`, `proxyProtocol`, `finalRules[]`; the resolve strategy (`streamSettings.sockopt.domainStrategy`) is in "Socket options" (Roadmap §4.2); "Migrate to sockopt" (legacy `settings.domainStrategy`) and "Remove addressPortStrategy" (gate G14) act on that section's draft
-    - `fragment` checkbox toggles a `packets` / `length` / `interval` block (all free-text range strings, e.g. `tlshello`, `100-200`, `10-20`)
-    - `noises[]` add/edit/delete table — `type` combo (`rand` | `str` | `hex` | `base64` + free text) / `packet` / `delay`
+    - `fragment` / `noises[]` are deprecated: preserved read-only, with explicit "Fix config" migration into FinalMask (Architecture §146)
+    - `finalRules[]`: ordered allow/block rules; block-only `delay` (number/range, default 30–90 seconds) and `logLevel` (unset/info, none/debug/warning/error). Unknown rule keys and untouched number/string/null forms are preserved
+    - Legacy `blockDelay` is shown read-only and takes precedence over `delay`. "Use blockDelay as delay; remove blockDelay" explicitly replaces any existing delay with the effective legacy value and updates the draft Preview
+    - Changing action to allow never deletes fields automatically: Save rejects block-only fields until the user explicitly removes them. "Remove delay, blockDelay and logLevel" removes exactly those fields from the draft; Cancel discards it. Both actions go through ApplicationService; remote writes happen only on Save
+    - Old-core warnings explain that delay/logLevel require v26.11.9 and are ignored before it; legacy alias deprecation and invalid allow/logLevel notices apply to v26.11.9+. Unsupported shapes/case aliases stay on the Raw JSON path to avoid adding duplicate spellings
   - Protocol (Blackhole): `response.type` combo (`none` | `http` + free text); empty = `response` key omitted (Xray default `none`)
   - Protocol (Loopback, Roadmap §4.2): `inboundTag` (combo of the tags routing rules list in `inboundTag` + free text, kept exactly as typed — routing matches it case- and space-sensitively); under it a hint: no tag (inboundTag rules never match), no rule for the tag (the other rules decide — possibly this outbound again), the matching rule numbers, or a rule that sends the tag back into this outbound (red: loop); `sniffing` — the same editor as the inbound Sniffing tab (`enabled`, `destOverride` checkboxes, `metadataOnly`, `routeOnly`), written only when changed; other `sniffing` keys (`domainsExcluded`, `ipsExcluded`) are preserved and listed. Table summary: "Re-route as inbound {tag}[, sniffing]"
   - Protocol (DNS): `rewriteNetwork` combo (`tcp` | `udp` + free text) / `rewriteAddress` / `rewritePort` (1-65535) / `userLevel`; empty rewrite fields = unchanged (Xray leaves the query as-is)
@@ -331,7 +340,7 @@ Outbounds page (Roadmap §2.4:94, §2.4:95, §2.4:96):
   - Protocol (Trojan, Roadmap §4.2): `address`, `port`, `password` (masked, kept exactly as typed), `level` (0–255), `email`; a muted note that Xray-core deprecates Trojan in favour of VLESS; a `servers[]` outbound with one server opens with a note that Save rewrites it into the flat form (any other shape: Edit reports why, Raw JSON only); a `flow` from disk shows an amber warning and "Remove flow" (Save is blocked until then). Table summary: `address:port`
   - Protocol (Hysteria, Roadmap §4.2): `address`, `port` (one number — port hopping is the udphop mask), `version` shown as 2 (an amber note when the file has another value — Save writes 2); a muted pointer to Stream / Security for the password (`auth`). A new Hysteria outbound starts on the hysteria transport with TLS and writes them on Add even untouched. Table summary: `address:port`
   - Protocol (SOCKS, Roadmap §4.2): a muted note (no encryption — for a proxy on this server or a private network, e.g. Tor); `address`, `port`, `user`, `pass` (masked; both kept exactly as typed), `level`, `email`; amber note when `pass` / `level` / `email` are set without `user` (Xray-core ignores them); a `servers[]` outbound with one server and at most one user opens with a note that Save rewrites it flat (any other shape: Edit reports why, Raw JSON only). Table summary: `address:port`
-  - Mux (`mux`, Roadmap §4.2) — after Socket options, for proxy outbounds (VLESS now; every protocol with Stream / Security): `enabled` checkbox, `concurrency` and `xudpConcurrency` (free text, whole numbers from -32768 to 32767; amber note above 128 / 1024), `xudpProxyUDP443` (`reject` / `allow` / `skip`, empty = reject); red line for a value Save would refuse; unknown `mux` keys are kept and listed. The section shows the Mux warnings (a `mux` Xray cannot load, Vision + Mux carrying TCP). On Freedom / Loopback (and for a `mux` the editor cannot represent) only a note and "Remove mux" appear, and only when a `mux` is on disk. Written only when changed; an empty draft removes the key
+  - Mux (`mux`, Roadmap §4.2) — after Socket options, for proxy outbounds (VLESS now; every protocol with Stream / Security): `enabled` checkbox, `concurrency` and `xudpConcurrency` (free text, whole numbers from -32768 to 32767), `xudpProxyUDP443` (`reject` / `allow` / `skip`, empty = reject); red line for a value Save would refuse; unknown `mux` keys are kept and listed. Effective TCP/XUDP concurrency and connection reuse limit follow Discovery: before v26.11.9 TCP empty/0 = 8, reuse 128; since v26.11.9 TCP 0..128 = 128, reuse 1024. Positive TCP/XUDP values above reuse are effectively capped; configured numbers are never rewritten for this display. Unknown version explicitly assumes v26.11.9+. The section shows the Mux warnings (a `mux` Xray cannot load, Vision + Mux carrying TCP). On Freedom / Loopback (and for a `mux` the editor cannot represent) only a note and "Remove mux" appear, and only when a `mux` is on disk. Written only when changed; an empty draft removes the key
   - Save (Add Outbound / Save) writes via a fingerprint-checked Shell Save on Edit; "Preview changes" shows a redacted structural JSON diff before write (Roadmap §3:126, same widget as Inbound Shell Preview); Cancel discards the session
 - Delete dialog unchanged: confirm + "Deletion cannot be undone from the UI (restore from backup if needed)."
 
@@ -490,3 +499,62 @@ cap) with a Stop button while running; valid rows stream into a table (IP / Doma
 ALPN / curve) as they're found, not only at the end. The scanned prefix and its results stay shown
 even if the user runs a new ASN lookup for a different host mid-scan or afterward — only starting a
 new scan replaces them.
+
+## Xray v26.11.9 compatibility (PLAN stage C)
+
+TUN `autoSystemWfpBlockLeak` adds all/allexceptlan/tcp/udp/icmp checkboxes and a text list
+for port/range and CIDR selectors. EN/RU help describes the grammar, version requirements,
+and Windows-only behavior; compatibility warnings still appear when managing a Linux server.
+Spelling, IPv6 case and CIDR host bits survive unrelated edits.
+
+TLS/REALITY fingerprint presets include `hellochrome_155`, with a warning before v26.11.9
+(REALITY server settings ignore fingerprint and do not get this warning).
+The `chrome` alias follows the core's default; EN/RU help explains the difference.
+
+GeoData Settings shows an EN/RU help button in both View and Edit explaining the core's
+automatic `.dat.gz` download for XTLS/Xray-rules-dat GitHub/raw URLs since v26.11.9.
+The configured source URL and local `.dat` filename stay unchanged. The separate manual
+GeoData updater continues using Loyalsoldier.
+
+## XDRIVE validation foundation (PLAN stage D)
+
+The existing inbound/outbound warning lists show XDRIVE beta/version, legacy service spelling,
+and invalid configuration notices. Shared save checks enforce storage/VLESS/Mux/port/h3 constraints;
+an XDRIVE inbound uses TLS as a storage client, so it needs no server certificate entry.
+The model and checks underpin the Stream forms implemented in stage E below.
+Preview masks the entire `template` subtree because arbitrary headers, URLs
+or bodies may contain credentials; the JSON itself is preserved.
+
+## XDRIVE Stream forms (PLAN stage E, 0.5.80-0)
+
+VLESS Inbound/Outbound transport pickers include `xdrive (beta)`. The existing Stream tab
+contains service (local/google-drive/template/s3), remoteFolder/folder ID, ordered masked
+credentials, S3 endpoint/region/bucket/pathStyle, and an Advanced section for all eight uint32
+knobs, six XMUX fields and generic template JSON. Template text is masked by default and
+the advanced section starts open when loading a template. EN/RU help covers units/defaults,
+OAuth order/setup, quotas, h2/h3, VLESS Encryption, Mux and the lack of a direct peer connection.
+Unknown or unsupported data stays available in Raw JSON. Changing service does not remove
+credentials or inactive service settings. A malformed generic template remains editable while
+Preview/Save are blocked; errors never contain its body.
+
+An explicit “Reveal credentials and template” checkbox belongs to one editor session:
+opening another editor (including after Cancel) starts masked again. Reading/rendering a form
+does not set dirty/write flags. JSON conversion stays in ApplicationService.
+
+Inbound Stream and Security offer storage **client** TLS: mode, serverName, comma-separated
+ALPN, fingerprint, ECH, certificate pin and peer-name verification. Server certificate controls
+are bypassed for this transport. H3 QUIC and FinalMask use the dialing side on both endpoints.
+Only edited TLS fields are merged, preserving original null/string forms, unknown fields and
+inactive security blocks. Outbound uses its existing client Security form.
+
+“Apply Google Drive beta preset (new settings)” applies to empty settings with unconfigured
+security, without replacing an existing storage configuration. It stages google-drive,
+eagerWindowMs=10000, TLS h2, three empty OAuth slots, and Mux for the outbound. Missing schema
+port/address fields get placeholders (443 and outbound 127.0.0.1); they are not a direct peer
+connection target. Supply folder/OAuth, the client's UUID and paired VLESS Encryption before
+using the transport. Generate the pair via the existing official `xray vlessenc` Protocol action;
+OAuth project/account setup remains external. Existing configured TLS/storage can be edited by
+field instead of applying the preset. Nothing remote changes until the usual Preview/Save flow.
+
+Users’ Copy share URI / Show QR code are disabled with an explicit “no official format” reason,
+also for unsaved XDRIVE drafts. Manual configuration remains possible; no URI scheme is invented.

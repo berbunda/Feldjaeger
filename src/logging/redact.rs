@@ -17,8 +17,16 @@ pub const REDACTED: &str = "[REDACTED]";
 /// - Redacts UUID-shaped tokens (including VLESS ids)
 /// - Truncates to [`MAX_DETAIL_CHARS`] on a Unicode boundary
 pub fn sanitize_detail(message: &str) -> String {
+    truncate_chars(&redact_detail(message), MAX_DETAIL_CHARS)
+}
+
+/// Redacts labelled credentials before callers select lines or truncate diagnostic text.
+pub(crate) fn redact_detail(message: &str) -> String {
     let trimmed = message.trim();
-    let mut sanitized = trimmed.to_owned();
+    let mut sanitized = match credential_field_start(trimmed) {
+        Some(index) => format!("{}{}", &trimmed[..index], REDACTED),
+        None => trimmed.to_owned(),
+    };
 
     for needle in [
         "password=",
@@ -44,8 +52,36 @@ pub fn sanitize_detail(message: &str) -> String {
         }
     }
 
-    sanitized = redact_uuid_shaped(&sanitized);
-    truncate_chars(&sanitized, MAX_DETAIL_CHARS)
+    redact_uuid_shaped(&sanitized)
+}
+
+// JSON, Debug and form-encoded errors may contain an entire OAuth credential array.
+// Drop the remainder at the earliest labelled field instead of parsing untrusted text.
+fn credential_field_start(message: &str) -> Option<usize> {
+    fn trim(text: &str) -> &str {
+        text.trim_start_matches(['\"', '\'', '\\', ' ', '\t', '\r', '\n'])
+    }
+    let lower = message.to_ascii_lowercase();
+    [
+        "secrets", "template", "client_id", "clientid", "client_secret", "clientsecret",
+        "refresh_token", "refreshtoken", "access_token", "accesstoken",
+    ]
+        .into_iter()
+        .flat_map(|key| lower.match_indices(key))
+        .filter_map(|(index, key)| {
+            let prefix_ok = index == 0
+                || !lower.as_bytes()[index - 1].is_ascii_alphanumeric();
+            let mut tail = trim(&lower[index + key.len()..]);
+            if let Some(indexed) = tail.strip_prefix('[')
+                && let Some((item, rest)) = indexed.split_once(']')
+                && !item.is_empty()
+                && item.bytes().all(|byte| byte.is_ascii_digit())
+            {
+                tail = trim(rest);
+            }
+            (prefix_ok && (tail.starts_with(':') || tail.starts_with('='))).then_some(index)
+        })
+        .min()
 }
 
 /// Returns `true` when `value` looks like a UUID (VLESS client id shape).
@@ -134,10 +170,39 @@ mod tests {
     use super::*;
 
     #[test]
+    fn oauth_fields_are_removed_from_json_debug_and_form_error_details() {
+        for message in [
+            r#"invalid config: {"secrets": ["client-value", "token-value"]}"#,
+            "invalid XDRIVE: Secrets: Array [String(\"client-value\"), String(\"token-value\")]",
+            "oauth failed client_secret = client-value&refresh_token=token-value",
+            "oauth failed: refreshToken: token-value",
+            "oauth failed: access_token=token-value",
+            "oauth failed: secrets[2]: token-value",
+            r#"invalid config: \"secrets\": [\"client-value\", \"token-value\"]"#,
+            "oauth failed: client_id=client-value",
+        ] {
+            let sanitized = sanitize_detail(message);
+            assert!(!sanitized.contains("client-value"));
+            assert!(!sanitized.contains("token-value"));
+            assert!(sanitized.contains(REDACTED));
+        }
+        assert_eq!(sanitize_detail("XDRIVE needs 3 secrets in order"), "XDRIVE needs 3 secrets in order");
+    }
+
+    #[test]
     fn redacts_password_marker() {
         let detail = sanitize_detail("boom password=secret-value trailing");
         assert!(!detail.contains("secret-value"));
         assert!(detail.contains(REDACTED));
+    }
+
+    #[test]
+    fn opaque_storage_template_errors_are_redacted_before_truncation() {
+        for detail in [r#"invalid template: {"get":{"headers":{"X-Custom-Credential":"opaque-canary"}}}"#,
+            r#"invalid {"Template":{"arbitrary":"opaque-canary"}}"#] {
+            assert!(!sanitize_detail(detail).contains("opaque-canary"));
+            assert!(sanitize_detail(detail).contains(REDACTED));
+        }
     }
 
     #[test]

@@ -40,10 +40,18 @@ use super::{
 /// [`file_roots`](Self::file_roots) maps absolute/relative source paths to the
 /// original root JSON object of that file. Client edits mutate both the merged
 /// sections and the matching root so serialization can target a single path.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EditableXrayConfig {
     sections: XrayConfigSections,
     file_roots: BTreeMap<String, Value>,
+}
+
+impl std::fmt::Debug for EditableXrayConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EditableXrayConfig")
+            .field("source_files", &self.file_roots.keys().collect::<Vec<_>>())
+            .finish_non_exhaustive()
+    }
 }
 
 impl EditableXrayConfig {

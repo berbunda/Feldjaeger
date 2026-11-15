@@ -21,6 +21,19 @@ use egui::{Color32, RichText, TextEdit, Ui};
 use crate::app::{ApplicationService, GeodataSettingsPageState};
 use crate::xray::GeodataAssetEntry;
 
+const HELP_ASSET_DOWNLOAD: super::HelpText = super::HelpText::new(
+    "Since Xray v26.11.9, the core downloads .dat.gz when a GitHub or raw.githubusercontent.com \
+     URL under XTLS/Xray-rules-dat ends in .dat (case-insensitive). The configured URL stays \
+     unchanged and the extracted local file stays .dat. Other sources keep their URLs. \
+     Feldjäger's manual GeoData updater still uses Loyalsoldier; this behavior belongs to the \
+     core's geodata.assets downloader.",
+    "С Xray v26.11.9 ядро загружает .dat.gz, если URL на GitHub или raw.githubusercontent.com \
+     в XTLS/Xray-rules-dat заканчивается на .dat (без учёта регистра). URL в конфигурации \
+     сохраняется, распакованный локальный файл остаётся .dat. Другие источники сохраняют URL. \
+     Ручное обновление GeoData в Feldjäger по-прежнему использует Loyalsoldier; это поведение \
+     загрузчика geodata.assets самого ядра.",
+);
+
 /// Renders the GeoData Settings page.
 pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     ui.heading("GeoData Settings");
@@ -73,6 +86,10 @@ pub fn show(ui: &mut Ui, service: &mut ApplicationService) {
     }
 
     show_actions(ui, service, model.editing, model.state);
+    ui.horizontal(|ui| {
+        ui.label("Asset download URLs (.dat / .dat.gz)");
+        super::help_button(ui, "Asset download URLs", HELP_ASSET_DOWNLOAD);
+    });
     ui.add_space(12.0);
 
     if model.editing {

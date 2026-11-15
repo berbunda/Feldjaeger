@@ -45,6 +45,8 @@ pub use xhttp::{
 /// Transport methods editable in IB-L3 / Wave A / Wave C1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamMethod {
+    /// XDRIVE storage transport (VLESS only).
+    Xdrive,
     /// Plain TCP / raw (aliases).
     Tcp,
     /// XHTTP.
@@ -63,6 +65,7 @@ impl StreamMethod {
     /// Canonical wire value written for new configs (`tcp` not `raw`; `websocket` not `ws`; `mkcp` not `kcp`).
     pub fn as_wire(self) -> &'static str {
         match self {
+            Self::Xdrive => "xdrive",
             Self::Tcp => "tcp",
             Self::Xhttp => "xhttp",
             Self::Grpc => "grpc",
@@ -75,6 +78,7 @@ impl StreamMethod {
     /// UI label.
     pub fn label(self) -> &'static str {
         match self {
+            Self::Xdrive => "xdrive (beta)",
             Self::Tcp => "tcp / raw",
             Self::Xhttp => "xhttp",
             Self::Grpc => "grpc",
@@ -87,6 +91,7 @@ impl StreamMethod {
     /// Parse from wire (`tcp`/`raw`/`xhttp`/`grpc`/`ws`/`websocket`/`kcp`/`mkcp`/`hysteria`).
     pub fn from_wire(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "xdrive" => Some(Self::Xdrive),
             "tcp" | "raw" => Some(Self::Tcp),
             "xhttp" | "splithttp" => Some(Self::Xhttp),
             "grpc" => Some(Self::Grpc),
@@ -100,6 +105,7 @@ impl StreamMethod {
     /// Nested settings object key for this method.
     pub fn settings_key(self) -> &'static str {
         match self {
+            Self::Xdrive => "xdriveSettings",
             Self::Tcp => "tcpSettings", // also may use rawSettings on disk
             Self::Xhttp => "xhttpSettings",
             Self::Grpc => "grpcSettings",
@@ -326,6 +332,14 @@ pub struct HysteriaStreamSettings {
 /// Stream tab draft.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundStreamDraft {
+    /// Lossless XDRIVE storage settings; written only after an explicit editor change.
+    pub xdrive: super::stream::xdrive::XdriveSettingsDraft,
+    /// Whether XDRIVE settings were edited.
+    pub write_xdrive: bool,
+    /// Client security used by the inbound's storage connection.
+    pub xdrive_security: super::outbound_stream::OutboundSecurityDraft,
+    /// Whether storage client security was edited.
+    pub write_xdrive_security: bool,
     /// Editable method when `editable`; otherwise read-only preserve.
     pub method: Option<StreamMethod>,
     /// Wire string when method is not in the editable set (preserve-only).
@@ -373,6 +387,8 @@ pub struct InboundStreamDraft {
 impl Default for InboundStreamDraft {
     fn default() -> Self {
         Self {
+            xdrive: Default::default(), write_xdrive: false,
+            xdrive_security: Default::default(), write_xdrive_security: false,
             method: Some(StreamMethod::Tcp),
             other_method: None,
             method_key: StreamMethodKey::Network,
@@ -434,7 +450,9 @@ pub fn parse_inbound_stream(inbound: &Value) -> InboundStreamDraft {
         return InboundStreamDraft::default();
     };
 
-    let (wire, method_key) = if let Some(n) = stream.get("network").and_then(Value::as_str) {
+    let (wire, method_key) = if let Some(m) = stream.get("method").filter(|v| !v.is_null()).and_then(Value::as_str) {
+        (m.to_owned(), StreamMethodKey::Method)
+    } else if let Some(n) = stream.get("network").and_then(Value::as_str) {
         (n.to_owned(), StreamMethodKey::Network)
     } else if let Some(m) = stream.get("method").and_then(Value::as_str) {
         (m.to_owned(), StreamMethodKey::Method)
@@ -464,6 +482,7 @@ pub fn parse_inbound_stream(inbound: &Value) -> InboundStreamDraft {
         "kcpSettings",
         "httpupgradeSettings",
         "hysteriaSettings",
+        "xdriveSettings",
         "finalmask",
         "sockopt",
     ];
@@ -474,6 +493,10 @@ pub fn parse_inbound_stream(inbound: &Value) -> InboundStreamDraft {
     }
 
     let mut draft = InboundStreamDraft {
+        xdrive: super::stream::xdrive::parse_xdrive_settings(stream.get("xdriveSettings")),
+        write_xdrive: false,
+        xdrive_security: super::outbound_stream::parse_outbound_security(stream),
+        write_xdrive_security: false,
         method,
         other_method,
         method_key,
@@ -811,6 +834,14 @@ pub fn apply_inbound_stream(
     inbound: &mut Value,
     draft: &InboundStreamDraft,
 ) -> ConfigModifyResult<()> {
+    if draft.write_xdrive {
+        super::stream::xdrive::validate_xdrive_settings(&draft.xdrive)
+            .map_err(|message| ConfigModifyError::new(ConfigModifyErrorKind::ValidationFailed, message))?;
+    }
+    if draft.write_xdrive_security {
+        super::outbound_stream::validate_outbound_security(&draft.xdrive_security)?;
+    }
+    if draft.method == Some(StreamMethod::Xdrive) { return apply_xdrive_stream(inbound,draft); }
     if draft.other_method.is_some() && draft.method.is_none() {
         // Read-only exotic method: do not rewrite streamSettings method/network.
         return Ok(());
@@ -866,7 +897,9 @@ pub fn apply_inbound_stream(
         "network",
         "method",
     ] {
-        stream.remove(key);
+        if method != StreamMethod::Xdrive || matches!(key, "network" | "method") {
+            stream.remove(key);
+        }
     }
 
     match draft.method_key {
@@ -887,6 +920,7 @@ pub fn apply_inbound_stream(
     }
 
     match method {
+        StreamMethod::Xdrive => {},
         StreamMethod::Tcp => {
             let key = draft.tcp.nested_key.as_str();
             let mut object = Map::new();
@@ -977,6 +1011,12 @@ pub fn apply_inbound_stream(
     if let Some(value) = tls {
         stream.insert("tlsSettings".to_owned(), value);
     }
+    if draft.write_xdrive && let Some(value) = super::stream::xdrive::xdrive_settings_to_value(&draft.xdrive) {
+        stream.insert("xdriveSettings".to_owned(), value);
+    }
+    if method == StreamMethod::Xdrive && draft.write_xdrive_security {
+        super::outbound_stream::apply_outbound_security(stream, &draft.xdrive_security);
+    }
 
     // `finalmask` is never removed above, so when nothing is written it simply stays as it was.
     validate_finalmask_draft(draft, true)?;
@@ -1014,6 +1054,37 @@ fn reject_foreign_finalmask_write(
         )),
         _ => Ok(()),
     }
+}
+
+fn apply_xdrive_stream(inbound:&mut Value,draft:&InboundStreamDraft)->ConfigModifyResult<()> {
+    let original=parse_inbound_stream(inbound);
+    let was_xdrive=crate::xray::xdrive_is_active(inbound);
+    let mut edits=draft.clone();
+    // Read flags on older Stream drafts also mean ownership. For storage, write only actual
+    // changes so unrelated edits preserve raw QUIC/sockopt/layer shapes and method aliases.
+    edits.write_quic_params &= edits.quic_params!=original.quic_params;
+    edits.write_finalmask_tcp &= edits.finalmask_tcp!=original.finalmask_tcp;
+    edits.write_finalmask_udp &= edits.finalmask_udp!=original.finalmask_udp;
+    edits.write_sockopt &= edits.sockopt!=original.sockopt;
+    for (write,layers,chain) in [(edits.write_finalmask_tcp,&edits.finalmask_tcp,FinalMaskChain::Tcp),
+        (edits.write_finalmask_udp,&edits.finalmask_udp,FinalMaskChain::Udp)] {
+        if write{validate_finalmask_layers(layers,chain,StreamDirection::Outbound)?;}
+    }
+    if edits.write_quic_params{validate_quic_params(&edits.quic_params).map_err(|message|ConfigModifyError::new(ConfigModifyErrorKind::ValidationFailed,message))?;}
+    if edits.write_sockopt{validate_sockopt(&edits.sockopt)?;}
+    let mut candidate=inbound.clone();
+    let root=candidate.as_object_mut().ok_or_else(||ConfigModifyError::new(ConfigModifyErrorKind::ValidationFailed,"inbound must be an object".to_owned()))?;
+    let value=root.entry("streamSettings").or_insert_with(||Value::Object(Map::new()));
+    if value.is_null(){*value=Value::Object(Map::new());}
+    let stream=value.as_object_mut().ok_or_else(||ConfigModifyError::new(ConfigModifyErrorKind::ValidationFailed,"streamSettings must be an object".to_owned()))?;
+    reject_foreign_finalmask_write(stream,edits.writes_finalmask())?;
+    if !was_xdrive{stream.insert(match draft.method_key{StreamMethodKey::Method=>"method",StreamMethodKey::Network=>"network"}.to_owned(),Value::String("xdrive".to_owned()));}
+    if edits.write_xdrive && let Some(value)=crate::xray::xdrive_settings_to_value(&edits.xdrive){stream.insert("xdriveSettings".to_owned(),value);}
+    if edits.write_xdrive_security{super::outbound_stream::apply_storage_client_security(stream,&edits.xdrive_security)?;}
+    write_finalmask_draft(stream,&edits,true);
+    if edits.write_sockopt{stream.insert("sockopt".to_owned(),sockopt_to_value(&edits.sockopt));}
+    super::stream::validate_stream_quic_params(&Value::Object(stream.clone())).map_err(|message|ConfigModifyError::new(ConfigModifyErrorKind::ValidationFailed,message))?;
+    *inbound=candidate;Ok(())
 }
 
 /// Validates the `finalmask` parts the draft writes; `with_quic_params` is false where the

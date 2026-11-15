@@ -16,6 +16,7 @@
 //! - [`values`] — shape-preserving `Int32Range` / `PortList` / `packet` values;
 //! - [`quic_params`] — `finalmask.quicParams`;
 //! - [`sockopt`] — `sockopt` plus per-direction field applicability.
+//! - [`xdrive`] — lossless storage settings and direction-aware VLESS/Mux/h3 validation.
 //!
 //! Transport-method settings (`tcpSettings`, `xhttpSettings`, …) still live in
 //! `inbound_stream` and move here with the Outbound `streamSettings` editor (Tier 4 §4.2).
@@ -37,6 +38,7 @@ pub mod finalmask_xmc;
 pub mod quic_params;
 pub mod sockopt;
 pub mod values;
+pub mod xdrive;
 
 pub use finalmask::{
     CLIENT_ONLY_UDP_FINALMASK_TYPES, FinalMaskChain, FinalMaskLayerDraft,

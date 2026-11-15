@@ -47,7 +47,21 @@ pub fn log_config_view(section: Option<&SourcedSection<Value>>) -> XrayLogConfig
     };
 
     let value = section.value();
-    let loglevel = string_field(value, "loglevel");
+    let fields = crate::xray::config::log_level_fields(value);
+    if fields.len() > 1 {
+        // Do not guess the effective level: alias precedence depends on lost JSON order.
+        let unavailable = XrayLogDestination::Unsupported {
+            raw: "Multiple log level keys; resolve them in Log Settings.".to_owned(),
+        };
+        return XrayLogConfigView {
+            access: unavailable.clone(),
+            error: unavailable,
+            loglevel: None,
+            source_file: Some(section.source_file().to_owned()),
+        };
+    }
+    let loglevel = fields.first().and_then(|(_, value)| value.as_str())
+        .map(str::trim).filter(|value| !value.is_empty()).map(str::to_owned);
     let force_disabled = loglevel
         .as_deref()
         .is_some_and(|level| level.eq_ignore_ascii_case("none"));
@@ -112,15 +126,6 @@ fn parse_destination_string(raw: &str) -> XrayLogDestination {
     }
 }
 
-fn string_field(value: &Value, key: &str) -> Option<String> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,6 +133,26 @@ mod tests {
 
     fn section(value: Value) -> SourcedSection<Value> {
         SourcedSection::new("/etc/xray/config.json", value)
+    }
+
+    #[test]
+    fn all_level_spellings_disable_streams_consistently_with_the_editor() {
+        for key in ["logLevel", "loglevel", "LOGLEVEL"] {
+            let input = section(json!({key: "NONE", "access": "/tmp/access.log"}));
+            let view = log_config_view(Some(&input));
+            let settings = crate::xray::log_settings_from_section(Some(&input));
+            assert_eq!(settings.log_level, crate::xray::LogLevel::None);
+            assert_eq!(view.access, XrayLogDestination::Disabled);
+            assert_eq!(view.error, XrayLogDestination::Disabled);
+        }
+    }
+
+    #[test]
+    fn multiple_level_keys_do_not_guess_stream_availability() {
+        let view = log_config_view(Some(&section(json!({"logLevel": "none", "loglevel": "info"}))));
+        assert!(matches!(view.access, XrayLogDestination::Unsupported { .. }));
+        assert!(matches!(view.error, XrayLogDestination::Unsupported { .. }));
+        assert_eq!(view.loglevel, None);
     }
 
     #[test]

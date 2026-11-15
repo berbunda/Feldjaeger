@@ -220,6 +220,8 @@ pub enum InboundMutationSuccess {
 /// `is_add = true` means an Add Inbound flow; `inbound_ref` is `None` in that case.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InboundEditorSession {
+    /// Per-session widget identity; prevents a previous editor's credential reveal state leaking.
+    pub xdrive_editor_id: uuid::Uuid,
     /// Inbound index in the merged list (`usize::MAX` for Add).
     pub inbound_index: usize,
     /// Identity + fingerprint for Shell Save; `None` for Add.

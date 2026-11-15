@@ -896,6 +896,8 @@ Safety (backup before write, backup abort, invalid JSON rejected, confdir only o
 
 
 # 18	Чтение Outbounds
+Вверху страницы, сразу под заголовком, всегда отображается красное примечание: первый outbound в порядке конфигурации используется для трафика без совпавшего правила маршрутизации. Для пропуска этого трафика первым рекомендуется Direct Connection (freedom); blackhole заблокирует его. Примечание относится к порядку конфигурации, а не к сортировке таблицы, и не изменяет конфигурацию.
+
 Реализована read-only страница Outbounds по той же схеме, что Inbounds/Users. Все 144 теста проходят.
 
 ## 18.1	Модифицированные модули GUI
@@ -1467,7 +1469,7 @@ Read-only Observatory page is implemented per the plan. All todos are complete.
 - В тестах [src/logging.rs](src/logging.rs) проверить platform path helper, инициализацию на явном temp path, создание `feldjaeger.log`, append/flush и наличие timestamp/level/module/message для `ERROR/WARN/INFO/DEBUG`.
 - Добавить тесты redaction: password, passphrase, auth token, private-key marker/content и VLESS UUID не попадают в сформированный журнал; redacted credential types также не раскрывают значения.
 - Проверить startup event через тестируемую функцию и fallback выбора destination без запуска окна; обновить ApplicationService tests для пользовательских ошибок и независимости Status Bar.
-- Обновить [docs/rules.md](docs/rules.md) и при необходимости README: архитектура, выбор библиотек, пути Windows/Linux/macOS, формат, уровни и модули интеграции, fallback, безопасность и перечень тестов.
+- Обновить [docs/rules.md](rust/Feldjaeger/AGENTS.md) и при необходимости README: архитектура, выбор библиотек, пути Windows/Linux/macOS, формат, уровни и модули интеграции, fallback, безопасность и перечень тестов.
 - Проверка: `cargo fmt`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, IDE diagnostics.
 
 ```mermaid
@@ -11194,3 +11196,391 @@ deprecated … migrate to VLESS with Flow & Seed» — решение польз
 - Логика импорта (`preview_inbound_import`, применение превью) не менялась.
 - Итог: `cargo build` без предупреждений, **1469 passed / 0 failed**, clippy lib 65 (без новых).
   `feldjaeger-ssh` не менялся. GUI в запущенном приложении не проверялся.
+
+# 153 Аудит дрейфа: Xray-core v26.11.9 (Roadmap §4.5)
+
+Дата: 2026-11-09. Только аудит и план; код, Cargo-версии и baseline не изменены.
+[PLAN.md](PLAN.md) содержит этапы A–F, их статусы — в Roadmap §4.5.
+
+## 153.1 Границы и источники
+
+- [Сравнение релизов](https://github.com/XTLS/Xray-core/compare/v26.10.31...v26.11.9):
+  `a4a3dff5b20c2faae567b742c172c7b95e75c083` → `676eaf66f8f05d4d558ee7a74b4736623d3feeb9`,
+  24 коммита / 60 файлов. Анализ относится к этим тегам, не к изменяющемуся `main`.
+- [XDRIVE release notes #7352](https://github.com/XTLS/Xray-core/pull/7352) и локальное
+  `docs/XDRIVE.with.Google.Drive.setup.guide.v26.11.9.pdf` (13 страниц, текст извлечён).
+  В PDF написано 26.11.8; release notes требуют минимум 26.11.9 и одинаковые версии
+  клиента/сервера. Для публичной beta ориентир — release notes.
+- Схемы и runtime сверены по исходникам на теге: `infra/conf/{freedom,log,tun,geodata,
+  transport_method,transport_internet,xray}.go`, `proxy/tun/wfp_leak.go`,
+  `app/proxyman/outbound/handler.go`, `common/mux/client.go`, `transport/internet/{tls,xdrive}`.
+
+## 153.2 Классификация всех коммитов
+
+Обозначения A–F соответствуют плану; «ядро» означает отсутствие отдельной реализации в Feldjäger.
+
+| Коммит | Изменение | Влияние |
+|---|---|---|
+| `8ab161a` #7312 | golang.org/x/net | Зависимость ядра. |
+| `7c8dbcb` #7311 | gRPC 1.85 | Зависимость ядра; Feldjäger вызывает CLI, не Go gRPC SDK. |
+| `967ade1` #7315 | TUN WFP grammar | C: текущий validator отвергает новые допустимые значения. |
+| `556767e` #7316 | XDRIVE local Windows sharing retries | Runtime ядра; D/E поддерживают backend, не повторяют retries. |
+| `ab88e01` #7328 | cpuid | Зависимость ядра. |
+| `63ca2e0` #7329 | Freedom delay/logLevel, default MASQUE policy; log.logLevel | A/B; MASQUE default policy отметить в справке, сам MASQUE остаётся отложенным. |
+| `ad98ffd` #7325 | TUN Windows IPv6 DNS errors | Runtime ядра, без расширения Linux/systemd MVP. |
+| `fff4aca` #7323 | WireGuard endpoint lookup deadline | Runtime ядра; WARP JSON не меняется. |
+| `858c44f` #7319 | UdpHop closed-socket logging | Runtime ядра, JSON без изменений. |
+| `a52db8f` #7327 | TimeoutWrapperReader error | Runtime ядра, без нового CLI-контракта. |
+| `abecd7d` #7334 | XTLS GeoData .dat → .dat.gz; Docker URLs | C: пояснение, не автоматическая миграция URL/источника Feldjäger. |
+| `36756ad` #7332 | TUN Windows IPv6 setup | Runtime ядра; итоговое поведение уточнено #7341. |
+| `043d2e4` #7340 | XDRIVE Drive performance | D–F: beta/defaults/приёмка; не переносить алгоритмы storage в приложение. |
+| `bb335c6` | Mux minimum/default 128, reuse 1024 | C: расчёт effective concurrency, справка и подсказки. |
+| `2e4c13d` #7223 | Cleanup failed live inbound handler | Runtime ядра; API Console продолжает показывать ошибку CLI. |
+| `5745dea` | Mux MutexWriter | Исправление потокобезопасности ядра. |
+| `2d287bb` #7341 | Windows DisabledComponents/misconfigtun | Runtime ядра; справка о платформенной применимости. |
+| `3d3a504` #7135 | Chrome 155 fingerprint, временный fork uTLS | C: новый fingerprint; итоговая зависимость определяется `924a5e7`. |
+| `a5d52d2` | REALITY dependency update | Зависимость ядра, схема REALITY не меняется. |
+| `3a88ccb` #7343 | Android packed relocations | Сборка ядра. |
+| `2a773ff` #7351 | docker/login-action | CI ядра. |
+| `924a5e7` | Возврат к official uTLS, другая REALITY revision | В финальном go.mod official refraction-networking/utls, не XTLS fork. |
+| `af8f967` #7352 | XDRIVE beta notes/Drive optimizations | D–F; снимает прежнюю отсрочку XDRIVE. |
+| `676eaf6` | Версия 26.11.9 | F: baseline после реализации/проверок. |
+
+## 153.3 Расхождения с Feldjäger
+
+- **Log:** `config/log_settings.rs` и `logs/destination.rs` ищут только `loglevel`.
+  Go принимает оба написания без учёта регистра, Feldjäger — нет: загруженный
+  `logLevel: "none"` может показываться как default warning и доступные log streams.
+  Save добавляет `loglevel`, оставляя `logLevel` в неизвестных полях. Нужен общий reader
+  и явная обработка конфликтующих aliases; сохранить неизвестные поля и отсутствие объекта.
+- **Freedom:** `outbound_protocol/freedom.rs` знает только `blockDelay`;
+  `delay`/`logLevel` пока лишь extras. Новое ядро сохраняет legacy alias с предупреждением,
+  причём `blockDelay` побеждает `delay`; параметры запрещены для allow.
+  `logLevel` регистронезависим, пустой/отсутствующий = info, допустимы none/debug/info/warning/error.
+  Автоматически удалять legacy или неуместные поля нельзя; миграция должна быть явной.
+- **TUN:** `inbound_protocol/mod.rs::is_valid_tun_wfp_block_leak` знает только три
+  keywords и tcp/udp с одним портом. Новая grammar проверяется ядром на всех ОС;
+  само WFP-поведение остаётся Windows-only. Не нужно реализовывать WFP в Feldjäger.
+- **Mux:** `outbound_edit/mux.rs::effective_concurrency()` всё ещё даёт 8 для 0/отсутствия;
+  `MUX_CONCURRENCY_EFFECTIVE_MAX=128` и GUI-справка устарели. Теперь 0…128 → 128,
+  положительные выше сохраняют свой MaxConcurrency, а MaxConnection=1024 ограничивает
+  переиспользование. Отрицательные значения сохраняют прежний смысл, JSON остаётся int16.
+- **TLS:** outbound `TLS_KNOWN_FINGERPRINTS` не содержит `hellochrome_155`, и validator
+  блокирует его; добавить в presets/валидацию с учётом версии ядра.
+- **GeoData:** `infra/conf/geodata.go` меняет только URL XTLS/Xray-rules-dat с окончанием
+  `.dat` на `.dat.gz`; `file` по-прежнему `.dat`. В Feldjäger ручной updater использует
+  Loyalsoldier по прежнему решению §141. Это обновление не требует менять этот источник.
+- **Secrets:** `config/json_diff.rs` не считает `secrets` секретным ключом, а при обходе
+  массива использует индекс как leaf key. Добавить имя в список недостаточно:
+  нужен учёт секретного родительского пути при изменении/добавлении/удалении элемента,
+  а также redaction добавляемого родительского объекта. Это относится уже к Raw JSON.
+
+## 153.4 XDRIVE: границы будущей реализации
+
+Схема XDRIVE и базовые VLESS-проверки существовали до этого релиза; delta в основном
+оптимизирует transport runtime. Для Feldjäger это новая структурная поверхность,
+а не новая реализация протокола. Общая модель должна жить в `config/stream/`, формы —
+в существующих Shell, orchestration и generic JSON validation — в application layer.
+
+- `service`: local/google-drive/template/s3; `Google Drive` — deprecated alias.
+  Google Drive требует три secrets: ClientID, ClientSecret, RefreshToken.
+  `remoteFolder` — storage identifier, для Drive folder ID, не SSH RemotePath.
+- Общие поля: segmentBytes, flushIntervalMs, pollIntervalMs, maxPollIntervalMs,
+  sessionTtlSeconds, concurrency, eagerWindowMs, holeTimeoutMs; `xmux` использует
+  существующие range-типы; template/s3 имеют собственные поля.
+- Drive slot defaults: concurrency=64, flush=10 ms, maxPoll=200 ms; для остальных
+  backend — 8/20/500. Остальные defaults: segmentBytes=524288, poll=50 ms,
+  eagerWindow=2000 ms, holeTimeout=30000 ms, sessionTTL=300 s; caps concurrency=256,
+  segmentBytes=16 MiB. Не записывать defaults при простом открытии формы.
+- Не путать три concurrency: outbound Mux, XDRIVE slots и XDRIVE XMUX HTTP pool.
+  XMUX defaults применяются ко всему пустому объекту, не к каждому полю отдельно:
+  Drive h2 — 4 connections, h3 — 1, прочие services — 1; hMaxReusableSecs=1800–3000.
+- `validateXDrive`: только VLESS с encryption/decryption не none, без flow;
+  outbound без testpre, mux включён без отрицательных TCP/XUDP и без UDP443=skip,
+  кроме reverse, который открывает собственный mux. Inbound — один порт.
+- h3 выбирается только ALPN `["h3"]`, без fallback на h2; brutal/force-brutal запрещены,
+  для Google Drive единственная допустимая UDP-маска — noise. В обоих направлениях
+  XDRIVE обращается к storage; обычный inbound server-certificate gate сюда неприменим.
+- Нет официального Share URI; OAuth-setup вне Feldjäger, секреты — в remote config,
+  не в локальных настройках. Никакого автоматического изменения аккаунта/Drive-папки.
+
+## 153.5 Проверки и пределы вывода
+
+Версии локальных binaries проверены: `testbin/xray-26.10.31.exe` = a4a3dff,
+`testbin/xray.exe` = 676eaf6. Временный offline harness выполнил 44 случая × 2 версии:
+
+- 8 Freedom cases: block delay/logLevel, legacy alias, оба delay-ключа; allow с любым
+  delay/logLevel отвергается новым ядром, старое принимает; verbose отвергается новым.
+- 17 TUN cases: 11 новых допустимых форм проходят только на новом ядре,
+  3 прежних проходят на обоих, 3 невалидных отвергаются обоими.
+- loglevel/logLevel/LOGLEVEL принимаются обеими версиями; fingerprint hellochrome_155
+  принимается только новой. Успех log case проверяет загрузку, не фактическое содержимое логов.
+- 15 XDRIVE cases: сервер/клиент по PDF, h3 и h3+noise принимаются;
+  none-encryption, выключенный/неподходящий mux, flow/testpre, h3+brutal/salamander,
+  несколько портов отвергаются. Пара encryption/decryption сгенерирована официальным
+  `xray vlessenc`, в вывод аудита не включена; OAuth-значения были фиктивными.
+
+Это 88 проверок загрузки с ожидаемыми отказами, не 88 успешных конфигураций и
+не запуск полного Rust suite. Никакие сервисы не запускались, Google/SSH не использовались;
+реальная пропускная способность, OAuth и обмен через Drive требуют отдельной приёмки.
+Локальные parity-тесты Feldjäger пока ищут `XRAY_BIN` или `xray-bin`, поэтому для нового
+`testbin` путь нужно задавать явно. Baseline остаётся 26.10.31 до этапа F.
+
+# 154 Этап A: Log Settings aliases и защита XDRIVE secrets (0.5.76-5)
+
+- `config/log_settings.rs::log_level_fields` — общий case-insensitive reader для
+  Log Settings и `logs/destination.rs`. Единственный найденный ключ сохраняет своё
+  написание и неизменённое JSON-значение (включая null/unsupported); новый ключ — `logLevel`.
+- Несколько spellings не интерпретируются как известный effective level: порядок
+  исходного JSON уже потерян в Value. В Log Settings — предупреждение, выбор уровня
+  и явный checkbox замены перечисленных ключей одним `logLevel` при Save.
+  Validation и writer проверяют конфликт до мутации; согласие само по себе недостаточно
+  без выбранного поддерживаемого уровня. Preview/change summary показывают удаляемые ключи.
+  Cancel не меняет исходный конфиг. Unknown поля сохраняются.
+- Xray Logs использует тот же reader: `logLevel: none` корректно отключает оба потока;
+  при нескольких ключах Access/Error помечаются Unsupported, без догадки об источнике.
+  Независимый systemd journal по обнаруженному unit не затронут.
+- `config/json_diff.rs` останавливает обход на секретном поле и маскирует его целиком,
+  включая `secrets[]`. Так изменения индексов/формы, добавление/удаление массива
+  или родителя не превращают OAuth-строки в обычные scalar values. Несекретные поля
+  остаются доступны для проверки. Redaction работает и в Debug готового diff.
+- `SourcedSection`, `EditableXrayConfig`, raw inbound/outbound requests и
+  `ModifyConfigOutcome` получили Debug без JSON/serialized payload: только метаданные.
+  Raw-поля остаются доступны для штатного parse/edit/write, сериализация не менялась.
+- `logging/redact.rs` удаляет labelled OAuth-поля/массивы из диагностических строк
+  JSON/Debug/form, в том числе индексные и экранированные ключи. В `remote_cli/config_test.rs`
+  redaction выполняется перед выбором строк ошибки: иначе фильтр мог выбросить label
+  `secrets` и оставить строку с токеном. Усечение сообщений теперь сохраняет границы UTF-8.
+- Общий backup/conflict/atomic-write/remote-test/rollback pipeline не менялся;
+  автоматического restart нет. Root version 0.5.76-5, SSH crate без изменений,
+  baseline Xray-core пока 26.10.31. Статусы/проверки — Roadmap §4.5 и PLAN.md.
+- Проверки: `cargo test --workspace --locked` с явно заданным
+  `XRAY_BIN=testbin/xray.exe` (26.11.9) — **1481 + 16 passed / 0 failed** (+12 root tests).
+  Отдельный Log Settings parity-test на `testbin/xray-26.10.31.exe` прошёл;
+  он проверяет четыре сформированных варианта JSON. `cargo build --locked` прошёл
+  без предупреждений; `cargo clippy --lib --locked` — прежние 65 предупреждений
+  root crate и 1 SSH dependency, в добавленных участках новых предупреждений нет.
+  `git diff --check` прошёл. GUI вручную и реальные SSH-операции не проверялись.
+
+# 155 Этап B: Freedom finalRules delay / logLevel (0.5.77-0)
+
+Реализация по [PLAN.md](PLAN.md), этап B. Схема сверена с
+[`infra/conf/freedom.go` на v26.11.9](https://github.com/XTLS/Xray-core/blob/v26.11.9/infra/conf/freedom.go)
+(XTLS/Xray-core#7329). Baseline пока 26.10.31: его повышение остаётся этапом F.
+
+- `outbound_protocol/freedom.rs`: `FreedomFinalRuleDraft.delay` и `log_level`,
+  общий список допустимых уровней (none/debug/info/warning/error, регистр не важен,
+  отсутствующий/пустой = info). Регистр/whitespace значения не нормализуются молча;
+  неизвестная строка читается, но блокирует запись до исправления, как в новом ядре.
+- Исходные JSON-формы трёх полей (`delay`, `logLevel`, `blockDelay`) сохранены отдельно:
+  unrelated edit оставляет number/string/null и отсутствующие поля как на диске.
+  Неизвестные rule keys сохраняются. Непредставимые формы и нестандартные case aliases
+  остаются целиком на Raw JSON path, без добавления второго написания ключа.
+- `blockDelay` остаётся читаемым legacy alias с приоритетом над `delay`.
+  `migrate_block_delay` переносит именно его значение и явно удаляет старый ключ;
+  наличие другого `delay` не меняет выбор эффективного значения. При ошибке draft не меняется.
+  Старая политика редактора «записываем только неотрицательные timeout» сохранена;
+  чтение более широкое, чем structured writing (в ядре Int32Range приводится к unsigned).
+- Запись `delay` / legacy `blockDelay` и непустого `logLevel` в allow запрещена.
+  Изменение action само по себе ничего не удаляет. Отдельное явное действие
+  `remove_block_fields` удаляет ровно эти три поля, оставляя остальные данные.
+  Validation выполняется до мутации исходного объекта.
+- `ApplicationService` выполняет обе операции только над editor draft, сбрасывает
+  устаревший diff и пытается построить новый Preview. Если остальной draft ещё невалиден,
+  старый Preview не показывается. Save/Cancel и существующий shared remote pipeline
+  остаются прежними; конфигурация на сервере не меняется кнопкой миграции.
+- GUI: delay и ComboBox logLevel только для block; legacy поле read-only, пояснение
+  приоритета и явные кнопки миграции/удаления. Delay с legacy alias не редактируется
+  до миграции. Help EN/RU объясняет default, severity и общий фильтр Xray log.logLevel.
+  Перестановка/удаление правила в том же UI-кадре отменяет pending fix, чтобы индекс
+  не применился к другому правилу.
+- `CoreFeature::FreedomFinalRuleDelayAndLogLevel` (v26.11.9, #7329) и warnings:
+  старое ядро игнорирует новые поля; новое предупреждает о legacy alias,
+  неподходящих полях в allow и некорректном уровне. Неизвестная версия считается текущей,
+  как в существующем механизме compatibility. Старые конфиги не мигрируются автоматически.
+- Root version 0.5.77-0; код SSH crate не менялся. Найденные до начала этапа изменения
+  зависимостей в root / SSH Cargo.toml и Cargo.lock сохранены как пользовательские.
+- Проверки (2026-11-10): **1489 + 16 passed / 0 failed** в полном workspace с
+  `XRAY_BIN=testbin/xray.exe` (26.11.9), +8 root tests. Они покрывают lossless/null,
+  legacy priority, явную миграцию, отсутствие неявного удаления при смене action,
+  raw fallback, уровни/allow validation, version warnings и application draft/Cancel/Preview.
+  Parity-test из 10 конфигураций отдельно прошёл на 26.10.31: новое ядро отвергает
+  block-only поля в allow и неизвестный уровень, старое принимает/игнорирует новые поля.
+  `cargo build --locked` прошёл; Clippy — прежние 65 root + 1 SSH предупреждение,
+  новых в добавленных участках нет. GUI вручную и реальные SSH-операции не проверялись.
+
+# 156 Этап C: TUN / Mux / Chrome 155 / GeoData (0.5.78-0)
+
+Реализация по [PLAN.md](PLAN.md), этап C. Сверено с исходниками тега v26.11.9:
+[`proxy/tun/wfp_leak.go`](https://github.com/XTLS/Xray-core/blob/v26.11.9/proxy/tun/wfp_leak.go),
+[`app/proxyman/outbound/handler.go`](https://github.com/XTLS/Xray-core/blob/v26.11.9/app/proxyman/outbound/handler.go),
+[`common/mux/client.go`](https://github.com/XTLS/Xray-core/blob/v26.11.9/common/mux/client.go),
+[`transport/internet/tls/tls.go`](https://github.com/XTLS/Xray-core/blob/v26.11.9/transport/internet/tls/tls.go)
+и [`infra/conf/geodata.go`](https://github.com/XTLS/Xray-core/blob/v26.11.9/infra/conf/geodata.go).
+Baseline остаётся 26.10.31 до этапа F; XDRIVE — следующие этапы D/E.
+
+- `inbound_protocol/tun_leak.rs` выделяет проверку грамматики WFP-селекторов:
+  all/allexceptlan/tcp/udp/icmp, отдельные порты и диапазоны 1..65535,
+  tcp/udp с портом или диапазоном, необязательный IPv4-CIDR: или [IPv6-CIDR]:.
+  Проверяются family, длина префикса, порядок/границы портов; mapped IPv6 и zones
+  не допускаются, как в ядре. Селекторы не разворачиваются и не нормализуются при записи:
+  сохраняются регистр и CIDR host bits. Это синтаксическая проверка, не реализация WFP.
+- `CoreFeature::TunWfpLeakSelectors` и `Chrome155Fingerprint` требуют v26.11.9.
+  Новая грамматика даёт version warning на старом ядре; прежнее предупреждение
+  Windows-only остаётся. GUI добавляет keyword checkboxes и список сложных селекторов,
+  EN/RU help; systemd/SSH слой не менялся.
+- `MuxBehavior` вычисляет presentation limits по версии Discovery и текущему draft.
+  До v26.11.9 default TCP = 8, positive minimum = 1, reuse = 128;
+  с v26.11.9 default/minimum = 128, reuse = 1024. Большие MaxConcurrency ядро
+  сохраняет, но реально число сессий на соединение ограничивается MaxConnection
+  (общим количеством его использований). Positive XUDP также ограничен reuse;
+  zero/negative сохраняют прежний смысл. JSON-поля по-прежнему int16, не 0..1024.
+  `effective_concurrency()` без версии теперь использует текущие defaults;
+  `behavior_for_core()` позволяет явно выбрать версию.
+- `ApplicationService::outbound_mux_behavior()` возвращает расчёт без изменения
+  editor/loaded config. GUI показывает TCP/XUDP и reuse, version-aware placeholder,
+  при неизвестной версии явно сообщает допущение v26.11.9+. Автоматического изменения
+  чисел или миграции нет. Старое безусловное «выше 128 действует как 128» удалено.
+- `hellochrome_155` добавлен в known fingerprints и presets; TLS и REALITY проходят
+  прежнюю validation. Version warning учитывает оба settings-объекта и оба направления;
+  серверная ветка REALITY (`target`/`dest`) исключена: ядро не читает её fingerprint.
+  EN/RU help объясняет отличие явного fingerprint от следующего default ядра `chrome`.
+- GeoData Settings: общий help в View/Edit описывает автоматический запрос `.dat.gz`
+  для XTLS/Xray-rules-dat GitHub/raw URL, оканчивающихся `.dat`, с v26.11.9.
+  Исходный URL и локальный `.dat` сохраняются. Ручной updater Feldjäger на Loyalsoldier
+  не менялся; сетевую загрузку Xray Feldjäger не дублирует.
+- Root version 0.5.78-0; SSH crate без изменений кода. Пользовательские изменения
+  зависимостей сохранены. Workspace **1497 + 16 passed / 0 failed** на 26.11.9 (+8 root tests):
+  grammar/boundaries, lossless TUN с unrelated edit, Mux version boundaries/preservation,
+  ApplicationService Discovery без dirty-on-read, fingerprint validation и version warnings.
+  47 TUN fixtures прошли на обеих версиях; отдельно 12 TLS/REALITY fingerprint cases
+  (chrome / hellochrome_155 / неизвестный) дали ожидаемый результат на 26.10.31 и 26.11.9.
+  Эти проверки используют `run -test`: WFP runtime и реальные TLS-рукопожатия не проверялись.
+  `cargo build --locked` прошёл; Clippy lib — прежние **65 root + 1 SSH** предупреждение,
+  новых в добавленных участках нет. `git diff --check` прошёл. GUI вручную и реальные
+  SSH-операции не проверялись.
+
+# 157 Этап D: модель XDRIVE и общие проверки (0.5.79-0)
+
+Реализация по [PLAN.md](PLAN.md), этап D. Источники: Xray-core v26.11.9,
+[`XDriveConfig.Build`](https://github.com/XTLS/Xray-core/blob/v26.11.9/infra/conf/transport_method.go),
+[`validateXDrive`](https://github.com/XTLS/Xray-core/blob/v26.11.9/infra/conf/xray.go),
+[`StreamConfig.Build`](https://github.com/XTLS/Xray-core/blob/v26.11.9/infra/conf/transport_internet.go),
+[`ValidateS3Config`](https://github.com/XTLS/Xray-core/blob/v26.11.9/transport/internet/xdrive/s3.go).
+Baseline остаётся 26.10.31; формы и presets — этап E, окончательная приёмка — F.
+
+- Общий модуль `config/stream/xdrive`: `XdriveSettingsDraft`, `XdriveXmuxDraft`,
+  `XdriveS3Draft`, parse/to_value/validate API, экспортированные из `xray` для application layer.
+  Typed service/remoteFolder/secrets, восемь uint32, шесть XMUX-полей, S3 endpoint/region/bucket/pathStyle;
+  template — произвольный JSON. Направление задаётся `StreamDirection` в проверках entity.
+- Отсутствие, explicit null/zero/empty, неизвестные поля и неправильные формы читаются без ошибки
+  и сохраняются. Defaults не материализуются. XMUX number/string и исходный текст диапазона
+  сохраняются при unrelated edit, в том числе пробелы. Для известных case aliases/duplicates
+  и non-object nodes — raw path, `is_structured_editable() == false`; попытка структурной правки
+  такого draft отклоняется вместо молчаливой потери изменений. Validation известных case aliases
+  работает на временной canonical copy, сериализатор оставляет исходный объект.
+- Сервисы local/google-drive/template/s3; `Google Drive` принимается и сохраняется,
+  отдельное предупреждение предлагает новое написание без автоматической миграции.
+  Google Drive проверяет ровно три secrets в порядке ClientID, ClientSecret, RefreshToken.
+  Template требует наличия узла, но его runtime-схема не выдумывается: ядро проверяет её глубже
+  при создании storage. S3 проверяет endpoint, region, bucket, relative prefix, pathStyle,
+  AccessKeyID/SecretAccessKey/optional SessionToken; endpoint не нормализуется при записи.
+  Прямая зависимость `url` 2.5.8 (MIT/Apache-2.0) использует уже присутствовавшую транзитивную версию.
+- G15 добавлен первым в inbound/outbound compatibility pipeline: checks present xdriveSettings
+  даже на другом transport, затем ограничения активного XDRIVE. Нужны VLESS и непустая строка
+  Encryption из официального `xray vlessenc`; проверяются wire format, режим и размеры decoded key
+  material, без генерации/реализации криптографии. Inbound: effective flow клиентов пустой,
+  один порт. `env:` разрешает локально проверить синтаксис, значение определяет удалённое ядро.
+  Outbound: flat или одиночный legacy vnext account, без flow/testpre; Mux enabled,
+  nonnegative concurrency/xudpConcurrency, UDP443 не skip. Flat VLESS reverse снимает требование
+  режима Mux, но не обходит decoding/validation явно заданного mux.
+- `method` имеет приоритет над `network`, как в core; h3 включается только с TLS ALPN ровно
+  `["h3"]` (или строкой `"h3"`). Только в этом режиме Google Drive разрешает из UDP-масок noise;
+  brutal/force-brutal запрещены. H2 не получает это ограничение. `QuicTransport::XdriveH3`
+  встроен в общую классификацию/справку QUIC и не выдаёт ложное unused-quicParams предупреждение.
+- G12 server certificate gate и server-specific REALITY checks не применяются к XDRIVE inbound:
+  обе стороны обращаются к storage как клиенты. Обычные транспорты сохраняют прежние проверки.
+  Поддержка StreamMethod/OutboundTransport в формах пока не расширена: это отдельный этап E.
+- `CoreFeature::XdriveBeta` (v26.11.9, #7352), beta/version/legacy/invalid warnings доступны
+  через прежние ApplicationService warning paths. Сообщения требуют одинаковых версий обоих концов
+  и не обещают проверку доступа к storage или соответствия independently supplied key halves.
+  Ошибки содержат только фиксированный JSON path и описание, без входных значений.
+- Debug всех трёх новых моделей непрозрачен: secrets/template/endpoint/extras/raw не печатаются.
+  Произвольный template может содержать credentials в URL, body и custom headers: поэтому весь
+  template subtree маскируется в structural Preview (leaf edits, add/remove, whole parent)
+  и labelled external error details до truncation. JSON на диске не меняется.
+- Root version 0.5.79-0; код SSH crate не менялся, пользовательские изменения зависимостей сохранены.
+  Workspace **1511 + 16 passed / 0 failed** на 26.11.9 (+14 root tests). Проверены lossless/dirty-on-read,
+  uint32/XMUX boundaries, service checks, redaction/Debug, gates/version warnings, method precedence,
+  storage-client TLS и общий mutation path с сохранением storage data и atomic rejection invalid Mux.
+  **54 fixtures на каждой версии** (108 `run -test`) прошли на 26.11.9 и 26.10.31:
+  storage services, scalar/URL errors, encryption/flow, h3/brutal, Mux/reverse, inbound ports.
+  Совпадение syntax acceptance со старым pre-beta core не доказывает runtime-совместимость.
+  Проверки не обращаются к Google/S3, не создают storage и не подтверждают matching key pair.
+  Финальная сборка `cargo build --locked` прошла; `cargo clippy --lib --locked` — прежние
+  **65 root + 1 SSH** предупреждение, новых в добавленных участках нет. `git diff --check`
+  прошёл. GUI вручную и реальные SSH/storage операции не проверялись.
+
+# 158 Этап E: формы XDRIVE и Google Drive preset (0.5.80-0)
+
+Реализация по [PLAN.md](PLAN.md), этап E, поверх модели/ограничений §157.
+Root version 0.5.80-0, код SSH crate и baseline 26.10.31 не менялись; baseline/приёмка — этап F.
+
+- `StreamMethod::Xdrive` / `OutboundTransport::Xdrive` включены в VLESS selectors. Другие
+  протоколы и Vision не получают XDRIVE в inbound picker. `InboundStreamDraft` / `OutboundStreamDraft`
+  содержат общий lossless settings draft и отдельный `write_xdrive`, не связанный с переписыванием
+  транспорта/TLS. Inbound отдельно хранит `xdrive_security` (client model) и его write flag.
+- `app/xdrive.rs`: `XdriveEditorSide`, `XdriveEditorView`, `XdriveFieldView` — presentation-only
+  API. GUI получает готовые строки/labels, передаёт allowlisted field commands в ApplicationService;
+  JSON parsing/serialization в GUI не добавлены. Credential-bearing view structs не имеют Debug.
+  При чтении формы не меняются model/write/dirty flags. Field edits сбрасывают старый Preview,
+  сохраняют siblings/unknowns и отменяются вместе с обычной shell session.
+- `gui/pages/xdrive.rs` — общая секция существующих Stream forms, без sidebar/navigation page.
+  Service/folder, три маскированных Google OAuth-поля в официальном порядке, S3 credentials и
+  endpoint/region/bucket/pathStyle. Advanced: все восемь uint32 и XMUX ranges/seconds, template JSON.
+  Непредставимые формы/case aliases сохраняются на Raw JSON path. Смена service ничего не удаляет.
+  EN/RU help объясняет defaults/units, OAuth setup, квоты, Mux/encryption и h2/h3 constraints.
+- `template_editor_text` — непрозрачный, не сериализуемый буфер общего draft. Невалидный JSON
+  остаётся в поле; последнее parsed Value не теряется, но validation блокирует Preview/Save.
+  Маскирование template subtree из §157 остаётся во всех Preview путях. Credential/template
+  widgets по умолчанию masked; reveal-state привязан к случайному per-session widget ID,
+  поэтому Cancel/reopen/другой endpoint не наследуют раскрытие. Это внутренний UI nonce, не ключ Xray.
+- Inbound XDRIVE использует client TLS форму на Stream/Security: mode, serverName, ALPN,
+  fingerprint, echConfigList, pinnedPeerCertSha256, verifyPeerCertByName. Обычный server TLS writer
+  и fallback reconciliation не применяются к активному XDRIVE. Server certificates не требуются.
+  QUIC h3 / FinalMask editor и warnings используют dialing-side semantics на обеих сторонах.
+- Отдельный inbound storage writer работает с clone и применяет только изменённые компоненты:
+  сохраняет spelling network/method, исходные формы QUIC/sockopt/chains и inactive settings.
+  `apply_storage_client_security` сливает только изменённые typed TLS keys, сохраняет неизвестные,
+  null/string формы и неактивные security blocks. Изменение case alias обновляет существующий
+  ключ; конфликтующие duplicate aliases требуют Raw JSON. Foreign security objects не заменяются
+  молча. При ошибке outbound writer восстанавливает прежний stream; shared pipeline не менялся.
+- Google Drive beta preset — явное действие только для пустых settings без настроенного security.
+  Ставит service, eagerWindowMs=10000, три пустых OAuth slots, TLS h2 и client Mux на outbound;
+  заполненные значения и unknown fields не перезаписываются. Пустые обязательные schema fields
+  получают port 443 / outbound address 127.0.0.1 как placeholders. Folder/OAuth/UUID/key pair
+  пользователь задаёт сам; существующий Protocol Generate вызывает официальный `xray vlessenc`.
+  Flow/testpre/недопустимые маски не удаляются пресетом: их исправляют явно, иначе G15 блокирует Save.
+  Автоматизации Google Cloud/OAuth, storage requests и Rust-реализации криптографии нет.
+- `inbound_xdrive_share_blocked_reason` учитывает активный draft и сохранённую конфигурацию.
+  `build_client_share_uri` отказывает до разбора сертификатов/sidecar/generation material;
+  существующий Users menu отключает URI и QR с объяснением отсутствия официального формата.
+- Проверки: **1520 + 16 passed / 0 failed** в workspace с явным `XRAY_BIN=testbin/xray.exe`
+  (26.11.9), +9 root tests. Headless egui проверяет отсутствие side effects при отрисовке,
+  masked OAuth/template в output shapes и изоляцию session IDs. Проверены Cancel, invalid text,
+  secret order, S3/XMUX, explicit preset/отказ от замены существующих settings, URI prohibition,
+  lossless stream/TLS editing и смена transport. **8 editor-output fixtures на каждой версии**
+  (16 `run -test`) прошли на 26.11.9 и 26.10.31. Config acceptance не доказывает доступ к storage
+  или matching key pair. Ручная GUI/SSH/Google Drive/S3 приёмка остаётся отдельно; OAuth не выполнялся.
+  Финальные `cargo build --locked` и `git diff --check` прошли; Clippy lib — прежние
+  **65 root + 1 SSH** предупреждение, новых в добавленных участках нет.
+
+# 159 Обновление About (0.5.80-1)
+
+По запросу пользователя `BASELINE_XRAY_CORE` обновлён до 26.11.9: About и Copy Version Info
+используют одну константу и показывают актуальный developed-against release.
+Константа используется только для этих сведений; version-aware gates по-прежнему зависят
+от обнаруженного ядра. Credit заменён на `Developed with the help of OpenAI Codex.`
+Root version 0.5.80-1; SSH crate без изменений. Этап F остаётся открытым:
+изменение сведений About само по себе не завершает приёмку XDRIVE.
+Проверки: `cargo build` и `git diff --check` прошли.

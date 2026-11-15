@@ -39,11 +39,17 @@ use crate::xray::config::stream::{
 
 use crate::xray::config::inbound_stream::{KCP_IGNORED_FIELDS, KCP_LEGACY_OBFUSCATION_FIELDS};
 use crate::xray::config::outbound_edit::{parse_outbound_mux, validate_outbound_mux};
-use crate::xray::config::outbound_protocol::FREEDOM_LEGACY_STRATEGY_KEYS;
+use crate::xray::config::outbound_protocol::{FREEDOM_LEGACY_STRATEGY_KEYS, FREEDOM_FINAL_RULE_LOG_LEVELS};
 
 /// Stable warning identifiers (never block Save; see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompatibilityWarningId {
+    /// Public beta needs matching core versions on both sides.
+    XdriveBeta,
+    /// Legacy service spelling remains preserved until explicitly edited.
+    XdriveLegacyGoogleDrive,
+    /// XDRIVE configuration fails the shared settings/transport checks.
+    XdriveRejected,
     /// The config uses `feature`, but the installed core predates it (Roadmap §2.6 stage 0.7).
     RequiresNewerCore {
         feature: CoreFeature,
@@ -122,6 +128,12 @@ pub enum CompatibilityWarningId {
     /// Freedom `settings.noises` — deprecated since Xray-core v26.10.29 (XTLS/Xray-core#7242),
     /// replaced by a `noise` layer in `streamSettings.finalmask.udp`; "Fix config" moves it.
     FreedomNoisesDeprecated,
+    /// Legacy final-rule timeout alias; the core still reads it before `delay`.
+    FreedomBlockDelayDeprecated,
+    /// Block-only fields on allow rules prevent loading since v26.11.9.
+    FreedomFinalRuleBlockFieldsOnAllow,
+    /// Unknown log level prevents loading since v26.11.9.
+    FreedomFinalRuleLogLevelInvalid,
     /// `tlsSettings.allowInsecure: true` — a removed feature since Xray-core v26.1.31 (2c92339):
     /// `TLSConfig.Build()` fails, so the config does not load. `pinnedPeerCertSha256` /
     /// `verifyPeerCertByName` replace it (Roadmap §4.2).
@@ -220,6 +232,9 @@ impl CompatibilityWarningId {
     /// Short user-facing explanation (no secrets).
     pub fn message(self) -> Cow<'static, str> {
         let text = match self {
+            Self::XdriveBeta => "XDRIVE is beta (v26.11.9+); use exactly the same Xray-core version on client and server. Local validation does not verify storage access or matching VLESS Encryption keys",
+            Self::XdriveLegacyGoogleDrive => "deprecated service spelling: use google-drive; Feldjäger preserves Google Drive until explicitly changed",
+            Self::XdriveRejected => "XDRIVE settings or VLESS/encryption/Mux/port/h3 constraints are invalid; correct them before saving (credentials are never included in diagnostics)",
             Self::RequiresNewerCore { feature, installed } => {
                 return Cow::Owned(format!(
                     "{} requires Xray-core {} or newer (XTLS/Xray-core#{}); installed {}",
@@ -321,6 +336,15 @@ impl CompatibilityWarningId {
                 "deprecated by Xray-core v26.10.29: Freedom `noises` will be removed — they move to \
                  a `noise` layer in `streamSettings.finalmask.udp` (XTLS/Xray-core#7242); use \
                  \"Fix config\" in the editor"
+            }
+            Self::FreedomBlockDelayDeprecated => {
+                "deprecated since v26.11.9: blockDelay takes precedence over delay; explicitly migrate it in the Freedom editor to preserve the effective timeout"
+            }
+            Self::FreedomFinalRuleBlockFieldsOnAllow => {
+                "Xray-core v26.11.9+ rejects delay, blockDelay and non-empty logLevel on allow rules; remove those fields explicitly or use Raw JSON"
+            }
+            Self::FreedomFinalRuleLogLevelInvalid => {
+                "Xray-core v26.11.9+ rejects this logLevel; expected none, debug, info, warning or error (empty means info)"
             }
             Self::TlsAllowInsecureRemoved => {
                 "rejected by Xray-core v26.1.31+: `allowInsecure` is a removed feature and the \
@@ -454,6 +478,7 @@ impl CompatibilityWarning {
 /// Xray-core version from Discovery; `None` = unknown, treated as the current core.
 pub fn inbound_warnings(inbound: &Value, core: Option<XrayCoreVersion>) -> Vec<CompatibilityWarning> {
     let mut warnings = Vec::new();
+    xdrive_warnings(inbound, StreamDirection::Inbound, core, &mut warnings);
     // Before the stream checks: a Socks / HTTP inbound usually has no `streamSettings`.
     if let Some(location) = open_proxy_location(inbound) {
         warnings.push(CompatibilityWarning {
@@ -482,7 +507,8 @@ pub fn inbound_warnings(inbound: &Value, core: Option<XrayCoreVersion>) -> Vec<C
                 }
             }
         }
-        finalmask_warnings(finalmask, StreamDirection::Inbound, core, &mut warnings);
+        let direction=if crate::xray::config::stream::xdrive::xdrive_is_active(inbound){StreamDirection::Outbound}else{StreamDirection::Inbound};
+        finalmask_warnings(finalmask, direction, core, &mut warnings);
         let has_quic_params = finalmask.get("quicParams").is_some_and(|value| !value.is_null());
         if has_quic_params && quic_transport_of(stream).is_none() {
             warnings.push(CompatibilityWarning {
@@ -564,7 +590,44 @@ pub fn inbound_warnings(inbound: &Value, core: Option<XrayCoreVersion>) -> Vec<C
         }
     }
     tls_allow_insecure_warning(stream, &mut warnings);
+    fingerprint_version_warnings(stream, core, &mut warnings);
     warnings
+}
+
+fn xdrive_warnings(entity: &Value, direction: StreamDirection, core: Option<XrayCoreVersion>, warnings: &mut Vec<CompatibilityWarning>) {
+    use crate::xray::config::stream::xdrive::{validate_xdrive_entity, xdrive_is_active};
+    if xdrive_is_active(entity) {
+        push_if_core_too_old(CoreFeature::XdriveBeta, core, "streamSettings.network".to_owned(), warnings);
+        warnings.push(CompatibilityWarning { id: CompatibilityWarningId::XdriveBeta, location: "streamSettings.network".to_owned() });
+    }
+    if entity.pointer("/streamSettings/xdriveSettings/service").and_then(Value::as_str) == Some("Google Drive") {
+        warnings.push(CompatibilityWarning { id: CompatibilityWarningId::XdriveLegacyGoogleDrive, location: "streamSettings.xdriveSettings.service".to_owned() });
+    }
+    if let Err(error) = validate_xdrive_entity(entity, direction) {
+        warnings.push(CompatibilityWarning { id: CompatibilityWarningId::XdriveRejected,
+            location: error.split_once(':').map(|(path, _)| path).unwrap_or("streamSettings.xdriveSettings").to_owned() });
+    }
+}
+
+fn fingerprint_version_warnings(
+    stream: &Value,
+    core: Option<XrayCoreVersion>,
+    warnings: &mut Vec<CompatibilityWarning>,
+) {
+    // Both settings objects are built when present. REALITY's server branch ignores fingerprint;
+    // presence of target/dest (even JSON null, a non-nil RawMessage) selects that branch.
+    for key in ["tlsSettings", "realitySettings"] {
+        let Some(settings) = stream.get(key) else { continue; };
+        if key == "realitySettings" && (settings.get("target").is_some() || settings.get("dest").is_some()) {
+            continue;
+        }
+        if stream.get(key).and_then(|settings| settings.get("fingerprint"))
+            .and_then(Value::as_str).is_some_and(|value| value.eq_ignore_ascii_case("hellochrome_155"))
+        {
+            push_if_core_too_old(CoreFeature::Chrome155Fingerprint, core,
+                format!("streamSettings.{key}.fingerprint"), warnings);
+        }
+    }
 }
 
 /// `tlsSettings.allowInsecure: true` with `security: tls` — `TLSConfig.Build()` rejects it on
@@ -591,6 +654,7 @@ fn tls_allow_insecure_warning(stream: &Value, warnings: &mut Vec<CompatibilityWa
 /// installed Xray-core version from Discovery; `None` = unknown, treated as the current core.
 pub fn outbound_warnings(outbound: &Value, core: Option<XrayCoreVersion>) -> Vec<CompatibilityWarning> {
     let mut warnings = Vec::new();
+    xdrive_warnings(outbound, StreamDirection::Outbound, core, &mut warnings);
     // `null` decodes to a nil pointer in the core; every other value fails the load.
     if CoreFeature::OutboundProxySettingsRemoved.available_in(core)
         && outbound.get("proxySettings").is_some_and(|value| !value.is_null())
@@ -628,6 +692,7 @@ pub fn outbound_warnings(outbound: &Value, core: Option<XrayCoreVersion>) -> Vec
         .and_then(Value::as_str)
         .is_some_and(|protocol| protocol.trim().eq_ignore_ascii_case("freedom"));
     if let (true, Some(settings)) = (is_freedom, outbound.get("settings").and_then(Value::as_object)) {
+        freedom_final_rule_warnings(settings, core, &mut warnings);
         for (key, value) in settings {
             let id = match key.as_str() {
                 key if FREEDOM_LEGACY_STRATEGY_KEYS.contains(&key) => {
@@ -655,6 +720,7 @@ pub fn outbound_warnings(outbound: &Value, core: Option<XrayCoreVersion>) -> Vec
             outbound_finalmask_warnings(outbound, stream, finalmask, core, &mut warnings);
         }
         outbound_stream_warnings(stream, &mut warnings);
+        fingerprint_version_warnings(stream, core, &mut warnings);
         // An older core does not know the key and keeps trusting the OS store anyway.
         if stream.get("tlsSettings").and_then(|tls| tls.get("useSystemCA")).and_then(Value::as_bool) == Some(true) {
             push_if_core_too_old(
@@ -1123,7 +1189,14 @@ fn tun_warnings(inbound: &Value, core: Option<XrayCoreVersion>, warnings: &mut V
                 let value = value.trim().to_ascii_lowercase();
                 value == "windnsclient" || value.starts_with("tcp/") || value.starts_with("udp/")
             });
-        if uses_v26_10_31_values && CoreFeature::TunAutoSystemDnsAndLeakBlock.available_in(core) {
+        let uses_extended_grammar = settings.get("autoSystemWfpBlockLeak")
+            .and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str)
+            .map(str::trim).any(|value|
+                crate::xray::config::inbound_protocol::is_valid_tun_wfp_block_leak(value)
+                && !crate::xray::config::inbound_protocol::is_legacy_tun_wfp_block_leak(value));
+        if uses_extended_grammar {
+            push_if_core_too_old(CoreFeature::TunWfpLeakSelectors, core, location.clone(), warnings);
+        } else if uses_v26_10_31_values && CoreFeature::TunAutoSystemDnsAndLeakBlock.available_in(core) {
             push_if_core_too_old(CoreFeature::TunWfpBlockLeakPorts, core, location.clone(), warnings);
         }
         warnings.push(CompatibilityWarning {
@@ -1180,6 +1253,40 @@ fn wireguard_outbound_warnings(
     }
 }
 
+fn freedom_final_rule_warnings(
+    settings: &serde_json::Map<String, Value>,
+    core: Option<XrayCoreVersion>,
+    warnings: &mut Vec<CompatibilityWarning>,
+) {
+    let Some(rules) = settings.get("finalRules").and_then(Value::as_array) else { return; };
+    let feature = CoreFeature::FreedomFinalRuleDelayAndLogLevel;
+    for (index, rule) in rules.iter().enumerate() {
+        let location = format!("settings.finalRules[{index}]");
+        for key in ["delay", "logLevel"] {
+            if rule.get(key).is_some_and(|value| !value.is_null()) {
+                push_if_core_too_old(feature, core, format!("{location}.{key}"), warnings);
+            }
+        }
+        if !feature.available_in(core) { continue; }
+        if rule.get("blockDelay").is_some_and(|value| !value.is_null()) {
+            warnings.push(CompatibilityWarning { id: CompatibilityWarningId::FreedomBlockDelayDeprecated,
+                location: format!("{location}.blockDelay") });
+        }
+        let allow = rule.get("action").and_then(Value::as_str).is_some_and(|action| action.eq_ignore_ascii_case("allow"));
+        let level = rule.get("logLevel").and_then(Value::as_str).unwrap_or_default();
+        if allow && (!level.is_empty() || ["delay", "blockDelay"].iter()
+            .any(|key| rule.get(key).is_some_and(|value| !value.is_null()))) {
+            warnings.push(CompatibilityWarning { id: CompatibilityWarningId::FreedomFinalRuleBlockFieldsOnAllow,
+                location: location.clone() });
+        } else if rule.get("logLevel").is_some_and(|value| !value.is_null() && !value.is_string())
+            || (!level.is_empty() && !FREEDOM_FINAL_RULE_LOG_LEVELS.iter()
+                .any(|known| known.eq_ignore_ascii_case(level))) {
+            warnings.push(CompatibilityWarning { id: CompatibilityWarningId::FreedomFinalRuleLogLevelInvalid,
+                location: format!("{location}.logLevel") });
+        }
+    }
+}
+
 /// [`CompatibilityWarningId::RequiresNewerCore`] when the installed core is known and older
 /// than `feature`; nothing for an unknown version.
 fn push_if_core_too_old(
@@ -1222,6 +1329,52 @@ pub fn with_warning_suffix(message: impl Into<String>, warnings: &[Compatibility
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn chrome155_version_warning_covers_both_directions_and_security_objects() {
+        let old = XrayCoreVersion::new(26, 10, 31);
+        for key in ["tlsSettings", "realitySettings"] {
+            let entity = json!({"protocol": "vless", "settings": {}, "streamSettings": {
+                "security": "tls", key: {"fingerprint": "hellochrome_155"}
+            }});
+            for warnings in [inbound_warnings, outbound_warnings] {
+                let chrome_warnings = |core| warnings(&entity, core).into_iter().filter(|w|
+                    matches!(w.id, CompatibilityWarningId::RequiresNewerCore {
+                        feature: CoreFeature::Chrome155Fingerprint, ..
+                    })).collect::<Vec<_>>();
+                let found = chrome_warnings(Some(old));
+                assert_eq!(found.len(), 1);
+                assert_eq!(found[0].location, format!("streamSettings.{key}.fingerprint"));
+                assert!(chrome_warnings(Some(XrayCoreVersion::new(26, 11, 9))).is_empty());
+                assert!(chrome_warnings(None).is_empty());
+            }
+        }
+        for key in ["target", "dest"] {
+            let entity = json!({"protocol": "vless", "streamSettings": {
+                "security": "reality", "realitySettings": {
+                    key: "example.com:443", "fingerprint": "HELLOCHROME_155"
+                }
+            }});
+            assert!(!inbound_warnings(&entity, Some(old)).iter().any(|w| matches!(w.id,
+                CompatibilityWarningId::RequiresNewerCore { feature: CoreFeature::Chrome155Fingerprint, .. })));
+        }
+    }
+
+    #[test]
+    fn extended_tun_selectors_warn_only_before_26_11_9() {
+        for selector in ["all", "AllExceptLAN", "TCP", "icmp", "53", "tcp/10-20",
+            "1.1.1.1/24:tcp/853", "[2001:DB8::1/32]:udp/10-20"] {
+            let entity = json!({"protocol": "tun", "settings": {"autoSystemWfpBlockLeak": [selector]}});
+            for (core, expected) in [(Some(XrayCoreVersion::new(26, 10, 31)), true),
+                (Some(XrayCoreVersion::new(26, 11, 9)), false), (None, false)] {
+                let warnings = inbound_warnings(&entity, core);
+                assert_eq!(warnings.iter().any(|w| matches!(w.id,
+                    CompatibilityWarningId::RequiresNewerCore {feature: CoreFeature::TunWfpLeakSelectors, ..})),
+                    expected, "{selector}");
+                assert!(warnings.iter().any(|w| w.id == CompatibilityWarningId::TunWfpBlockLeakWindowsOnly));
+            }
+        }
+    }
 
     #[test]
     fn netip_addr_matches_go_parse_addr() {
@@ -1288,6 +1441,33 @@ mod tests {
         assert!(inbound_warnings(&defaults, Some(installed)).is_empty());
         let not_tun = json!({"protocol": "tunnel", "settings": {"autoSystemWfpBlockLeak": ["dns"]}});
         assert!(inbound_warnings(&not_tun, None).is_empty());
+    }
+
+    #[test]
+    fn freedom_final_rule_fields_warn_by_installed_core_version() {
+        let old = XrayCoreVersion::new(26, 10, 31);
+        let new = XrayCoreVersion::new(26, 11, 9);
+        let outbound = json!({"protocol": "freedom", "settings": {"finalRules": [
+            {"action": "block", "delay": 0, "logLevel": "info", "blockDelay": 1}
+        ]}});
+        let warnings = outbound_warnings(&outbound, Some(old));
+        assert_eq!(warnings.len(), 2);
+        assert!(warnings.iter().all(|warning| matches!(warning.id,
+            CompatibilityWarningId::RequiresNewerCore { feature: CoreFeature::FreedomFinalRuleDelayAndLogLevel, installed } if installed == old)));
+        assert_eq!(warnings[0].location, "settings.finalRules[0].delay");
+        for version in [Some(new), None] {
+            let warnings = outbound_warnings(&outbound, version);
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(warnings[0].id, CompatibilityWarningId::FreedomBlockDelayDeprecated);
+        }
+        let invalid = json!({"protocol": "freedom", "settings": {"finalRules": [
+            {"action": "allow", "blockDelay": 0}, {"action": "block", "logLevel": "verbose"}
+        ]}});
+        let warnings = outbound_warnings(&invalid, Some(new));
+        assert!(warnings.iter().any(|warning| warning.id == CompatibilityWarningId::FreedomFinalRuleBlockFieldsOnAllow));
+        assert!(warnings.iter().any(|warning| warning.id == CompatibilityWarningId::FreedomFinalRuleLogLevelInvalid));
+        assert!(!outbound_warnings(&invalid, Some(old)).iter().any(|warning|
+            matches!(warning.id, CompatibilityWarningId::FreedomFinalRuleBlockFieldsOnAllow | CompatibilityWarningId::FreedomFinalRuleLogLevelInvalid)));
     }
 
     #[test]

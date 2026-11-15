@@ -223,21 +223,19 @@ const HELP_TUN_DNS_TO_GATEWAY: HelpText = HelpText::new(
      старые ядра поле игнорируют.",
 );
 const HELP_TUN_WFP_BLOCK_LEAK: HelpText = HelpText::new(
-    "Windows only: Windows Filtering Platform rules that keep traffic of every program but Xray \
-     inside the TUN; all need autoSystemRoutingTable. \"tcp/PORT\" / \"udp/PORT\" — connections \
-     to that port (e.g. tcp/853); \"windnsclient\" — Windows' DNS Client service (DNS over \
-     HTTPS / TLS on Windows 11 and Server 2022+); \"dns\" — udp/53, tcp/53, windnsclient, \
-     tcp/853 and udp/853 together; \"misconfigtun\" — traffic of a misconfigured TUN. Port 53 and \
-     windnsclient need `dns`. Does nothing on a Linux server, but Xray-core still refuses any \
-     other value at load. Ports and windnsclient need Xray-core v26.10.31.",
-    "Только Windows: правила Windows Filtering Platform, которые держат трафик всех программ, \
-     кроме Xray, внутри TUN; все требуют autoSystemRoutingTable. \"tcp/ПОРТ\" / \"udp/ПОРТ\" — \
-     подключения к этому порту (например, tcp/853); \"windnsclient\" — служба DNS-клиента Windows \
-     (DNS через HTTPS / TLS в Windows 11 и Server 2022+); \"dns\" — сразу udp/53, tcp/53, \
-     windnsclient, tcp/853 и udp/853; \"misconfigtun\" — трафик неправильно настроенного TUN. \
-     Порт 53 и windnsclient требуют `dns`. На Linux-сервере ничего не делает, но любое другое \
-     значение Xray-core всё равно отвергает при загрузке. Порты и windnsclient требуют Xray-core \
-     v26.10.31.",
+    "Windows only: WFP leak prevention; requires autoSystemRoutingTable. dns includes ports 53/853 \
+     and windnsclient; misconfigtun covers a misconfigured TUN. windnsclient and tcp/PORT or \
+     udp/PORT require v26.10.31. Since v26.11.9: all, allexceptlan, tcp, udp, icmp, bare ports \
+     (both TCP/UDP), ranges such as tcp/8000-9000, and optional IPv4/CIDR: or [IPv6/CIDR]: \
+     prefixes, e.g. 1.1.1.1/24:tcp/853. Ports are 1..65535; spelling and host bits are preserved. \
+     DNS-related selectors need dns. No WFP rules run on Linux, but syntax is still validated.",
+    "Только Windows: защита от утечек через WFP; требует autoSystemRoutingTable. dns включает \
+     порты 53/853 и windnsclient; misconfigtun — неправильно настроенный TUN. windnsclient и \
+     tcp/ПОРТ или udp/ПОРТ требуют v26.10.31. С v26.11.9: all, allexceptlan, tcp, udp, icmp, \
+     порт без протокола (TCP и UDP), диапазоны вроде tcp/8000-9000 и необязательные префиксы \
+     IPv4/CIDR: или [IPv6/CIDR]:, например 1.1.1.1/24:tcp/853. Порты — 1..65535; написание и \
+     host bits сохраняются. Для селекторов DNS нужен dns. На Linux правила WFP не действуют, \
+     но синтаксис всё равно проверяется.",
 );
 
 // Stream tab — method selector + TCP.
@@ -2466,7 +2464,7 @@ fn show_tun_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
             ui.end_row();
 
             super::field_label(ui, "autoSystemWfpBlockLeak", HELP_TUN_WFP_BLOCK_LEAK);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 for known in TUN_WFP_BLOCK_LEAK_VALUES {
                     let mut checked = auto_system_wfp_block_leak
                         .iter()
@@ -2486,7 +2484,7 @@ fn show_tun_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
             ui.end_row();
         });
 
-    // `tcp/<port>` / `udp/<port>` entries (v26.10.31): every value that is not a keyword, edited as
+    // Port/range and CIDR selectors: every value that is not a keyword, edited as
     // one list; the keywords keep their checkboxes and their place in front.
     let is_keyword = |value: &String| {
         TUN_WFP_BLOCK_LEAK_VALUES.iter().any(|known| value.trim().eq_ignore_ascii_case(known))
@@ -2494,7 +2492,7 @@ fn show_tun_protocol_edit(ui: &mut Ui, service: &mut ApplicationService) {
     let mut port_rules: Vec<String> = auto_system_wfp_block_leak.iter().filter(|v| !is_keyword(v)).cloned().collect();
     if persistent_multiline_list_row(
         ui,
-        "autoSystemWfpBlockLeak ports (tcp/PORT or udp/PORT, one per line)",
+        "autoSystemWfpBlockLeak selectors (ports/ranges or CIDR:selector, one per line)",
         &mut port_rules,
         "tun_wfp_ports",
     ) {
@@ -2688,6 +2686,7 @@ fn show_stream_readonly_method_grid(ui: &mut Ui, draft: &InboundStreamDraft) {
             ui.label(method.label());
             ui.end_row();
             match method {
+                StreamMethod::Xdrive => { ui.label("XDRIVE storage transport; inspect Raw JSON or edit Stream for settings."); },
                 StreamMethod::Tcp => {
                     ui.label("acceptProxyProtocol");
                     ui.label(bool_label(draft.tcp.accept_proxy_protocol));
@@ -2856,6 +2855,13 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
         return;
     }
 
+    super::xdrive::show(ui,service,crate::app::XdriveEditorSide::Inbound);
+    let Some(session) = service.inbound_editor_session_mut() else { return; };
+    if session.stream.method==Some(StreamMethod::Xdrive) && session.stream.xdrive_security.mode==InboundSecurityMode::Tls
+        && session.stream.xdrive_security.tls.alpn==["h3"]
+        && show_quic_params_edit(ui,StreamDirection::Outbound,crate::xray::QuicTransport::XdriveH3,&mut session.stream.quic_params){
+            session.stream.write_quic_params=true;session.dirty=true;
+    }
     // mKCP legacy header/seed → `mkcp-legacy` layers (Roadmap §2.6 stage 5.2). Needs the
     // service (core version, diff preview), so the session borrow ends here and is taken again.
     if session.stream.method == Some(StreamMethod::Mkcp) && session.stream.kcp.has_legacy_obfuscation() {
@@ -2893,7 +2899,7 @@ fn show_stream_edit(ui: &mut Ui, service: &mut ApplicationService) {
         } else {
             show_finalmask_edit(
                 ui,
-                StreamDirection::Inbound,
+                if session.stream.method==Some(StreamMethod::Xdrive){StreamDirection::Outbound}else{StreamDirection::Inbound},
                 &mut session.stream.finalmask_tcp,
                 &mut session.stream.finalmask_udp,
                 reality_probe_notice.then_some(
@@ -3079,6 +3085,7 @@ fn show_stream_transport_edit(
     ui.add_space(6.0);
 
     match session.stream.method.unwrap_or(StreamMethod::Tcp) {
+        StreamMethod::Xdrive => {},
         StreamMethod::Tcp => {
             let mut accept = session.stream.tcp.accept_proxy_protocol;
             ui.horizontal(|ui| {
@@ -3309,6 +3316,8 @@ fn show_security_tab(ui: &mut Ui, service: &mut ApplicationService, row: &Inboun
 
     if editing {
         show_security_edit(ui, service);
+    } else if service.inbound_xdrive_share_blocked_reason(row.index).is_some() {
+        ui.label("XDRIVE uses client TLS for storage; no server certificate is required. Edit Stream or Security to inspect the storage client settings.");
     } else {
         show_security_readonly(ui, service, row);
     }
@@ -3596,6 +3605,7 @@ fn show_security_readonly(
 }
 
 fn show_security_edit(ui: &mut Ui, service: &mut ApplicationService) {
+    if service.inbound_xdrive_tls_fields().is_some(){super::xdrive::show_inbound_tls(ui,service);return;}
     let Some(session) = service.inbound_editor_session_mut() else {
         return;
     };

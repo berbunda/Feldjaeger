@@ -4,6 +4,8 @@
 //! remote administration, Xray management, and init-system control.
 
 mod api_console;
+mod xdrive;
+pub use xdrive::{XdriveEditorSide, XdriveEditorView, XdriveFieldView};
 mod api_ops;
 mod api_settings;
 mod api_settings_ops;
@@ -67,6 +69,7 @@ pub use crate::xray::{
     DNS_RULE_ACTIONS, DeleteInboundRequest,
     DeleteUserRequest, DOMAIN_STRATEGIES, DnsRuleDraft,
     DiscoveryState, DuplicateInboundRequest, FREEDOM_DEFAULT_BLOCK_DELAY,
+    FREEDOM_FINAL_RULE_LOG_LEVELS,
     FREEDOM_FINAL_RULE_ACTIONS, FREEDOM_FINAL_RULE_NETWORKS,
     FREEDOM_PROXY_PROTOCOL_VERSIONS, FreedomFinalRuleDraft, FreedomSettingsDraft,
     LegacyDomainStrategyMigration,

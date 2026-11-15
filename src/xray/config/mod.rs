@@ -20,6 +20,7 @@ mod inbound_security;
 mod inbound_stream;
 mod json_diff;
 mod log_settings;
+pub(crate) use log_settings::log_level_fields;
 mod modify;
 mod modify_error;
 mod outbound_edit;
@@ -35,6 +36,11 @@ mod routing_settings;
 mod sections;
 mod stats_settings;
 mod stream;
+pub use stream::xdrive::{
+    XDRIVE_SERVICES, XDRIVE_UINT32_FIELDS, XdriveSettingsDraft, XdriveS3Draft, XdriveXmuxDraft,
+    parse_xdrive_settings, xdrive_settings_to_value, validate_xdrive_settings,
+    validate_xdrive_entity, xdrive_is_active, xdrive_uses_h3,
+};
 mod serialize;
 mod sourced_section;
 mod summary;
@@ -235,7 +241,7 @@ pub use observatory_settings::{
     validate_observatory_settings,
 };
 pub use outbound_edit::{
-    LegacyProxySettings, MUX_CONCURRENCY_EFFECTIVE_MAX, MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX,
+    LegacyProxySettings, MuxBehavior, MUX_CONCURRENCY_EFFECTIVE_MAX, MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX,
     MUX_XUDP_PROXY_UDP443_VALUES, OutboundGeneral, OutboundMux, OutboundRef, ProxySettingsMigration,
     apply_outbound_general, parse_outbound_general, parse_outbound_mux, validate_outbound_mux,
     validate_send_through,
@@ -243,6 +249,7 @@ pub use outbound_edit::{
 pub use outbound_protocol::{
     BLACKHOLE_RESPONSE_TYPES, DNS_REWRITE_NETWORKS, DNS_RULE_ACTIONS, DnsRuleDraft,
     FREEDOM_DEFAULT_BLOCK_DELAY, FREEDOM_FINAL_RULE_ACTIONS, FREEDOM_FINAL_RULE_NETWORKS,
+    FREEDOM_FINAL_RULE_LOG_LEVELS,
     FREEDOM_LEGACY_STRATEGY_KEYS, FREEDOM_PROXY_PROTOCOL_VERSIONS,
     FreedomFinalRuleDraft, FreedomSettingsDraft, LegacyDomainStrategyMigration, LegacyObfuscationMigration, LoopbackRouting, LoopbackSettingsDraft, loopback_routing,
     OutboundSettingsDraft,

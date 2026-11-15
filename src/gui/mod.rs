@@ -11,3 +11,5 @@ mod sidebar;
 mod status_bar;
 
 pub use app::{FeldjaegerApp, run};
+#[cfg(test)]
+pub(crate) use pages::xdrive::show as render_xdrive_for_test;

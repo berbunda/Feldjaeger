@@ -109,8 +109,10 @@ fn format_test_failure(exit_code: i32, stdout: &[u8], stderr: &[u8]) -> String {
     } else {
         stdout_text.as_ref()
     };
-    // Prefer the actual failure line(s); Xray banners eat the first N lines.
-    let snippet = extract_xray_failure_snippet(combined.trim());
+    // Redact before filtering: otherwise selecting an "error" line from a multiline
+    // credential array could discard its field label and expose an unlabelled token.
+    let redacted = crate::logging::redact::redact_detail(combined);
+    let snippet = extract_xray_failure_snippet(&redacted);
     let sanitized = crate::logging::redact::sanitize_detail(&snippet);
     if sanitized.is_empty() {
         format!("xray run -test failed (exit {exit_code})")
@@ -148,7 +150,11 @@ fn truncate_lines(input: &str, max_lines: usize, max_chars: usize) -> String {
         }
         out.push_str(line);
         if out.len() >= max_chars {
-            out.truncate(max_chars);
+            let mut end = max_chars;
+            while !out.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.truncate(end);
             out.push('…');
             return out;
         }
@@ -166,6 +172,28 @@ mod tests {
     use super::*;
     use crate::xray::ConfigSource;
     use feldjaeger_ssh::RemotePath;
+
+    #[test]
+    fn config_test_errors_redact_multiline_credentials_before_selecting_lines() {
+        let stderr = br#"Failed to load XDRIVE config:
+{"secrets": [
+"client-value",
+"error-token-value"
+]}
+"#;
+        let detail = format_test_failure(23, b"", stderr);
+        assert!(detail.contains("exit 23"));
+        assert!(detail.contains("Failed to load XDRIVE config"));
+        assert!(!detail.contains("client-value"));
+        assert!(!detail.contains("error-token-value"));
+    }
+
+    #[test]
+    fn diagnostic_truncation_preserves_unicode_boundaries() {
+        let out = truncate_lines(&"ё".repeat(600), 8, 901);
+        assert!(out.ends_with('…'));
+        assert!(out.len() <= 904);
+    }
 
     #[test]
     fn target_prefers_confdir() {

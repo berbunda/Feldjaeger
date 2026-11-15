@@ -60,7 +60,7 @@ pub fn show(ui: &mut Ui) {
             ui.separator();
 
             ui.label(RichText::new("AI-assisted development").strong());
-            ui.label("Developed with the help of Claude Code.");
+            ui.label("Developed with the help of OpenAI Codex.");
             ui.separator();
 
             ui.horizontal(|ui| {

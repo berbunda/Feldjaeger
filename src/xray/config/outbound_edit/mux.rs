@@ -7,20 +7,39 @@
 //!   a non-object `mux` fails too, `null` means absent, unknown keys are ignored.
 //! - `xudpProxyUDP443` must be exactly `""` / `reject` / `allow` / `skip` (case-sensitive) and is
 //!   checked even with `enabled: false`.
-//! - `concurrency`: `0` = 8, negative = TCP not carried by Mux; above 128 acts as 128 (the reuse
-//!   limit per connection). `xudpConcurrency`: `0` = UDP rides the TCP Mux, negative = the
+//! - Before v26.11.9, `concurrency`: `0` = 8, connection reuse limit = 128. Since v26.11.9,
+//!   non-negative values through 128 become 128 and reuse limit = 1024. Negative disables TCP
+//!   Mux on either version. `xudpConcurrency`: `0` = UDP rides the TCP Mux, negative = the
 //!   protocol's own UDP (UoT for VLESS), positive = a separate XUDP tunnel (documented maximum
 //!   1024).
 
 use serde_json::{Map, Number, Value};
 
 use crate::xray::config::modify_error::{ConfigModifyError, ConfigModifyErrorKind, ConfigModifyResult};
+use crate::xray::config::compatibility::XrayCoreVersion;
 
 /// The values `MuxConfig.Build()` accepts for `xudpProxyUDP443` (empty = `reject`).
 pub const MUX_XUDP_PROXY_UDP443_VALUES: &[&str] = &["reject", "allow", "skip"];
 
-/// `concurrency` above this is treated as this by the core (documentation, `MaxConnection`).
-pub const MUX_CONCURRENCY_EFFECTIVE_MAX: i64 = 128;
+/// Current-core connection reuse limit (`MaxConnection`), not a JSON field validation limit.
+pub const MUX_CONCURRENCY_EFFECTIVE_MAX: i64 = 1024;
+
+/// Version-dependent Mux behavior for presentation; calculation never changes the draft.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MuxBehavior {
+    /// TCP default when concurrency is absent or zero.
+    pub default_concurrency: i64,
+    /// Small positive TCP values are raised to this by the core.
+    pub minimum_positive_concurrency: i64,
+    /// Maximum total session allocations per underlying connection.
+    pub connection_reuse_limit: i64,
+    /// TCP concurrency after default/minimum and reuse limit; negative means disabled.
+    pub effective_concurrency: Option<i64>,
+    /// Positive XUDP concurrency capped by reuse; zero shares TCP, negative uses protocol UDP.
+    pub effective_xudp_concurrency: Option<i64>,
+    /// False means the current-core defaults are assumed, as with compatibility warnings.
+    pub version_known: bool,
+}
 
 /// Documented maximum of `xudpConcurrency`.
 pub const MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX: i64 = 1024;
@@ -30,7 +49,7 @@ pub const MUX_XUDP_CONCURRENCY_DOCUMENTED_MAX: i64 = 1024;
 pub struct OutboundMux {
     /// `enabled`.
     pub enabled: bool,
-    /// `concurrency`; empty = key absent (8).
+    /// `concurrency`; empty = key absent (default depends on the installed core).
     pub concurrency: String,
     /// `xudpConcurrency`; empty = key absent (UDP rides the TCP Mux).
     pub xudp_concurrency: String,
@@ -54,12 +73,30 @@ impl OutboundMux {
             && self.extras.is_empty()
     }
 
-    /// Effective `concurrency` when it parses (`0` / empty → 8), `None` for invalid text.
+    /// Effective concurrency for the current core (unknown version assumes v26.11.9+).
     pub fn effective_concurrency(&self) -> Option<i64> {
-        match parse_i16_text(&self.concurrency) {
-            Ok(None) | Ok(Some(0)) => Some(8),
-            Ok(Some(value)) => Some(i64::from(value)),
-            Err(()) => None,
+        self.behavior_for_core(None).effective_concurrency
+    }
+
+    /// Computes defaults and effective limits using Discovery's version, without rewriting JSON.
+    pub fn behavior_for_core(&self, core: Option<XrayCoreVersion>) -> MuxBehavior {
+        let modern = core.is_none_or(|core| core >= XrayCoreVersion::new(26, 11, 9));
+        let default_concurrency = if modern { 128 } else { 8 };
+        let minimum_positive_concurrency = if modern { 128 } else { 1 };
+        let connection_reuse_limit = if modern { MUX_CONCURRENCY_EFFECTIVE_MAX } else { 128 };
+        let effective_concurrency = parse_i16_text(&self.concurrency).ok().map(|value| {
+            let value = i64::from(value.unwrap_or(0));
+            if value < 0 { value }
+            else if value == 0 { default_concurrency }
+            else { value.clamp(minimum_positive_concurrency, connection_reuse_limit) }
+        });
+        let effective_xudp_concurrency = parse_i16_text(&self.xudp_concurrency).ok()
+            .map(|value| i64::from(value.unwrap_or(0)).min(connection_reuse_limit));
+        MuxBehavior {
+            default_concurrency, minimum_positive_concurrency, connection_reuse_limit,
+            effective_concurrency: if self.foreign.is_none() { effective_concurrency } else { None },
+            effective_xudp_concurrency: if self.foreign.is_none() { effective_xudp_concurrency } else { None },
+            version_known: core.is_some(),
         }
     }
 }
@@ -288,10 +325,33 @@ mod tests {
     #[test]
     fn effective_concurrency_follows_the_core() {
         let with = |text: &str| OutboundMux { concurrency: text.to_owned(), ..OutboundMux::default() };
-        assert_eq!(with("").effective_concurrency(), Some(8));
-        assert_eq!(with("0").effective_concurrency(), Some(8));
+        assert_eq!(with("").effective_concurrency(), Some(128));
+        assert_eq!(with("0").effective_concurrency(), Some(128));
         assert_eq!(with("-1").effective_concurrency(), Some(-1));
         assert_eq!(with("300").effective_concurrency(), Some(300));
         assert_eq!(with("x").effective_concurrency(), None);
+    }
+
+    #[test]
+    fn versioned_mux_limits_preserve_explicit_settings() {
+        let old = Some(XrayCoreVersion::new(26, 10, 31));
+        let new = Some(XrayCoreVersion::new(26, 11, 9));
+        for (text, before, after) in [
+            ("", 8, 128), ("0", 8, 128), ("1", 1, 128), ("127", 127, 128),
+            ("128", 128, 128), ("129", 128, 129), ("1024", 128, 1024),
+            ("32767", 128, 1024), ("-1", -1, -1), ("-32768", -32768, -32768),
+        ] {
+            let original = serde_json::json!({"mux": {"enabled": true, "concurrency": text.parse::<i16>().unwrap_or(0),
+                "xudpConcurrency": 300, "future": true}});
+            let draft = parse_outbound_mux(&original);
+            let mut with_text = draft.clone();
+            with_text.concurrency = text.to_owned();
+            assert_eq!(with_text.behavior_for_core(old).effective_concurrency, Some(before));
+            assert_eq!(with_text.behavior_for_core(new).effective_concurrency, Some(after));
+            assert_eq!(with_text.behavior_for_core(None).effective_concurrency, Some(after));
+            assert_eq!(with_text.behavior_for_core(old).effective_xudp_concurrency, Some(128));
+            assert_eq!(with_text.behavior_for_core(new).effective_xudp_concurrency, Some(300));
+            assert_eq!(apply(&original, &draft).unwrap(), original);
+        }
     }
 }
