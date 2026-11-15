@@ -43,3 +43,11 @@ Logs must never contain SSH passwords, private key contents, passphrases, authen
 ### Scope
 
 This covers Feldjäger application logs only. Xray runtime logs and the in-app Logs page viewer are out of scope for the current stage.
+
+
+Remote write requirements: SFTP with POSIX rename v1, GNU cp for preserving
+existing file ownership/mode/ACL, and write paths without symlink ancestors or
+shared writable directories. Parents must belong to root or the SSH uid.
+Privileged systemd unit writes additionally require Python 3 on the server;
+unit bytes are streamed over SSH stdin into a root-owned private staging
+directory. No helper daemon is installed. Unsupported environments fail closed.

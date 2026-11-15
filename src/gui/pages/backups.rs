@@ -24,20 +24,20 @@ use super::HelpText;
 
 const HELP_BACKUPS: HelpText = HelpText::new(
     "Before every change of a configuration file — on any page, on restore, on removing a \
-     confdir file — Feldjäger copies the file to <file>.feldjaeger.bak.<unix time> in the same \
+     confdir file — Feldjäger copies the file to <file>.feldjaeger.bak.<unix time>.<path hash>.<uuid> in the same \
      directory. Xray ignores these copies (a confdir loads only *.json, *.jsonc, *.toml, *.yaml, \
      *.yml). Feldjäger never deletes them: they accumulate, remove old ones over SSH.\n\n\
      The list covers the files of the loaded configuration only. The systemd unit file is backed \
-     up the same way (/etc/systemd/system/<unit>.feldjaeger.bak.<time>) but is not listed here. \
+     up the same way (/etc/systemd/system/<unit>.feldjaeger.bak.<time>.<path hash>.<uuid>) but is not listed here. \
      List backups runs one find in the file's directory and needs find with -printf (GNU \
      findutils; BusyBox find lacks it).",
     "Перед каждым изменением файла конфигурации — на любой странице, при восстановлении, при \
-     удалении файла confdir — Feldjäger копирует файл в <файл>.feldjaeger.bak.<unix-время> в том \
+     удалении файла confdir — Feldjäger копирует файл в <файл>.feldjaeger.bak.<unix-время>.<хеш пути>.<uuid> в том \
      же каталоге. Xray эти копии не читает (confdir загружает только *.json, *.jsonc, *.toml, \
      *.yaml, *.yml). Feldjäger их никогда не удаляет: они накапливаются, старые удаляйте по \
      SSH.\n\n\
      Список охватывает только файлы загруженной конфигурации. Unit-файл systemd копируется так \
-     же (/etc/systemd/system/<unit>.feldjaeger.bak.<время>), но здесь не показывается. List \
+     же (/etc/systemd/system/<unit>.feldjaeger.bak.<время>.<хеш пути>.<uuid>), но здесь не показывается. List \
      backups выполняет один find в каталоге файла, и ему нужен find с -printf (GNU findutils; у \
      find из BusyBox его нет).",
 );

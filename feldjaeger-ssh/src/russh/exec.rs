@@ -68,10 +68,18 @@ pub async fn collect_exec_output(
     let mut stderr = Vec::new();
     let mut exit_code = -1;
 
-    while let Some(message) = channel.wait().await {
+    while let Some(message) =
+        tokio::time::timeout(std::time::Duration::from_secs(30), channel.wait())
+            .await
+            .map_err(|_| SshError::new("SSH response idle timeout"))?
+    {
         match message {
-            russh::ChannelMsg::Data { data } => stdout.extend_from_slice(&data),
-            russh::ChannelMsg::ExtendedData { data, ext: 1 } => stderr.extend_from_slice(&data),
+            russh::ChannelMsg::Data { data } => {
+                append_bounded(&mut stdout, &data, 16 * 1024 * 1024)?
+            }
+            russh::ChannelMsg::ExtendedData { data, ext: 1 } => {
+                append_bounded(&mut stderr, &data, 4 * 1024 * 1024)?
+            }
             russh::ChannelMsg::ExitStatus { exit_status } => {
                 exit_code = exit_status as i32;
             }
@@ -91,9 +99,25 @@ pub async fn collect_exec_output(
     Ok(ExecResult::new(stdout, stderr, exit_code))
 }
 
+pub(super) fn append_bounded(buffer: &mut Vec<u8>, data: &[u8], limit: usize) -> SshResult<()> {
+    if data.len() > limit.saturating_sub(buffer.len()) {
+        return Err(SshError::new("remote response exceeds byte limit"));
+    }
+    buffer.extend_from_slice(data);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejects_overflow_before_appending() {
+        let mut bytes = vec![1, 2];
+        append_bounded(&mut bytes, &[3, 4], 4).unwrap();
+        assert!(append_bounded(&mut bytes, &[5], 4).is_err());
+        assert_eq!(bytes, [1, 2, 3, 4]);
+    }
 
     #[test]
     fn builds_quoted_exec_payload() {

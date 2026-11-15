@@ -11584,3 +11584,217 @@ Root version 0.5.80-0, код SSH crate и baseline 26.10.31 не менялис
 Root version 0.5.80-1; SSH crate без изменений. Этап F остаётся открытым:
 изменение сведений About само по себе не завершает приёмку XDRIVE.
 Проверки: `cargo build` и `git diff --check` прошли.
+
+# 160 SEC-01: права remote-файлов (0.5.80-3)
+
+`feldjaeger-ssh` 0.1.0-4 исправляет запись в существующем Russh backend, без
+новых GUI/ApplicationService API. `write_file` теперь создаёт только новый файл:
+SFTP CREATE/EXCLUDE/WRITE с mode 0600 и FSTAT до передачи содержимого. Коллизия
+backup завершает операцию ошибкой вместо перезаписи предыдущей копии. Новые
+confdir-файлы тоже закрытые. При разных SSH-пользователе и пользователе Xray
+для новых файлов требуется явно настроить доступ на сервере: `run -test`
+запускается от SSH-пользователя и не доказывает доступность файла для сервиса.
+Автоматического chmod 0644 нет; у существующих конфигов доступ сохраняется.
+
+`write_file_atomic` проверяет LSTAT исходного regular file и наличие uid/gid,
+создаёт закрытый temp, записывает новые байты, затем выполняет через штатное
+экранирование argv `cp --attributes-only --preserve=mode,ownership
+--no-target-directory -- source temp`. GNU cp сохраняет POSIX ACL вместе с mode;
+SFTP v3 не позволяет реализовать это полноценно одними FileAttributes.
+После cp повторно проверяются тип, uid/gid и mode temp. Ошибка cp/проверки
+останавливает замену оригинала. Содержимое stdout/stderr cp не журналируется.
+Требование управляемого Linux-сервера: GNU cp с поддержкой ACL файловой системы;
+ошибка/отсутствие утилиты не включает небезопасный fallback.
+
+Отказ от symlink при замене явный: backend не должен терять метаданные цели или
+менять ссылку на обычный файл неявно. Полная защита от конкурентной подмены
+путей (SEC-05), crash-atomic fallback (SEC-04), уникальные backup-имена (SEC-02)
+остаются отдельными задачами. SELinux context и произвольные xattr в этой правке
+не переносятся; их поддержку не следует подразумевать под POSIX ACL.
+
+Регрессионные проверки: in-memory SFTP server проверяет mode 0600 до WRITE,
+отказ при 0644 без отправки секретов и отказ EXCLUDE без изменения старого backup;
+unit-тесты проверяют mismatch owner/group/mode/type и quoting путей.
+Unix-only тест проверяет GNU cp attributes-only без замены новых байтов.
+Проверки: `cargo check --workspace --offline --locked`, workspace tests
+**1520 + 20 passed**, diff-check. В локальном Linux-контейнере
+`rust:1.99.1-slim-bookworm` без сети проверен GNU cp с настоящим POSIX ACL:
+named-user ACL, uid/gid 12346/12347 и mode сохранены; новые байты не заменены.
+Протокольный SFTP-тест выполнялся отдельно; полного Linux/SSH end-to-end прогона
+с другим пользователем сервиса не было. Поведение cp соответствует
+[GNU Coreutils](https://www.gnu.org/software/coreutils/manual/html_node/cp-invocation.html).
+
+
+## 161. SEC-02: уникальные backup и совместимое чтение (0.5.80-4)
+
+`BackupManager` создаёт имена
+`{basename}.feldjaeger.bak.{unix_seconds}.{sha256_full_path}.{uuid_v4}`.
+SHA-256 разделяет полные исходные пути при общем `backup_dir`; UUID v4
+разделяет независимые клиенты и операции в одну секунду. Timestamp остаётся
+в секундах для `ConfigBackup` и сортировки. Новых зависимостей нет.
+
+Создание использует существующий контракт SSH `write_file`: exclusive-create
+с правами 0600. После ошибки записи занятый regular-file кандидат оставляется
+нетронутым, следующий получает новый UUID; максимум 8 попыток. Если проверка
+наличия не подтверждает файл, возвращается исходная ошибка записи. Частично
+созданный при ошибке файл также не удаляется: операция не должна удалять путь,
+который мог быть заменён другим клиентом. При неудаче всех попыток pipeline
+останавливается до изменения live-конфигурации.
+
+`list_backups` читает старые timestamp-only имена и новые имена, проверяя
+SHA-256 полного исходного пути и формат UUID. Старые имена в общем каталоге
+нельзя однозначно связать с исходным путём при одинаковом basename; сохранена
+их видимость для восстановления. Новые имена такой неоднозначности не имеют.
+Справка Backups/confdir обновлена. SSH crate не менялся.
+
+Регрессионные тесты: сохранение занятой копии и повтор с новым именем,
+ограничение повторов, параллельное создание копий одинаковых и разных путей,
+фильтрация нового формата по исходному пути и чтение старого формата.
+Реальные SSH-операции в рамках этой правки не выполнялись.
+
+Проверка: `cargo test --workspace --lib --offline --locked` — **1524 + 20 passed**,
+ошибок нет; `git diff --check` пройден. Предупреждение сборки о hard-link
+в incremental cache приводит к копированию файлов, на тесты не влияет.
+
+
+## 162. SEC-03: ограниченное чтение SSH/SFTP и Xray Logs (0.5.80-5)
+
+SSH crate 0.1.0-5 ограничивает stdout 16 MiB, stderr 4 MiB, чтение одного
+SFTP-файла 32 MiB. Проверка выполняется до добавления каждого блока, без
+доверия к metadata. SFTP читает блоками 16 KiB вместо `read_to_end`.
+Превышение бюджета возвращает ошибку без частичного результата и без
+содержимого ответа в диагностике. Большие конфигурации/backup и другие файлы
+теперь явно отвергаются: лимиты общие для транспортного слоя, без Xray-семантики.
+
+Ожидание SSH mutex ограничено 120 s. Открытие exec-канала — 30 s;
+exec/request/stdin/collection вместе — 120 s, ожидание следующего сообщения —
+30 s. На выходе exec канал закрывается best-effort с пределом 1 s.
+SFTP open/read — 120 s, ожидание read — 30 s; закрытие SFTP — до 1 s.
+Весь read_file после захвата mutex, включая настройку subsystem, ограничен
+125 s. Отмена future освобождает guard; drop RawSftpSession закрывает stream.
+Эти ограничения не означают гарантированного завершения удалённого процесса:
+SSH close не является подтверждением остановки процесса на сервере.
+
+Xray Logs ограничивает пакет последними 2000 строками; строку — 16 KiB
+по границе UTF-8 с явным `[line truncated]`. GUI хранит максимум двойной
+выбранный лимит строк и 4 MiB текста. Очередь событий — sync_channel(2):
+обратное давление блокирует только фоновый worker, GUI принимает без блокировки.
+Тела логов не попадают в tracing. Ограничение пакета может пропускать ранние
+строки при очень большом приросте между опросами; это просмотр последних
+событий, не архивирование или гарантированная доставка всех строк.
+
+Тесты: переполнение до append, точная граница SFTP и переполнение без EOF,
+зависший reader с освобождением mutex, длинная Unicode-строка, большой пакет,
+предел очереди событий и byte budget GUI. Реальный SSH/OOM стенд не запускался.
+
+По запросу пользователя начальный размер Xray Logs уменьшен с 200 до **100 строк**.
+Варианты 200 / 500 / 1000 доступны при явном выборе.
+Проверка SEC-03: тесты библиотек workspace **1526 + 23 passed**, diff-check пройден.
+
+
+## 163. Компактный просмотр Xray Logs (0.5.80-6)
+
+По запросу пользователя доступны только 10 / 20 / 50 / 100 строк,
+по умолчанию — 10. Во время Follow GUI также хранит не больше выбранного
+числа строк (ранее двойной лимит с минимумом 100); бюджет 4 MiB остаётся.
+Пакет разбора ограничен 100 строками, journal Follow запрашивает максимум 100.
+Большие журналы анализируются непосредственно на сервере; просмотр не является
+архивом. Транспортные ограничения SEC-03 остаются без изменений; SSH crate
+не менялся. AGENTS.md приведён в соответствие с явным решением пользователя.
+
+Проверка: `cargo test --offline --lib --quiet` — **1526 passed**,
+`git diff --check` — без ошибок.
+
+
+## 164. SEC-04: обязательная атомарная замена POSIX rename (0.5.80-7)
+
+`feldjaeger-ssh` 0.1.0-6 больше не перемещает live-файл в aside при отказе
+обычного SFTP rename. Удалены планировщик fallback, aside-имя и его rollback.
+`write_file_atomic` проверяет SSH_FXP_VERSION до создания temp: требуется
+`posix-rename@openssh.com` ровно версии `1`. Неподдерживаемый сервер получает
+отказ без записи temp/live. После exclusive-create temp и проверки сохранения
+метаданных выполняется один `SSH_FXP_EXTENDED` с POSIX rename.
+
+russh-sftp 3.0.1 не предоставляет high-level POSIX rename: используется
+`RawSftpSession` для handshake/LSTAT/EXTENDED. Два validated path кодируются
+как SSH strings (big-endian u32 byte length + UTF-8), без shell. Обычный
+`rename_file` для отдельных операций не изменён; атомарная запись его больше
+не использует. Сохранение mode/uid/gid/POSIX ACL через GNU cp осталось.
+
+Успех принимается только по STATUS OK. При отказе, unexpected reply или
+transport timeout temp не удаляется и live никогда не перемещается в сторону.
+Сообщение содержит пути live/temp, без remote text. Если сервер выполнил rename,
+но подтверждение потерялось, live уже новый, а temp отсутствует: вызывающая
+сторона должна проверять результат, а не считать live неизменённым. Это не
+гарантия остановки сервера, fsync каталога/durability после потери питания,
+защиты от нечестного SFTP-сервера или гонок с изменяемым каталогом (SEC-05).
+
+Спецификация: [OpenSSH PROTOCOL §4.2–4.3](https://github.com/openssh/openssh-portable/blob/master/PROTOCOL).
+Протокольные тесты через in-memory SFTP: версии None/2/01 отвергаются до
+commit, STATUS PermissionDenied сохраняет старые байты, успех заменяет их,
+задержанное подтверждение после commit приводит к контролируемой ошибке без
+rollback. Проверены порядок аргументов, byte length Unicode и literal shell
+символы в wire payload. Полный Linux/SSH стенд и crash/power-loss тесты не
+запускались.
+
+Проверка: `cargo test --workspace --lib --offline --locked --quiet` —
+**1526 + 25 passed**, `git diff --check` — без ошибок.
+
+
+## 165. SEC-05: доверенные write paths и приватный staging (0.5.80-8)
+
+SSH crate 0.1.0-7 сохраняет контракт write_file=create-exclusive 0600.
+RemoteAdmin::create_config_file больше не проверяет path_is_file до open:
+только эксклюзивный транспортный open гарантирует отказ для занятого пути.
+Чтение по-прежнему шире записи; новые ограничения не касаются read_file.
+
+Перед write_file/write_file_atomic backend получает uid через id -u (argv через
+штатный SSH exec, output не журналируется). Все предки от / до родителя
+проверяются LSTAT: directory, uid=0 либо текущий SSH uid, mode без 0022.
+Unknown uid/mode, symlink, shared writable dirs (включая sticky /tmp), dot
+components и directory-as-file path отвергаются. POSIX ACL write access
+ограничен group class mask, представленной group-write mode; отсутствие этих
+метаданных останавливает запись. Предполагается корректный сервер с POSIX
+правами и доверенные процессы root/того же SSH uid. Проверки не защищают от
+компрометации такого uid, нестандартных FS ACL или нечестного сервера.
+
+Atomic write создаёт sibling staging-directory со случайным UUID v4 через
+SFTP MKDIR 0700, проверяет его uid/mode и пишет contents с EXCL 0600.
+После GNU cp сохранения метаданных и их проверки выполняется POSIX rename
+из закрытого каталога в live-путь. Так посторонний uid не может подменить
+source/destination cp или подложить symlink между LSTAT/cp/rename. Успешный
+commit удаляет пустой staging-directory через RMDIR; при ошибке закрытый
+каталог может остаться для диагностики. Рекурсивного удаления нет. UUID —
+уже используемая GPL-compatible зависимость workspace, добавлена в SSH crate.
+
+Sudo unit writer встроен как фиксированный source-файл
+src/init/privileged_unit_write.py, исполняется python3 -I -c через sudo -S.
+Тело unit и пароль передаются только stdin. Непредсказуемый marker отделяет
+байты тела от password line; helper принимает marker в первой либо второй
+строке, учитывая password prompt / cached sudo / NOPASSWD. Размер тела задан
+отдельным argv; helper принимает ровно размер и максимум 1 MiB. Пароли с CR/LF
+отвергаются, локальная копия stdin очищается и при SSH-ошибке.
+
+Привилегированный helper проверяет euid=0, открывает предков через
+O_DIRECTORY|O_NOFOLLOW и dir_fd, требует root ownership без mode 0022.
+Под удерживаемым parent fd создаётся случайный каталог 0700, в нём файл
+O_EXCL|O_NOFOLLOW 0600. После write/flush/fsync/chmod 0644 — os.replace с
+src_dir_fd/dst_dir_fd; non-regular live target отвергается. Нет shell script,
+/tmp, чтения файлов SSH-пользователя после sudo или установки helper daemon.
+Нужен Python 3 в sudo environment; без него операция отказывает. Существующие
+backup/preflight/daemon-reload остаются в ApplicationService/InitSystemManager
+pipeline. Как ранее, sudo само по себе не даёт SFTP прав на backup root-owned
+unit: если backup создать невозможно, pipeline останавливается до записи.
+Power-loss durability каталога и недоверенные root/SSH uid не обещаются.
+
+Проверки: Rust-тесты ownership/mode/type/path policy, random staging и прежние
+протокольные EXCL проверки; Python Linux-тесты
+src/init/privileged_unit_write_tests.py — 5 passed в одноразовом
+rust:1.99.1-slim-bookworm с установленным python3, репозиторий read-only.
+Проверены symlink/FIFO, foreign/shared/symlink ancestors, file mode/uid,
+ошибочный frame и оба варианта password framing. Реальные sudo/SSH и
+полный SFTP write на Linux пока не выполнялись.
+
+Итоговая проверка: `cargo test --workspace --lib --offline --locked --quiet` —
+**1526 + 27 passed (1553 total)**; Linux helper — **5 passed**;
+`git diff --check` — без ошибок.

@@ -46,8 +46,16 @@ impl SshSession for RusshSession {
         async move {
             debug!(target: "ssh", path = %remote_path, "SSH read_file");
 
-            let handle = handle.lock().await;
-            match sftp::read_remote_file(&handle, &path).await {
+            let handle = tokio::time::timeout(std::time::Duration::from_secs(120), handle.lock())
+                .await
+                .map_err(|_| SshError::new("SSH session busy timeout"))?;
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(125),
+                sftp::read_remote_file(&handle, &path),
+            )
+            .await
+            .unwrap_or_else(|_| Err(SshError::new("SFTP operation deadline exceeded")))
+            {
                 Ok(bytes) => {
                     debug!(
                         target: "ssh",
@@ -88,7 +96,9 @@ impl SshSession for RusshSession {
                 "SSH write_file"
             );
 
-            let handle = handle.lock().await;
+            let handle = tokio::time::timeout(std::time::Duration::from_secs(120), handle.lock())
+                .await
+                .map_err(|_| SshError::new("SSH session busy timeout"))?;
             sftp::write_remote_file(&handle, &path, &contents).await
         }
     }
@@ -111,7 +121,9 @@ impl SshSession for RusshSession {
                 "SSH write_file_atomic"
             );
 
-            let handle = handle.lock().await;
+            let handle = tokio::time::timeout(std::time::Duration::from_secs(120), handle.lock())
+                .await
+                .map_err(|_| SshError::new("SSH session busy timeout"))?;
             sftp::write_remote_file_atomic(&handle, &path, &contents).await
         }
     }
@@ -134,7 +146,9 @@ impl SshSession for RusshSession {
                 to = %to_path,
                 "SSH rename_file"
             );
-            let handle = handle.lock().await;
+            let handle = tokio::time::timeout(std::time::Duration::from_secs(120), handle.lock())
+                .await
+                .map_err(|_| SshError::new("SSH session busy timeout"))?;
             sftp::rename_remote_file(&handle, &from, &to).await
         }
     }
@@ -149,7 +163,9 @@ impl SshSession for RusshSession {
 
         async move {
             info!(target: "ssh", path = %remote_path, "SSH remove_file");
-            let handle = handle.lock().await;
+            let handle = tokio::time::timeout(std::time::Duration::from_secs(120), handle.lock())
+                .await
+                .map_err(|_| SshError::new("SSH session busy timeout"))?;
             sftp::remove_remote_file(&handle, &path).await
         }
     }
@@ -164,7 +180,9 @@ impl SshSession for RusshSession {
 
         async move {
             debug!(target: "ssh", path = %remote_path, "SSH path_is_file");
-            let handle = handle.lock().await;
+            let handle = tokio::time::timeout(std::time::Duration::from_secs(120), handle.lock())
+                .await
+                .map_err(|_| SshError::new("SSH session busy timeout"))?;
             match sftp::remote_path_is_file(&handle, &path).await {
                 Ok(is_file) => {
                     debug!(
@@ -209,11 +227,16 @@ impl SshSession for RusshSession {
             debug!(target: "ssh", program = %program, stdin_bytes = stdin.len(), "SSH exec");
 
             let payload = exec::build_exec_payload(&command)?;
-            let handle = handle.lock().await;
-            let mut channel = handle
-                .channel_open_session()
+            let handle = tokio::time::timeout(std::time::Duration::from_secs(120), handle.lock())
                 .await
-                .map_err(map_russh_error)?;
+                .map_err(|_| SshError::new("SSH session busy timeout"))?;
+            let mut channel = tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                handle.channel_open_session(),
+            )
+            .await
+            .map_err(|_| SshError::new("SSH channel open timeout"))?
+            .map_err(map_russh_error)?;
 
             let result =
                 sftp::run_remote_command_with_stdin(&mut channel, &payload, &stdin).await?;

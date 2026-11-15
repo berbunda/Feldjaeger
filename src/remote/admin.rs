@@ -100,17 +100,8 @@ impl RemoteAdmin {
         path: &RemotePath,
         contents: &[u8],
     ) -> AppResult<()> {
-        let exists = session
-            .path_is_file(path)
-            .await
-            .map_err(|error| AppError::new(sanitize_ssh_detail(error.message())))?;
-        if exists {
-            return Err(AppError::new(format!(
-                "file already exists on the remote host: {}",
-                path.as_str()
-            )));
-        }
-
+        // The transport's exclusive open is authoritative; a preflight metadata
+        // check cannot enforce create-only against files created concurrently.
         info!(
             target: "remote",
             host = %session.profile().host,
@@ -163,10 +154,7 @@ impl RemoteAdmin {
                 ))
             })?;
 
-        session
-            .remove_file(path)
-            .await
-            .map_err(map_upload_error)?;
+        session.remove_file(path).await.map_err(map_upload_error)?;
 
         info!(
             target: "remote",

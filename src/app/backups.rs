@@ -2,7 +2,7 @@
 //! Rollback UI: list + restore previously created config backups).
 //!
 //! Every remote configuration write in Feldjäger already creates a timestamped backup next to
-//! the original file (`{filename}.feldjaeger.bak.{timestamp}`, `BackupManager::create_backup`)
+//! the original file (`{filename}.feldjaeger.bak.{timestamp}.{path_hash}.{uuid}`, `BackupManager::create_backup`)
 //! before overwriting it — but until this page nothing in the GUI ever listed or restored one;
 //! only an automatic restore-on-failed-`xray run -test` existed. This page covers the Xray
 //! configuration file(s) only (single file, or every confdir member) — not the systemd unit

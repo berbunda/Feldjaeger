@@ -3,7 +3,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use feldjaeger_ssh::{RemoteCommand, RemotePath, SshSession};
+use sha2::{Digest, Sha256};
 use tracing::{info, warn};
+use uuid::Uuid;
 
 use super::ConfigBackup;
 use crate::error::{AppError, AppResult};
@@ -15,7 +17,7 @@ const BACKUP_SUFFIX: &str = ".feldjaeger.bak";
 pub struct BackupManagerOptions {
     /// Optional dedicated directory where backup files are stored.
     ///
-    /// When set, only the basename of the original file is appended to this directory.
+    /// When set, backups include a digest of the full original path to separate equal basenames.
     /// When unset, backups are created next to the original file.
     pub backup_dir: Option<RemotePath>,
 }
@@ -67,12 +69,8 @@ impl BackupManager {
             .map_err(app_error_from_ssh)?;
 
         let created_at_unix = current_unix_timestamp()?;
-        let backup_path = self.resolve_backup_path(original_path, created_at_unix)?;
-
-        session
-            .write_file(&backup_path, &contents)
-            .await
-            .map_err(app_error_from_ssh)?;
+        let candidates = (0..8).map(|_| self.resolve_backup_path(original_path, created_at_unix));
+        let backup_path = store_backup(session, &contents, candidates).await?;
 
         info!(
             target: "remote",
@@ -146,9 +144,9 @@ impl BackupManager {
 
     /// Lists previously created backups for `original_path`, newest first (Roadmap §3:127 —
     /// Rollback UI). Read-only: a single remote `find` in the resolved backup directory,
-    /// matching this manager's own naming convention (`{file_name}.feldjaeger.bak.{timestamp}`).
-    /// Entries whose filename doesn't parse as `<size>\t<name>` with a numeric trailing
-    /// timestamp are silently skipped (defensive against a foreign file that happens to match
+    /// matching both legacy timestamp names and path-scoped UUID names.
+    /// Entries whose filename does not match a supported timestamp/identity format
+    /// are silently skipped (defensive against a foreign file that happens to match
     /// the glob, or a `find` implementation without GNU `-printf` support).
     pub async fn list_backups<S: SshSession>(
         &self,
@@ -209,7 +207,7 @@ impl BackupManager {
             let Some(timestamp_str) = name.strip_prefix(&prefix) else {
                 continue;
             };
-            let Ok(created_at_unix) = timestamp_str.parse::<u64>() else {
+            let Some(created_at_unix) = parse_backup_timestamp(timestamp_str, original_path) else {
                 continue;
             };
             let Ok(backup_path) = join_remote_path(&dir, name) else {
@@ -227,14 +225,18 @@ impl BackupManager {
         Ok(backups)
     }
 
-    /// Computes the backup path for an original file without performing I/O.
+    /// Generates a fresh backup path for an original file without performing remote I/O.
     pub fn resolve_backup_path(
         &self,
         original_path: &RemotePath,
         created_at_unix: u64,
     ) -> AppResult<RemotePath> {
         let file_name = remote_file_name(original_path)?;
-        let backup_file_name = format!("{file_name}{BACKUP_SUFFIX}.{created_at_unix}");
+        let backup_file_name = format!(
+            "{file_name}{BACKUP_SUFFIX}.{created_at_unix}.{}.{}",
+            path_digest(original_path),
+            Uuid::new_v4().simple()
+        );
 
         let backup_path = if let Some(backup_dir) = &self.options.backup_dir {
             join_remote_path(backup_dir.as_str(), &backup_file_name)?
@@ -257,6 +259,57 @@ impl Default for BackupManager {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// Exclusive creation is the authority: a preflight existence check cannot prevent
+// races with other clients. Retry occupied candidates, never remove or overwrite
+// them; propagate other failures and bound retries even against a faulty server.
+async fn store_backup<S: SshSession>(
+    session: &S,
+    contents: &[u8],
+    candidates: impl Iterator<Item = AppResult<RemotePath>>,
+) -> AppResult<RemotePath> {
+    for candidate in candidates.take(8) {
+        let path = candidate?;
+        match session.write_file(&path, contents).await {
+            Ok(()) => return Ok(path),
+            Err(error) => {
+                if !session.path_is_file(&path).await.unwrap_or(false) {
+                    return Err(app_error_from_ssh(error));
+                }
+            }
+        }
+    }
+    Err(AppError::new(
+        "could not create a unique backup after 8 attempts",
+    ))
+}
+
+fn path_digest(path: &RemotePath) -> String {
+    Sha256::digest(path.as_str().as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn parse_backup_timestamp(suffix: &str, original: &RemotePath) -> Option<u64> {
+    // Legacy names have no source identity. Keep them visible for recovery;
+    // new names must match the full source path, especially in a shared directory.
+    if let Ok(timestamp) = suffix.parse() {
+        return Some(timestamp);
+    }
+    let mut parts = suffix.split('.');
+    let timestamp = parts.next()?.parse().ok()?;
+    let digest = parts.next()?;
+    let id = parts.next()?;
+    if parts.next().is_some()
+        || digest != path_digest(original)
+        || id.len() != 32
+        || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(timestamp)
 }
 
 fn current_unix_timestamp() -> AppResult<u64> {
@@ -384,10 +437,11 @@ mod tests {
             path: &RemotePath,
             contents: &[u8],
         ) -> impl Future<Output = feldjaeger_ssh::SshResult<()>> + Send {
-            self.files
-                .lock()
-                .unwrap()
-                .insert(path.as_str().to_owned(), contents.to_vec());
+            let mut files = self.files.lock().unwrap();
+            if files.contains_key(path.as_str()) {
+                return future::ready(Err(feldjaeger_ssh::SshError::new("file exists")));
+            }
+            files.insert(path.as_str().to_owned(), contents.to_vec());
             future::ready(Ok(()))
         }
 
@@ -396,7 +450,11 @@ mod tests {
             path: &RemotePath,
             contents: &[u8],
         ) -> impl Future<Output = feldjaeger_ssh::SshResult<()>> + Send {
-            self.write_file(path, contents)
+            self.files
+                .lock()
+                .unwrap()
+                .insert(path.as_str().to_owned(), contents.to_vec());
+            future::ready(Ok(()))
         }
 
         fn rename_file(
@@ -439,20 +497,22 @@ mod tests {
             _command: &feldjaeger_ssh::RemoteCommand,
         ) -> impl Future<Output = feldjaeger_ssh::SshResult<feldjaeger_ssh::ExecResult>> + Send
         {
-            let result = self.exec_result.lock().unwrap().clone().ok_or_else(|| {
-                feldjaeger_ssh::SshError::new("exec not supported in mock session")
-            });
+            let result =
+                self.exec_result.lock().unwrap().clone().ok_or_else(|| {
+                    feldjaeger_ssh::SshError::new("exec not supported in mock session")
+                });
             future::ready(result)
         }
 
-    fn exec_with_stdin(
-        &self,
-        command: &feldjaeger_ssh::RemoteCommand,
-        stdin: &[u8],
-    ) -> impl Future<Output = feldjaeger_ssh::SshResult<feldjaeger_ssh::ExecResult>> + Send {
-        let _ = stdin;
-        self.exec(command)
-    }
+        fn exec_with_stdin(
+            &self,
+            command: &feldjaeger_ssh::RemoteCommand,
+            stdin: &[u8],
+        ) -> impl Future<Output = feldjaeger_ssh::SshResult<feldjaeger_ssh::ExecResult>> + Send
+        {
+            let _ = stdin;
+            self.exec(command)
+        }
 
         fn disconnect(self) -> impl Future<Output = feldjaeger_ssh::SshResult<()>> + Send {
             future::ready(Ok(()))
@@ -471,9 +531,16 @@ mod tests {
             .resolve_backup_path(&original, 1_700_000_000)
             .expect("backup path should resolve");
 
-        assert_eq!(
-            backup.as_str(),
-            "/etc/xray/config.json.feldjaeger.bak.1700000000"
+        assert!(
+            backup
+                .as_str()
+                .starts_with("/etc/xray/config.json.feldjaeger.bak.1700000000.")
+        );
+        assert_ne!(
+            backup,
+            manager
+                .resolve_backup_path(&original, 1_700_000_000)
+                .unwrap()
         );
     }
 
@@ -487,9 +554,10 @@ mod tests {
             .resolve_backup_path(&original, 1_700_000_000)
             .expect("backup path should resolve");
 
-        assert_eq!(
-            backup.as_str(),
-            "/var/backups/feldjaeger/config.json.feldjaeger.bak.1700000000"
+        assert!(
+            backup
+                .as_str()
+                .starts_with("/var/backups/feldjaeger/config.json.feldjaeger.bak.1700000000.")
         );
     }
 
@@ -607,6 +675,98 @@ mod tests {
         );
         assert_eq!(backups[1].created_at_unix, 1_700_000_000);
         assert_eq!(backups[0].original_path, original);
+    }
+
+    #[tokio::test]
+    async fn occupied_candidate_is_preserved_and_retried() {
+        let occupied = path("/backup/occupied");
+        let fresh = path("/backup/fresh");
+        let session = MockSession::new(HashMap::from([(
+            occupied.as_str().to_owned(),
+            b"first version".to_vec(),
+        )]));
+        let stored = store_backup(
+            &session,
+            b"second version",
+            vec![Ok(occupied.clone()), Ok(fresh.clone())].into_iter(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stored, fresh);
+        let files = session.files.lock().unwrap();
+        assert_eq!(files[occupied.as_str()], b"first version");
+        assert_eq!(files[fresh.as_str()], b"second version");
+    }
+
+    #[tokio::test]
+    async fn collisions_have_a_bounded_retry_budget() {
+        let occupied = path("/backup/occupied");
+        let session = MockSession::new(HashMap::from([(
+            occupied.as_str().to_owned(),
+            b"original".to_vec(),
+        )]));
+        let error = store_backup(&session, b"new", std::iter::repeat(Ok(occupied.clone())))
+            .await
+            .unwrap_err();
+        assert!(error.message().contains("8 attempts"));
+        assert_eq!(
+            session.files.lock().unwrap()[occupied.as_str()],
+            b"original"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_backups_in_shared_directory_remain_distinct() {
+        let a = path("/a/config.json");
+        let b = path("/b/config.json");
+        let session = MockSession::new(HashMap::from([
+            (a.as_str().to_owned(), b"version a".to_vec()),
+            (b.as_str().to_owned(), b"version b".to_vec()),
+        ]));
+        let manager = BackupManager::with_options(BackupManagerOptions {
+            backup_dir: Some(path("/backup")),
+        });
+        let (first, second, third) = tokio::join!(
+            manager.create_backup(&session, &a),
+            manager.create_backup(&session, &a),
+            manager.create_backup(&session, &b),
+        );
+        let backups = [first.unwrap(), second.unwrap(), third.unwrap()];
+        let files = session.files.lock().unwrap();
+        for (index, backup) in backups.iter().enumerate() {
+            assert_eq!(
+                files[backup.backup_path.as_str()],
+                if index == 2 {
+                    b"version b"
+                } else {
+                    b"version a"
+                }
+            );
+            for other in &backups[..index] {
+                assert_ne!(backup.backup_path, other.backup_path);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn listing_filters_new_names_by_source_and_preserves_legacy() {
+        let original = path("/a/config.json");
+        let other = path("/b/config.json");
+        let manager = BackupManager::with_options(BackupManagerOptions {
+            backup_dir: Some(path("/backup")),
+        });
+        let own = manager.resolve_backup_path(&original, 200).unwrap();
+        let foreign = manager.resolve_backup_path(&other, 300).unwrap();
+        let stdout = format!(
+            "10\t{}\n20\t{}\n30\tconfig.json.feldjaeger.bak.100\n40\tconfig.json.feldjaeger.bak.400.bad.invalid\n",
+            remote_file_name(&own).unwrap(),
+            remote_file_name(&foreign).unwrap()
+        );
+        let session = MockSession::new(HashMap::new()).with_exec_stdout(&stdout);
+        let backups = manager.list_backups(&session, &original).await.unwrap();
+        assert_eq!(backups.len(), 2);
+        assert_eq!(backups[0].backup_path, own);
+        assert_eq!(backups[1].created_at_unix, 100);
     }
 
     #[tokio::test]

@@ -38,7 +38,10 @@ pub trait SshSession: Send {
     /// Reads the contents of a remote file.
     fn read_file(&self, path: &RemotePath) -> impl Future<Output = SshResult<Vec<u8>>> + Send;
 
-    /// Writes bytes to a remote file (create/truncate).
+    /// Creates a private remote file (0600); fails if any entry already exists,
+    /// including a symlink or special file. Backends must enforce exclusive open.
+    /// The Russh backend rejects symlink ancestors and directories writable by
+    /// group/others or owned by a uid other than root/the SSH user.
     ///
     /// Prefer [`write_file_atomic`](Self::write_file_atomic) when replacing an
     /// existing configuration so a crash cannot leave a truncated file.
@@ -48,9 +51,15 @@ pub trait SshSession: Send {
         contents: &[u8],
     ) -> impl Future<Output = SshResult<()>> + Send;
 
-    /// Writes `contents` to a temporary sibling path, flushes, then replaces `path`.
+    /// Writes `contents` inside a private staging directory on the same filesystem,
+    /// flushes, then atomically replaces `path`.
     ///
-    /// Intended for configuration updates after a successful backup.
+    /// Intended for configuration updates after a successful backup. Existing
+    /// ownership, mode and POSIX ACL must be preserved or replacement must fail.
+    /// The Russh backend requires GNU cp on the Linux server to preserve ACL,
+    /// and SFTP posix-rename@openssh.com v1 for replacement. No non-atomic
+    /// fallback is permitted. A transport failure during commit can leave the
+    /// result unknown; callers must not assume the live file is unchanged.
     fn write_file_atomic(
         &self,
         path: &RemotePath,
@@ -70,10 +79,7 @@ pub trait SshSession: Send {
     /// Returns `true` when `path` exists and is a regular file (SFTP metadata).
     ///
     /// Missing paths yield `Ok(false)`. Other SFTP errors are propagated.
-    fn path_is_file(
-        &self,
-        path: &RemotePath,
-    ) -> impl Future<Output = SshResult<bool>> + Send;
+    fn path_is_file(&self, path: &RemotePath) -> impl Future<Output = SshResult<bool>> + Send;
 
     /// Executes a remote command with explicit arguments.
     fn exec(&self, command: &RemoteCommand) -> impl Future<Output = SshResult<ExecResult>> + Send;

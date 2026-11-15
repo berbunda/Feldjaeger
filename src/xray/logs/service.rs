@@ -4,8 +4,8 @@
 //! service name. Never edits log configuration, truncates files, or writes
 //! remote log bodies into application logs.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use feldjaeger_ssh::{ExecResult, RemoteCommand, RemotePath, SshSession};
@@ -74,11 +74,8 @@ impl XrayLogService {
         editable: Option<&EditableXrayConfig>,
     ) -> Vec<XrayLogSourceSummary> {
         let view = config_view_from_editable(editable);
-        let access = summary_for_file_destination(
-            XrayLogSourceKind::AccessFile,
-            &view.access,
-            installation,
-        );
+        let access =
+            summary_for_file_destination(XrayLogSourceKind::AccessFile, &view.access, installation);
         let error =
             summary_for_file_destination(XrayLogSourceKind::ErrorFile, &view.error, installation);
         let journal = summary_for_journal(installation);
@@ -215,21 +212,21 @@ impl XrayLogService {
                 };
                 // Cursor comes from the same journalctl call as the replace payload
                 // so lines between an initial read and follow start are not skipped.
-                let cursor = match read_journal_tail_with_cursor(session, &unit, limit.as_u32()).await
-                {
-                    Ok((entries, cursor)) => {
-                        emit(XrayLogStreamEvent::Replace {
-                            generation,
-                            kind,
-                            entries,
-                        });
-                        cursor
-                    }
-                    Err(error) => {
-                        emit(XrayLogStreamEvent::Failed { generation, error });
-                        return;
-                    }
-                };
+                let cursor =
+                    match read_journal_tail_with_cursor(session, &unit, limit.as_u32()).await {
+                        Ok((entries, cursor)) => {
+                            emit(XrayLogStreamEvent::Replace {
+                                generation,
+                                kind,
+                                entries,
+                            });
+                            cursor
+                        }
+                        Err(error) => {
+                            emit(XrayLogStreamEvent::Failed { generation, error });
+                            return;
+                        }
+                    };
                 follow_journal(session, &unit, generation, kind, cursor, &stop, &mut emit).await
             }
         };
@@ -424,15 +421,12 @@ async fn probe_journal_source<S: SshSession + Sync>(
         return Ok(base);
     }
 
-    let unit = installation
-        .service_name
-        .as_deref()
-        .ok_or_else(|| {
-            XrayLogError::new(
-                XrayLogErrorKind::ServiceNotFound,
-                "No systemd service name from Discovery.",
-            )
-        })?;
+    let unit = installation.service_name.as_deref().ok_or_else(|| {
+        XrayLogError::new(
+            XrayLogErrorKind::ServiceNotFound,
+            "No systemd service name from Discovery.",
+        )
+    })?;
     let service = ServiceName::new(unit).map_err(|error| {
         XrayLogError::new(
             XrayLogErrorKind::ServiceNotFound,
@@ -451,14 +445,7 @@ async fn probe_journal_source<S: SshSession + Sync>(
     let result = exec_program(
         session,
         "journalctl",
-        &[
-            "-u",
-            service.as_str(),
-            "-n",
-            "0",
-            "--no-pager",
-            "-q",
-        ],
+        &["-u", service.as_str(), "-n", "0", "--no-pager", "-q"],
     )
     .await?;
 
@@ -588,12 +575,7 @@ async fn read_file_tail<S: SshSession + Sync>(
         ));
     }
 
-    let result = exec_program(
-        session,
-        "tail",
-        &["-n", &lines.to_string(), "--", path],
-    )
-    .await?;
+    let result = exec_program(session, "tail", &["-n", &lines.to_string(), "--", path]).await?;
 
     if result.exit_code != 0 {
         return Err(map_remote_failure(
@@ -673,12 +655,8 @@ where
         }
 
         let start = offset.saturating_add(1);
-        let result = exec_program(
-            session,
-            "tail",
-            &["-c", &format!("+{start}"), "--", path],
-        )
-        .await?;
+        let result =
+            exec_program(session, "tail", &["-c", &format!("+{start}"), "--", path]).await?;
         if result.exit_code != 0 {
             return Err(map_remote_failure(
                 XrayLogErrorKind::FollowSessionInterrupted,
@@ -733,7 +711,7 @@ where
                 "--after-cursor",
                 &current_cursor,
                 "-n",
-                "500",
+                "100",
                 "--no-pager",
                 "-o",
                 "short-iso",
@@ -806,18 +784,43 @@ async fn read_journal_cursor<S: SshSession + Sync>(
     Ok(extract_cursor(&result.stdout))
 }
 
+// Limit rendered lines on a UTF-8 boundary; truncation is explicit in the view.
+fn bounded_log_line(line: &str) -> String {
+    const MAX: usize = 16 * 1024;
+    if line.len() <= MAX {
+        return line.to_owned();
+    }
+    let mut end = MAX;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{} [line truncated]", &line[..end])
+}
+
 fn entries_from_bytes(bytes: &[u8]) -> Vec<XrayLogEntry> {
     let text = String::from_utf8_lossy(bytes);
-    text.lines()
-        .map(|line| XrayLogEntry::plain(line.to_owned()))
-        .collect()
+    let mut entries: Vec<_> = text
+        .lines()
+        .rev()
+        .take(100)
+        .map(|line| XrayLogEntry::plain(bounded_log_line(line)))
+        .collect();
+    entries.reverse();
+    entries
 }
 
 fn split_journal_output(bytes: &[u8]) -> (Vec<XrayLogEntry>, Option<String>) {
     let text = String::from_utf8_lossy(bytes);
     let mut entries = Vec::new();
     let mut cursor = None;
-    for line in text.lines() {
+    for line in text
+        .lines()
+        .rev()
+        .take(101)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+    {
         if let Some(rest) = line.strip_prefix("-- cursor: ") {
             cursor = Some(rest.trim().to_owned());
             continue;
@@ -825,7 +828,10 @@ fn split_journal_output(bytes: &[u8]) -> (Vec<XrayLogEntry>, Option<String>) {
         if line.starts_with("-- No entries") {
             continue;
         }
-        entries.push(XrayLogEntry::plain(line.to_owned()));
+        entries.push(XrayLogEntry::plain(bounded_log_line(line)));
+    }
+    if entries.len() > 100 {
+        entries.drain(..entries.len() - 100);
     }
     (entries, cursor)
 }
@@ -848,11 +854,8 @@ async fn exec_program<S: SshSession + Sync>(
     program: &str,
     args: &[&str],
 ) -> XrayLogResult<ExecResult> {
-    let command = RemoteCommand::new(
-        program,
-        args.iter().map(|arg| (*arg).to_owned()).collect(),
-    )
-    .map_err(|error| {
+    let command = RemoteCommand::new(program, args.iter().map(|arg| (*arg).to_owned()).collect())
+        .map_err(|error| {
         XrayLogError::new(
             XrayLogErrorKind::RemoteReadFailed,
             sanitize_detail(error.message()),
@@ -872,11 +875,7 @@ async fn exec_program<S: SshSession + Sync>(
     })
 }
 
-fn map_remote_failure(
-    kind: XrayLogErrorKind,
-    result: &ExecResult,
-    summary: &str,
-) -> XrayLogError {
+fn map_remote_failure(kind: XrayLogErrorKind, result: &ExecResult, summary: &str) -> XrayLogError {
     let stderr = String::from_utf8_lossy(&result.stderr);
     let detail = sanitize_detail(stderr.trim());
     warn!(
@@ -978,14 +977,15 @@ mod tests {
             }))
         }
 
-    fn exec_with_stdin(
-        &self,
-        command: &feldjaeger_ssh::RemoteCommand,
-        stdin: &[u8],
-    ) -> impl Future<Output = feldjaeger_ssh::SshResult<feldjaeger_ssh::ExecResult>> + Send {
-        let _ = stdin;
-        self.exec(command)
-    }
+        fn exec_with_stdin(
+            &self,
+            command: &feldjaeger_ssh::RemoteCommand,
+            stdin: &[u8],
+        ) -> impl Future<Output = feldjaeger_ssh::SshResult<feldjaeger_ssh::ExecResult>> + Send
+        {
+            let _ = stdin;
+            self.exec(command)
+        }
 
         async fn disconnect(self) -> SshResult<()> {
             Ok(())
@@ -1014,10 +1014,7 @@ mod tests {
     fn editable_with_log(value: Value) -> EditableXrayConfig {
         let root = json!({ "log": value.clone() });
         let mut sections = XrayConfigSections::empty();
-        sections.set_log(Some(SourcedSection::new(
-            "/etc/xray/config.json",
-            value,
-        )));
+        sections.set_log(Some(SourcedSection::new("/etc/xray/config.json", value)));
         EditableXrayConfig::from_single_file("/etc/xray/config.json", root, sections)
     }
 
@@ -1124,7 +1121,7 @@ mod tests {
                 &installation(Some("xray.service"), InitSystemKind::Systemd),
                 Some(&editable),
                 XrayLogSourceKind::ErrorFile,
-                XrayLogLineLimit::TwoHundred,
+                XrayLogLineLimit::Ten,
             )
             .await
             .expect_err("missing");
@@ -1154,7 +1151,7 @@ mod tests {
                 &installation(Some("xray.service"), InitSystemKind::Systemd),
                 Some(&editable),
                 XrayLogSourceKind::ErrorFile,
-                XrayLogLineLimit::TwoHundred,
+                XrayLogLineLimit::Ten,
             )
             .await
             .expect_err("perm");
@@ -1164,7 +1161,7 @@ mod tests {
     #[tokio::test]
     async fn journal_tail_uses_discovery_unit() {
         let session = MockSession::new().with_result(
-            "journalctl -u custom-xray.service -n 200 --no-pager -o short-iso --show-cursor",
+            "journalctl -u custom-xray.service -n 10 --no-pager -o short-iso --show-cursor",
             ExecResult::new(
                 b"2024-01-01T00:00:00+00:00 host xray[1]: hello\n-- cursor: abc\n".to_vec(),
                 Vec::new(),
@@ -1177,18 +1174,20 @@ mod tests {
                 &installation(Some("custom-xray.service"), InitSystemKind::Systemd),
                 None,
                 XrayLogSourceKind::Journal,
-                XrayLogLineLimit::TwoHundred,
+                XrayLogLineLimit::Ten,
             )
             .await
             .expect("journal");
         assert_eq!(entries.len(), 1);
         assert!(entries[0].message.contains("hello"));
-        assert!(!session
-            .exec_calls
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|c| c.contains("xray.service") && !c.contains("custom-xray.service")));
+        assert!(
+            !session
+                .exec_calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.contains("xray.service") && !c.contains("custom-xray.service"))
+        );
     }
 
     #[tokio::test]
@@ -1208,7 +1207,7 @@ mod tests {
                 ExecResult::new(Vec::new(), Vec::new(), 0),
             )
             .with_result(
-                &format!("tail -n 200 -- {path}"),
+                &format!("tail -n 10 -- {path}"),
                 ExecResult::new(Vec::new(), Vec::new(), 0),
             );
         let editable = editable_with_log(json!({ "access": path }));
@@ -1218,7 +1217,7 @@ mod tests {
                 &installation(Some("xray.service"), InitSystemKind::Systemd),
                 Some(&editable),
                 XrayLogSourceKind::AccessFile,
-                XrayLogLineLimit::TwoHundred,
+                XrayLogLineLimit::Ten,
             )
             .await
             .expect("empty");
@@ -1242,7 +1241,7 @@ mod tests {
                 ExecResult::new(Vec::new(), Vec::new(), 0),
             )
             .with_result(
-                &format!("tail -n 200 -- {path}"),
+                &format!("tail -n 10 -- {path}"),
                 ExecResult::new(b"??? totally unknown !!!\n".to_vec(), Vec::new(), 0),
             );
         let editable = editable_with_log(json!({ "error": path }));
@@ -1252,7 +1251,7 @@ mod tests {
                 &installation(Some("xray.service"), InitSystemKind::Systemd),
                 Some(&editable),
                 XrayLogSourceKind::ErrorFile,
-                XrayLogLineLimit::TwoHundred,
+                XrayLogLineLimit::Ten,
             )
             .await
             .expect("read");
@@ -1276,5 +1275,19 @@ mod tests {
         );
         assert!(!err.detail.contains("1.2.3.4"));
         assert!(!err.detail.contains("SECRET_IP"));
+    }
+}
+
+#[cfg(test)]
+mod byte_limit_tests {
+    use super::*;
+    #[test]
+    fn long_unicode_line_and_many_entries_are_bounded() {
+        let text = "€".repeat(20000);
+        let line = bounded_log_line(&text);
+        assert!(line.len() < 16500);
+        assert!(line.ends_with("[line truncated]"));
+        let entries = entries_from_bytes("line\n".repeat(10000).as_bytes());
+        assert_eq!(entries.len(), 100);
     }
 }

@@ -70,27 +70,27 @@ impl XrayLogAvailability {
 /// Selectable line-count limits for initial / refresh reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum XrayLogLineLimit {
+    /// Last 10 lines (default).
+    Ten = 10,
+    /// Last 20 lines.
+    Twenty = 20,
+    /// Last 50 lines.
+    Fifty = 50,
     /// Last 100 lines.
     Hundred = 100,
-    /// Last 200 lines (default).
-    TwoHundred = 200,
-    /// Last 500 lines.
-    FiveHundred = 500,
-    /// Last 1000 lines.
-    Thousand = 1000,
 }
 
 impl XrayLogLineLimit {
     /// All selectable limits in display order.
     pub const ALL: &'static [Self] = &[
+        Self::Ten,
+        Self::Twenty,
+        Self::Fifty,
         Self::Hundred,
-        Self::TwoHundred,
-        Self::FiveHundred,
-        Self::Thousand,
     ];
 
     /// Default limit for first read.
-    pub const DEFAULT: Self = Self::TwoHundred;
+    pub const DEFAULT: Self = Self::Ten;
 
     /// Numeric line count passed to remote tools.
     pub fn as_u32(self) -> u32 {

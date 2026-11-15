@@ -51,12 +51,12 @@ const HELP_ADD_FILE: HelpText = HelpText::new(
 );
 const HELP_REMOVE_FILE: HelpText = HelpText::new(
     "Only an empty file can be removed. Feldjäger first copies it to \
-     <name>.feldjaeger.bak.<unix time> in the same directory, removes it and runs xray run \
+     <name>.feldjaeger.bak.<unix time>.<path hash>.<uuid> in the same directory, removes it and runs xray run \
      -test; if the test fails, the file is restored. The copy stays on the server, but the \
      Backups page lists backups only for files of the loaded configuration, so it will not show \
      this one — copy it back over SSH if needed.",
     "Удалить можно только пустой файл. Feldjäger сначала копирует его в \
-     <имя>.feldjaeger.bak.<unix-время> в том же каталоге, удаляет и выполняет xray run -test; \
+     <имя>.feldjaeger.bak.<unix-время>.<хеш пути>.<uuid> в том же каталоге, удаляет и выполняет xray run -test; \
      если проверка не прошла, файл восстанавливается. Копия остаётся на сервере, но страница \
      Backups показывает копии только для файлов загруженной конфигурации, поэтому этой копии \
      там не будет — при необходимости верните её по SSH.",

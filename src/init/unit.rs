@@ -3,7 +3,7 @@
 //! Apply pipeline (ASCII):
 //! ```text
 //! UnitSpec → preflight (writable + config readable for User=)
-//!   → backup if exists → write (SFTP or sudo -S install)
+//!   → backup if exists → write (SFTP or stdin-only privileged writer)
 //!   → daemon-reload → on failure restore backup
 //! ```
 //!
@@ -145,9 +145,8 @@ impl UnitSpec {
 /// Absolute path `/etc/systemd/system/{name}`.
 pub fn unit_file_path(unit_name: &ServiceName) -> UnitFileResult<RemotePath> {
     let path = format!("{SYSTEMD_SYSTEM_DIR}/{}", unit_name.as_str());
-    RemotePath::new(path).map_err(|e| {
-        UnitFileError::new(UnitFileErrorKind::InvalidSpec, e.message().to_owned())
-    })
+    RemotePath::new(path)
+        .map_err(|e| UnitFileError::new(UnitFileErrorKind::InvalidSpec, e.message().to_owned()))
 }
 
 /// Returns true if the unit name is an instance (`@`).
@@ -163,7 +162,13 @@ pub fn systemd_quote(path: &str) -> UnitFileResult<String> {
             "path must not contain quotes or newlines",
         ));
     }
-    let needs_quote = path.chars().any(|c| c.is_whitespace() || matches!(c, '\\' | '\'' | '$' | '`' | ';' | '&' | '|' | '<' | '>' | '(' | ')' | '{' | '}'));
+    let needs_quote = path.chars().any(|c| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '\\' | '\'' | '$' | '`' | ';' | '&' | '|' | '<' | '>' | '(' | ')' | '{' | '}'
+            )
+    });
     if needs_quote {
         Ok(format!("\"{path}\""))
     } else {
@@ -248,7 +253,10 @@ pub fn preview_exec_start(spec: &UnitSpec) -> UnitFileResult<String> {
         .find(|l| l.starts_with("ExecStart="))
         .map(str::to_owned)
         .ok_or_else(|| {
-            UnitFileError::new(UnitFileErrorKind::InvalidSpec, "ExecStart missing from render")
+            UnitFileError::new(
+                UnitFileErrorKind::InvalidSpec,
+                "ExecStart missing from render",
+            )
         })
 }
 
@@ -274,19 +282,18 @@ pub async fn probe_unit_file_exists<S: SshSession + Sync>(
     unit_name: &ServiceName,
 ) -> UnitFileResult<bool> {
     let path = unit_file_path(unit_name)?;
-    let cmd = RemoteCommand::new(
-        "test",
-        vec!["-f".to_owned(), path.as_str().to_owned()],
-    )
-    .map_err(|e| UnitFileError::new(UnitFileErrorKind::CommandFailed, e.message().to_owned()))?;
+    let cmd = RemoteCommand::new("test", vec!["-f".to_owned(), path.as_str().to_owned()]).map_err(
+        |e| UnitFileError::new(UnitFileErrorKind::CommandFailed, e.message().to_owned()),
+    )?;
     let result = session.exec(&cmd).await.map_err(map_ssh)?;
     Ok(result.exit_code == 0)
 }
 
 /// Probe root or writable `/etc/systemd/system`.
 pub async fn probe_can_write_unit_dir<S: SshSession + Sync>(session: &S) -> UnitFileResult<bool> {
-    let id_cmd = RemoteCommand::new("id", vec!["-u".to_owned()])
-        .map_err(|e| UnitFileError::new(UnitFileErrorKind::CommandFailed, e.message().to_owned()))?;
+    let id_cmd = RemoteCommand::new("id", vec!["-u".to_owned()]).map_err(|e| {
+        UnitFileError::new(UnitFileErrorKind::CommandFailed, e.message().to_owned())
+    })?;
     let id = session.exec(&id_cmd).await.map_err(map_ssh)?;
     if id.exit_code == 0 {
         let uid = String::from_utf8_lossy(&id.stdout).trim().to_owned();
@@ -295,14 +302,10 @@ pub async fn probe_can_write_unit_dir<S: SshSession + Sync>(session: &S) -> Unit
         }
     }
 
-    let test_cmd = RemoteCommand::new(
-        "test",
-        vec![
-            "-w".to_owned(),
-            SYSTEMD_SYSTEM_DIR.to_owned(),
-        ],
-    )
-    .map_err(|e| UnitFileError::new(UnitFileErrorKind::CommandFailed, e.message().to_owned()))?;
+    let test_cmd = RemoteCommand::new("test", vec!["-w".to_owned(), SYSTEMD_SYSTEM_DIR.to_owned()])
+        .map_err(|e| {
+            UnitFileError::new(UnitFileErrorKind::CommandFailed, e.message().to_owned())
+        })?;
     let result = session.exec(&test_cmd).await.map_err(map_ssh)?;
     Ok(result.exit_code == 0)
 }
@@ -663,47 +666,38 @@ async fn sudo_write_unit_file<S: SshSession + Sync>(
     contents: &[u8],
     password: &str,
 ) -> UnitFileResult<()> {
-    // Write to /tmp then sudo install -m 644
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let tmp = RemotePath::new(format!(
-        "/tmp/feldjaeger-unit.{stamp}.{}",
-        path.as_str().rsplit('/').next().unwrap_or("unit.service")
-    ))
-    .map_err(|e| UnitFileError::new(UnitFileErrorKind::WriteFailed, e.message().to_owned()))?;
-
-    session
-        .write_file(&tmp, contents)
-        .await
-        .map_err(|e| UnitFileError::new(UnitFileErrorKind::WriteFailed, e.message().to_owned()))?;
-
+    if password.contains(['\n', '\r']) {
+        return Err(UnitFileError::new(
+            UnitFileErrorKind::SudoFailed,
+            "sudo password must be a single line",
+        ));
+    }
+    let marker = format!("feldjaeger-{}", uuid::Uuid::new_v4());
     let cmd = RemoteCommand::new(
         "sudo",
         vec![
             "-S".to_owned(),
             "--".to_owned(),
-            "install".to_owned(),
-            "-m".to_owned(),
-            "644".to_owned(),
-            tmp.as_str().to_owned(),
+            "python3".to_owned(),
+            "-I".to_owned(),
+            "-c".to_owned(),
+            include_str!("privileged_unit_write.py").to_owned(),
             path.as_str().to_owned(),
+            marker.clone(),
+            contents.len().to_string(),
         ],
     )
     .map_err(|e| UnitFileError::new(UnitFileErrorKind::CommandFailed, e.message().to_owned()))?;
-
+    // Only a fixed helper and validated positional arguments enter argv. Unit
+    // bytes and password stay on stdin, never in a writable unprivileged file.
     let mut stdin = password.as_bytes().to_vec();
     stdin.push(b'\n');
-    let result = session
-        .exec_with_stdin(&cmd, &stdin)
-        .await
-        .map_err(map_ssh)?;
-    for b in &mut stdin {
-        *b = 0;
-    }
-
-    let _ = session.remove_file(&tmp).await;
+    stdin.extend_from_slice(marker.as_bytes());
+    stdin.push(b'\n');
+    stdin.extend_from_slice(contents);
+    let result = session.exec_with_stdin(&cmd, &stdin).await;
+    stdin.fill(0);
+    let result = result.map_err(map_ssh)?;
 
     if result.exit_code != 0 {
         let stderr = String::from_utf8_lossy(&result.stderr);
@@ -721,7 +715,7 @@ async fn sudo_write_unit_file<S: SshSession + Sync>(
         let detail = crate::logging::redact::sanitize_detail(stderr.trim());
         return Err(UnitFileError::new(
             kind,
-            format!("sudo install unit failed: {detail}"),
+            format!("privileged unit write failed: {detail}"),
         ));
     }
     Ok(())
@@ -816,9 +810,11 @@ mod tests {
             wanted_by: DEFAULT_WANTED_BY.to_owned(),
         };
         let body = render_unit(&spec).unwrap();
-        assert!(body.contains(
-            "ExecStart=\"/opt/my bin/xray\" run -config \"/etc/xray/my config.json\""
-        ));
+        assert!(
+            body.contains(
+                "ExecStart=\"/opt/my bin/xray\" run -config \"/etc/xray/my config.json\""
+            )
+        );
     }
 
     #[test]

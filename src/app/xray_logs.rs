@@ -1,8 +1,8 @@
 //! Xray Logs page model and async workers for [`super::ApplicationService`].
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::thread;
 
 use feldjaeger_ssh::{SshBackend, SshSession};
@@ -196,8 +196,7 @@ pub fn build_xray_logs_page_model(
     runtime: &XrayLogsRuntime,
     remote_busy: bool,
 ) -> XrayLogsPageModel {
-    let privacy_notice =
-        "Xray logs may contain sensitive connection information.".to_owned();
+    let privacy_notice = "Xray logs may contain sensitive connection information.".to_owned();
 
     let (page_state, blocked_reason, sources) = match ssh {
         SshStatus::Connected => match discovery {
@@ -229,10 +228,7 @@ pub fn build_xray_logs_page_model(
         ),
     };
 
-    let selected_source = sources
-        .iter()
-        .find(|s| s.kind == runtime.selected)
-        .cloned();
+    let selected_source = sources.iter().find(|s| s.kind == runtime.selected).cloned();
     let source_readable = selected_source
         .as_ref()
         .map(|s| s.availability.is_readable())
@@ -317,6 +313,7 @@ pub fn apply_xray_log_event(runtime: &mut XrayLogsRuntime, event: XrayLogStreamE
                 return;
             }
             runtime.entries = entries;
+            trim_follow_buffer(runtime);
             let query = runtime.search.query.clone();
             runtime.search.recompute(&runtime.entries, &query);
             if !matches!(runtime.ui_state, XrayLogsUiState::Following) {
@@ -350,13 +347,27 @@ pub fn apply_xray_log_event(runtime: &mut XrayLogsRuntime, event: XrayLogStreamE
     }
 }
 
-/// Keeps at most `line_limit * 2` entries while following to bound GUI memory.
+/// Bounds retained entries by both selected line count and a 4 MiB text budget.
 fn trim_follow_buffer(runtime: &mut XrayLogsRuntime) {
-    let max = (runtime.line_limit.as_u32() as usize).saturating_mul(2).max(100);
+    let max = runtime.line_limit.as_u32() as usize;
     if runtime.entries.len() > max {
         let drop_count = runtime.entries.len() - max;
         runtime.entries.drain(0..drop_count);
     }
+    let mut bytes: usize = runtime
+        .entries
+        .iter()
+        .map(|entry| entry.message.len())
+        .sum();
+    let mut drop_count = 0;
+    for entry in &runtime.entries {
+        if bytes <= 4 * 1024 * 1024 {
+            break;
+        }
+        bytes -= entry.message.len();
+        drop_count += 1;
+    }
+    runtime.entries.drain(..drop_count);
 }
 
 /// Spawns a one-shot read worker (refresh / initial load).
@@ -369,7 +380,7 @@ pub fn spawn_xray_log_read<B>(
     kind: XrayLogSourceKind,
     limit: XrayLogLineLimit,
     generation: u64,
-    tx: Sender<XrayLogStreamEvent>,
+    tx: SyncSender<XrayLogStreamEvent>,
 ) where
     B: SshBackend + Send + 'static,
     B::Session: Sync + 'static,
@@ -444,7 +455,7 @@ pub fn spawn_xray_log_follow<B>(
     limit: XrayLogLineLimit,
     generation: u64,
     stop: Arc<AtomicBool>,
-    tx: Sender<XrayLogStreamEvent>,
+    tx: SyncSender<XrayLogStreamEvent>,
 ) where
     B: SshBackend + Send + 'static,
     B::Session: Sync + 'static,
@@ -582,8 +593,8 @@ pub struct XrayLogProbeOutcome {
 }
 
 /// Helper to create an event channel.
-pub fn xray_log_event_channel() -> (Sender<XrayLogStreamEvent>, Receiver<XrayLogStreamEvent>) {
-    mpsc::channel()
+pub fn xray_log_event_channel() -> (SyncSender<XrayLogStreamEvent>, Receiver<XrayLogStreamEvent>) {
+    mpsc::sync_channel(2)
 }
 
 /// Helper to create a probe channel.
@@ -614,6 +625,41 @@ mod tests {
             config_files: Vec::new(),
             discovery_warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn event_queue_and_retained_bytes_are_bounded() {
+        let (tx, rx) = xray_log_event_channel();
+        for _ in 0..2 {
+            tx.try_send(XrayLogStreamEvent::Append {
+                generation: 0,
+                kind: XrayLogSourceKind::AccessFile,
+                entries: Vec::new(),
+            })
+            .unwrap();
+        }
+        assert!(matches!(
+            tx.try_send(XrayLogStreamEvent::Append {
+                generation: 0,
+                kind: XrayLogSourceKind::AccessFile,
+                entries: Vec::new()
+            }),
+            Err(mpsc::TrySendError::Full(_))
+        ));
+        drop(rx);
+        let mut runtime = XrayLogsRuntime::default();
+        runtime.entries = (0..100)
+            .map(|_| XrayLogEntry::plain("x".repeat(100000)))
+            .collect();
+        trim_follow_buffer(&mut runtime);
+        assert!(
+            runtime
+                .entries
+                .iter()
+                .map(|e| e.message.len())
+                .sum::<usize>()
+                <= 4 * 1024 * 1024
+        );
     }
 
     #[test]
@@ -732,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn follow_append_trims_to_twice_line_limit() {
+    fn follow_append_trims_to_selected_line_limit() {
         let mut runtime = XrayLogsRuntime {
             generation: 1,
             selected: XrayLogSourceKind::Journal,
@@ -752,8 +798,8 @@ mod tests {
                     .collect(),
             },
         );
-        assert_eq!(runtime.entries.len(), 200);
-        assert_eq!(runtime.entries[0].message, "old-10");
+        assert_eq!(runtime.entries.len(), 100);
+        assert_eq!(runtime.entries[0].message, "old-110");
         assert_eq!(runtime.entries.last().unwrap().message, "new-59");
     }
 
